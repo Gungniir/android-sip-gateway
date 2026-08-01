@@ -41,6 +41,7 @@ public class CallManager {
 
     private final Context context;
     private final GatewayConfig config;
+    private final GsmDtmfSender dtmfSender;
 
     // Current calls
     private GatewayCall currentSipCall;
@@ -72,8 +73,14 @@ public class CallManager {
     private CallListener listener;
 
     public CallManager(Context context, GatewayConfig config) {
+        this(context, config, new GsmDtmfSender());
+    }
+
+    // Visible for testing.
+    CallManager(Context context, GatewayConfig config, GsmDtmfSender dtmfSender) {
         this.context = context.getApplicationContext();
         this.config = config;
+        this.dtmfSender = dtmfSender;
     }
 
     public void setListener(CallListener listener) {
@@ -256,6 +263,25 @@ public class CallManager {
                 terminateAllCalls();
             }
         }
+    }
+
+    /**
+     * Handle a DTMF digit pressed on the SIP leg (typically a voice menu on the far end of
+     * the GSM call asking the caller to press something). The digit is replayed on the GSM
+     * leg out-of-band via Telecom.
+     */
+    public void onSipDtmf(String digit) {
+        if (!config.isDtmfRelayEnabled()) {
+            Log.d(TAG, "DTMF relay disabled, ignoring '" + digit + "'");
+            return;
+        }
+
+        if (state == CallState.IDLE || state == CallState.TERMINATING) {
+            Log.d(TAG, "No call in progress, ignoring DTMF '" + digit + "'");
+            return;
+        }
+
+        dtmfSender.enqueue(digit);
     }
 
     // ========== GSM Call Handling ==========
@@ -444,6 +470,9 @@ public class CallManager {
 
         state = CallState.TERMINATING;
         notifyStateChanged();
+
+        // Drop any DTMF still queued for the GSM leg
+        dtmfSender.clear();
 
         // Hangup SIP call
         hangupSipCall();

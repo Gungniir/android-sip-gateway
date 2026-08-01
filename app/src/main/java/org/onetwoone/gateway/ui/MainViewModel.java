@@ -334,6 +334,11 @@ public class MainViewModel extends AndroidViewModel {
                 : "Verbose PJSIP logging off (restart service to apply)");
     }
 
+    public void setDtmfRelay(boolean enabled) {
+        GatewayConfig.getInstance().setDtmfRelayEnabled(enabled);
+        toastMessage.setValue(enabled ? "DTMF relay on" : "DTMF relay off");
+    }
+
     // ========== Configuration ==========
 
     private void loadConfig() {

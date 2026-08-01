@@ -161,4 +161,73 @@ public class CallManagerTest {
         callManager.terminateAllCalls();
         assertTrue("Listener should be called on state change", callbackCalled[0]);
     }
+
+    // ========== DTMF relay ==========
+
+    /** Captures what CallManager hands to the GSM leg instead of touching Telecom. */
+    private static class RecordingDtmfSender extends GsmDtmfSender {
+        final StringBuilder sent = new StringBuilder();
+        int clears;
+
+        @Override
+        public void enqueue(String digits) {
+            sent.append(digits);
+        }
+
+        @Override
+        public void clear() {
+            clears++;
+        }
+    }
+
+    private RecordingDtmfSender withDtmfSender(CallManager.CallState state) throws Exception {
+        RecordingDtmfSender sender = new RecordingDtmfSender();
+        callManager = new CallManager(app, GatewayConfig.getInstance(), sender);
+
+        java.lang.reflect.Field stateField = CallManager.class.getDeclaredField("state");
+        stateField.setAccessible(true);
+        stateField.set(callManager, state);
+
+        return sender;
+    }
+
+    @Test
+    public void testDtmfIsRelayedDuringACall() throws Exception {
+        RecordingDtmfSender sender = withDtmfSender(CallManager.CallState.BRIDGED);
+
+        callManager.onSipDtmf("1");
+        callManager.onSipDtmf("#");
+
+        assertEquals("Digits should reach the GSM leg", "1#", sender.sent.toString());
+    }
+
+    @Test
+    public void testDtmfIsIgnoredWhenIdle() throws Exception {
+        RecordingDtmfSender sender = withDtmfSender(CallManager.CallState.IDLE);
+
+        callManager.onSipDtmf("1");
+
+        assertEquals("No call in progress, nothing to relay", "", sender.sent.toString());
+    }
+
+    @Test
+    public void testDtmfIsIgnoredWhenRelayDisabled() throws Exception {
+        RecordingDtmfSender sender = withDtmfSender(CallManager.CallState.BRIDGED);
+        GatewayConfig.getInstance().setDtmfRelayEnabled(false);
+
+        callManager.onSipDtmf("1");
+
+        assertEquals("Relay is off", "", sender.sent.toString());
+
+        GatewayConfig.getInstance().setDtmfRelayEnabled(true);
+    }
+
+    @Test
+    public void testPendingDtmfIsDroppedOnTermination() throws Exception {
+        RecordingDtmfSender sender = withDtmfSender(CallManager.CallState.BRIDGED);
+
+        callManager.terminateAllCalls();
+
+        assertEquals("Queued digits must not outlive the call", 1, sender.clears);
+    }
 }

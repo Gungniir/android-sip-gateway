@@ -74,6 +74,7 @@ public class GatewayConfig {
     private static final String KEY_TEST_DESTINATION = "test_destination";
     private static final String KEY_TEST_MODE = "test_mode";  // tone | loopback | bridge
     private static final String KEY_VERBOSE_SIP_LOG = "verbose_sip_log";
+    private static final String KEY_DTMF_RELAY = "dtmf_relay";
 
     // ========== Default SIP diagnostics values ==========
     // *43 is the FreePBX echo test: Asterisk answers and echoes audio back, so a single
@@ -290,6 +291,15 @@ public class GatewayConfig {
 
     public void setVerboseSipLog(boolean enabled) {
         gatewayPrefs.edit().putBoolean(KEY_VERBOSE_SIP_LOG, enabled).apply();
+    }
+
+    /** Replay DTMF digits pressed on the SIP leg onto the GSM leg (far-end voice menus). */
+    public boolean isDtmfRelayEnabled() {
+        return gatewayPrefs.getBoolean(KEY_DTMF_RELAY, true);
+    }
+
+    public void setDtmfRelayEnabled(boolean enabled) {
+        gatewayPrefs.edit().putBoolean(KEY_DTMF_RELAY, enabled).apply();
     }
 
     // ========== Audio Configuration ==========

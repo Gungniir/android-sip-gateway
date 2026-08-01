@@ -265,6 +265,13 @@
             android:text="Verbose PJSIP logging (level 5, needs restart)"
             android:textSize="12sp"/>
 
+        <CheckBox
+            android:id="@+id/dtmfRelayCheckbox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Relay DTMF from SIP to GSM (far-end voice menus)"
+            android:textSize="12sp"/>
+
         <TextView
             android:id="@+id/testReportText"
             android:layout_width="match_parent"

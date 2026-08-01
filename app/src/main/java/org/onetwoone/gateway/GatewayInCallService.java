@@ -343,6 +343,51 @@ public class GatewayInCallService extends InCallService {
         }
     }
 
+    /**
+     * Start a DTMF tone on the GSM leg (out-of-band, via the modem - it does not go
+     * through the ALSA bridge, so mic mute does not affect it).
+     *
+     * Telecom treats the tone as a level, not a one-shot: it keeps playing until
+     * {@link #stopDtmfTone()}, so every successful call here must be paired with one.
+     *
+     * @return true if the tone was started
+     */
+    public boolean playDtmfTone(char digit) {
+        Call call = currentCall;
+        if (call == null) {
+            Log.w(TAG, "No GSM call, dropping DTMF '" + digit + "'");
+            return false;
+        }
+
+        int state = call.getState();
+        if (state != Call.STATE_ACTIVE) {
+            Log.w(TAG, "GSM call is " + stateToString(state) + ", dropping DTMF '" + digit + "'");
+            return false;
+        }
+
+        try {
+            call.playDtmfTone(digit);
+            return true;
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to play DTMF '" + digit + "': " + e.getMessage());
+            return false;
+        }
+    }
+
+    /** Stop the tone started by {@link #playDtmfTone(char)}. */
+    public void stopDtmfTone() {
+        Call call = currentCall;
+        if (call == null) {
+            return;
+        }
+
+        try {
+            call.stopDtmfTone();
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to stop DTMF: " + e.getMessage());
+        }
+    }
+
     private String stateToString(int state) {
         switch (state) {
             case Call.STATE_NEW: return "NEW";

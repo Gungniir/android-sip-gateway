@@ -17,4 +17,11 @@ public interface SipCallService {
      * @param call The call
      */
     void onCallMediaState(GatewayCall call);
+
+    /**
+     * Called when the SIP peer presses a DTMF digit (RFC4733 or SIP INFO).
+     * @param call The call the digit arrived on
+     * @param digit Single digit: 0-9, *, #, A-D
+     */
+    void onDtmfDigit(GatewayCall call, String digit);
 }

@@ -94,6 +94,7 @@ public class MainActivity extends AppCompatActivity {
     private Button testCallButton;
     private Button testHangupButton;
     private CheckBox verboseSipLogCheckbox;
+    private CheckBox dtmfRelayCheckbox;
     private TextView testReportText;
 
     private static final String[] TEST_MODES = {"tone", "loopback", "bridge"};
@@ -189,6 +190,7 @@ public class MainActivity extends AppCompatActivity {
         testCallButton = findViewById(R.id.testCallButton);
         testHangupButton = findViewById(R.id.testHangupButton);
         verboseSipLogCheckbox = findViewById(R.id.verboseSipLogCheckbox);
+        dtmfRelayCheckbox = findViewById(R.id.dtmfRelayCheckbox);
         testReportText = findViewById(R.id.testReportText);
     }
 
@@ -427,6 +429,10 @@ public class MainActivity extends AppCompatActivity {
         verboseSipLogCheckbox.setChecked(config.isVerboseSipLog());
         verboseSipLogCheckbox.setOnCheckedChangeListener(
                 (button, checked) -> viewModel.setVerboseSipLog(checked));
+
+        dtmfRelayCheckbox.setChecked(config.isDtmfRelayEnabled());
+        dtmfRelayCheckbox.setOnCheckedChangeListener(
+                (button, checked) -> viewModel.setDtmfRelay(checked));
     }
 
     // ========== UI Updates ==========

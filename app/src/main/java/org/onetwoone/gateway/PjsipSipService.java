@@ -418,6 +418,17 @@ public class PjsipSipService extends Service implements SipCallService {
         }
     }
 
+    // Callback from GatewayCall (SipCallService interface)
+    @Override
+    public void onDtmfDigit(GatewayCall call, String digit) {
+        // The diagnostic test call has no GSM leg to relay onto.
+        if (testCall != null && testCall.owns(call)) {
+            Log.d(TAG, "DTMF on test call, ignored: " + digit);
+            return;
+        }
+        callManager.onSipDtmf(digit);
+    }
+
     // ========== GSM Call Handling ==========
 
     @SuppressWarnings("deprecation")
