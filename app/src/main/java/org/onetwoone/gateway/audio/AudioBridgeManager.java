@@ -6,6 +6,7 @@ import android.util.Log;
 import org.onetwoone.gateway.GatewayCall;
 import org.onetwoone.gateway.GsmAudioPort;
 import org.onetwoone.gateway.config.GatewayConfig;
+import org.onetwoone.gateway.diag.SipDiagnostics;
 import org.pjsip.pjsua2.*;
 
 /**
@@ -26,6 +27,12 @@ public class AudioBridgeManager {
     // Static to survive service restart (like Endpoint)
     private static GsmAudioPort gsmAudioPort;
     private boolean bridgeActive = false;
+
+    // The call media currently wired to gsmAudioPort, kept so stopBridge() can unwire
+    // exactly what startBridge() wired. Leaving conference links dangling across calls
+    // is how a port ends up with a stale listener count.
+    private AudioMedia wiredCallMedia;
+    private int wiredConfSlot = -1;
 
     public interface BridgeListener {
         void onBridgeStarted();
@@ -81,11 +88,6 @@ public class AudioBridgeManager {
      * Connects GsmAudioPort to the call's audio media.
      */
     public void startBridge(GatewayCall call) {
-        if (bridgeActive) {
-            Log.w(TAG, "Bridge already active");
-            return;
-        }
-
         if (gsmAudioPort == null) {
             Log.e(TAG, "Audio port not initialized");
             notifyError("Audio port not initialized");
@@ -101,6 +103,26 @@ public class AudioBridgeManager {
 
                 if (mediaInfo.getType() == pjmedia_type.PJMEDIA_TYPE_AUDIO &&
                     mediaInfo.getStatus() == pjsua_call_media_status.PJSUA_CALL_MEDIA_ACTIVE) {
+
+                    int confSlot = mediaInfo.getAudioConfSlot();
+
+                    // Only skip when the conference links are still live. PJSIP destroys
+                    // and re-creates the media stream on every re-INVITE/UPDATE - it
+                    // sends one itself right after the 200 OK to lock the codec - which
+                    // silently drops every link while keeping the same slot number. An
+                    // early return here is what leaves the transmit leg dead
+                    // (onFrameRequested stays at 0).
+                    if (bridgeActive && SipDiagnostics.isTransmitting(gsmAudioPort, confSlot)) {
+                        Log.d(TAG, "Bridge already wired to conf slot " + confSlot);
+                        return;
+                    }
+                    if (bridgeActive) {
+                        Log.i(TAG, "Conference links lost (media stream re-created), rewiring");
+                        // Deliberately no stopTransmit: the old port is already gone and
+                        // its slot may have been handed to somebody else.
+                        wiredCallMedia = null;
+                        wiredConfSlot = -1;
+                    }
 
                     AudioMedia audioMedia = AudioMedia.typecastFromMedia(call.getMedia(i));
 
@@ -121,9 +143,16 @@ public class AudioBridgeManager {
                     // Connect: SIP -> GSM (call audio -> our audio port)
                     audioMedia.startTransmit(gsmAudioPort);
 
+                    wiredCallMedia = audioMedia;
+                    wiredConfSlot = confSlot;
                     bridgeActive = true;
 
                     Log.i(TAG, "Audio bridge started");
+
+                    // Prove the conference links actually took: a source port with no
+                    // listener is never pulled by the bridge, so onFrameRequested would
+                    // stay at zero and nothing would ever reach SIP.
+                    SipDiagnostics.dumpAndLog(call, gsmAudioPort, "startBridge");
 
                     if (listener != null) {
                         listener.onBridgeStarted();
@@ -152,9 +181,7 @@ public class AudioBridgeManager {
 
         Log.d(TAG, "Stopping audio bridge");
 
-        // The GsmAudioPort handles cleanup internally
-        // We just mark the bridge as inactive
-
+        unwireBridge();
         bridgeActive = false;
 
         if (listener != null) {
@@ -162,6 +189,35 @@ public class AudioBridgeManager {
         }
 
         Log.i(TAG, "Audio bridge stopped");
+    }
+
+    /**
+     * Drop the conference-bridge links made by {@link #startBridge}.
+     *
+     * The call media may already be gone (call disconnected before we got here), so
+     * failures are expected and only logged at debug level.
+     */
+    private void unwireBridge() {
+        if (wiredCallMedia == null) {
+            wiredConfSlot = -1;
+            return;
+        }
+
+        if (gsmAudioPort != null) {
+            try {
+                gsmAudioPort.stopTransmit(wiredCallMedia);
+            } catch (Exception e) {
+                Log.d(TAG, "stopTransmit GSM->SIP: " + e.getMessage());
+            }
+            try {
+                wiredCallMedia.stopTransmit(gsmAudioPort);
+            } catch (Exception e) {
+                Log.d(TAG, "stopTransmit SIP->GSM: " + e.getMessage());
+            }
+        }
+
+        wiredCallMedia = null;
+        wiredConfSlot = -1;
     }
 
     /**
@@ -229,6 +285,16 @@ public class AudioBridgeManager {
      */
     public boolean isInitialized() {
         return gsmAudioPort != null;
+    }
+
+    /** The GSM audio port, or null before {@link #initialize()}. For diagnostics. */
+    public GsmAudioPort getGsmAudioPort() {
+        return gsmAudioPort;
+    }
+
+    /** True when the ALSA capture/playback devices are open (i.e. a GSM call is up). */
+    public boolean isAudioStreaming() {
+        return gsmAudioPort != null && gsmAudioPort.isCapturing();
     }
 
     /**
