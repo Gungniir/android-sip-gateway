@@ -3,7 +3,7 @@
 const CONFIG_FIELDS = [
     'sip_server', 'sip_port', 'sip_user', 'sip_password',
     'use_tls', 'sip_realm', 'sim1_destination', 'sim2_destination',
-    'audio_card', 'audio_route', 'tx_gain', 'rx_gain', 'mute_preset',
+    'audio_profile', 'audio_card', 'audio_route', 'tx_gain', 'rx_gain', 'mute_preset',
     'manual_mute_controls'
 ];
 
@@ -26,6 +26,7 @@ async function loadConfig() {
         document.getElementById('sip_realm').value = data.sip_realm || '';
         document.getElementById('sim1_destination').value = data.sim1_destination || '';
         document.getElementById('sim2_destination').value = data.sim2_destination || '';
+        document.getElementById('audio_profile').value = data.audio_profile || 'auto';
         document.getElementById('audio_card').value = data.audio_card || 0;
         document.getElementById('audio_route').value = data.audio_route || 'MultiMedia1';
         document.getElementById('tx_gain').value = data.tx_gain !== undefined ? data.tx_gain : 0;
@@ -153,6 +154,7 @@ async function saveConfig(e) {
         sip_realm: document.getElementById('sip_realm').value,
         sim1_destination: document.getElementById('sim1_destination').value,
         sim2_destination: document.getElementById('sim2_destination').value,
+        audio_profile: document.getElementById('audio_profile').value,
         audio_card: parseInt(document.getElementById('audio_card').value) || 0,
         audio_route: document.getElementById('audio_route').value,
         tx_gain: parseFloat(document.getElementById('tx_gain').value) || 0,

@@ -426,7 +426,10 @@ public class PjsipSipService extends Service implements SipCallService {
         }
 
         if (state == TelephonyManager.CALL_STATE_IDLE && lastPhoneState != TelephonyManager.CALL_STATE_IDLE) {
-            // GSM call ended
+            // GSM call ended. Always stop the audio streams so the mixer routing
+            // is torn down even for calls that never reached the BRIDGED state
+            // (otherwise the enforce thread would keep the local mic muted).
+            audioBridge.stopAudioStreams();
             callManager.onGsmCallEnded();
         }
 
@@ -450,15 +453,22 @@ public class PjsipSipService extends Service implements SipCallService {
             audioBridge.startAudioStreams();
             callManager.onGsmCallConnected();
 
-            // Mute device speaker/mic in background (takes ~6 seconds)
-            // This prevents local sounds but we don't block audio start
-            new Thread(() -> {
-                DeviceMuteManager.getInstance(this).muteAll();
-            }, "MuteControls").start();
+            // Mute device speaker/mic in background (takes ~6 seconds).
+            // Skipped when the SoC audio profile mutes the mic as part of its
+            // routing (e.g. MediaTek disables PCM_2_PB <- ADDA_UL in setupMixer).
+            if (!audioBridge.handlesMicMute()) {
+                new Thread(() -> {
+                    DeviceMuteManager.getInstance(this).muteAll();
+                }, "MuteControls").start();
+            } else {
+                Log.d(TAG, "Mic mute handled by audio profile - skipping DeviceMuteManager");
+            }
         } else if (state == android.telecom.Call.STATE_DISCONNECTED) {
             callManager.onGsmCallEnded();
-            // Restore device speaker/mic
-            DeviceMuteManager.getInstance(this).unmuteAll();
+            // Restore device speaker/mic (only if DeviceMuteManager was used)
+            if (!audioBridge.handlesMicMute()) {
+                DeviceMuteManager.getInstance(this).unmuteAll();
+            }
         }
     }
 

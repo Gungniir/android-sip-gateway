@@ -34,8 +34,10 @@ public class GsmAudioNative {
      * @return true on success
      */
     public static native boolean open(int card, int captureDevice, int playbackDevice,
-                                       int sampleRate, int channels, int bits,
-                                       int periodSize, int periodCount);
+                                       int captureRate, int captureChannels,
+                                       int playbackRate, int playbackChannels,
+                                       int bits, int capturePeriod, int playbackPeriod,
+                                       int periodCount);
 
     /**
      * Close audio devices.
@@ -67,6 +69,15 @@ public class GsmAudioNative {
      * @return true on success
      */
     public static native boolean setMixerControl(int card, String controlName, int value);
+
+    /**
+     * Get a mixer control's current integer value (value index 0).
+     *
+     * @param card        Sound card number
+     * @param controlName Mixer control name
+     * @return the control value, or -1 if the control is missing / on error
+     */
+    public static native int getMixerControl(int card, String controlName);
 
     /**
      * Set mixer control ENUM value by string.

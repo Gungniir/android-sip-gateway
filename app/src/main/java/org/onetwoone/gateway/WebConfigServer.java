@@ -133,6 +133,7 @@ public class WebConfigServer extends NanoHTTPD {
 
             // Audio settings
             SharedPreferences audioPrefs = context.getSharedPreferences("gsm_audio_config", Context.MODE_PRIVATE);
+            json.put("audio_profile", audioPrefs.getString("audio_profile", "auto"));
             json.put("audio_card", audioPrefs.getInt("card", 0));
             json.put("audio_route", audioPrefs.getString("multimedia_route", "MultiMedia1"));
 
@@ -242,6 +243,7 @@ public class WebConfigServer extends NanoHTTPD {
 
             // Save audio settings
             SharedPreferences.Editor audioEditor = context.getSharedPreferences("gsm_audio_config", Context.MODE_PRIVATE).edit();
+            if (json.has("audio_profile")) audioEditor.putString("audio_profile", json.getString("audio_profile"));
             if (json.has("audio_card")) audioEditor.putInt("card", json.getInt("audio_card"));
             if (json.has("audio_route")) audioEditor.putString("multimedia_route", json.getString("audio_route"));
             if (json.has("tx_gain")) audioEditor.putFloat("tx_gain", (float) json.getDouble("tx_gain"));

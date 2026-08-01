@@ -68,6 +68,7 @@ public class GatewayConfig {
     private static final String KEY_MULTIMEDIA_ROUTE = "multimedia_route";
     private static final String KEY_MUTE_PRESET = "mute_preset";
     private static final String KEY_MIC_MUTE_CONTROLS = "mic_mute_decs";
+    private static final String KEY_AUDIO_PROFILE = "audio_profile";  // auto | qualcomm | mediatek
     private static final String KEY_TX_GAIN = "tx_gain";  // GSM → SIP
     private static final String KEY_RX_GAIN = "rx_gain";  // SIP → GSM
 
@@ -285,6 +286,20 @@ public class GatewayConfig {
 
     public void setPlaybackDevice(int device) {
         audioPrefs.edit().putInt(KEY_PLAYBACK_DEVICE, device).apply();
+    }
+
+    // ========== Audio Profile (SoC) ==========
+
+    /**
+     * SoC audio profile selector: "auto" (default), "qualcomm", or "mediatek".
+     * Controls which mixer topology GsmAudioPort uses for the call-audio bridge.
+     */
+    public String getAudioProfile() {
+        return audioPrefs.getString(KEY_AUDIO_PROFILE, "auto");
+    }
+
+    public void setAudioProfile(String profile) {
+        audioPrefs.edit().putString(KEY_AUDIO_PROFILE, profile).apply();
     }
 
     // ========== Mute Preset ==========

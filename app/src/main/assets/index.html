@@ -63,11 +63,21 @@
             <h2>Audio Settings</h2>
             <div class="row">
                 <div class="field">
+                    <label for="audio_profile">SoC Profile</label>
+                    <select id="audio_profile" name="audio_profile">
+                        <option value="auto">Auto-detect</option>
+                        <option value="qualcomm">Qualcomm (VOC_REC / Incall_Music)</option>
+                        <option value="mediatek">MediaTek (PCM_2)</option>
+                    </select>
+                </div>
+                <div class="field">
                     <label for="audio_card">Sound Card</label>
                     <input type="number" id="audio_card" name="audio_card" value="0">
                 </div>
+            </div>
+            <div class="row">
                 <div class="field">
-                    <label for="audio_route">Multimedia Route</label>
+                    <label for="audio_route">Multimedia Route (Qualcomm)</label>
                     <input type="text" id="audio_route" name="audio_route" placeholder="MultiMedia1">
                 </div>
             </div>

@@ -57,8 +57,8 @@ public class AudioBridgeManager {
         try {
             Log.d(TAG, "Initializing GSM audio port...");
 
-            // Create GsmAudioPort - it loads config from SharedPreferences
-            gsmAudioPort = new GsmAudioPort(context);
+            // Create GsmAudioPort - it selects the SoC audio profile from config
+            gsmAudioPort = new GsmAudioPort(context, config);
 
             // Initialize native audio
             if (!gsmAudioPort.initialize()) {
@@ -229,6 +229,17 @@ public class AudioBridgeManager {
      */
     public boolean isInitialized() {
         return gsmAudioPort != null;
+    }
+
+    /**
+     * Whether the active SoC audio profile already mutes the local mic as part of
+     * its mixer routing. When true, callers must NOT run DeviceMuteManager.
+     * Defaults to false if the port isn't initialized yet.
+     */
+    public boolean handlesMicMute() {
+        return gsmAudioPort != null
+                && gsmAudioPort.getProfile() != null
+                && gsmAudioPort.getProfile().handlesMicMute();
     }
 
     /**
