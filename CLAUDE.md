@@ -22,6 +22,7 @@ Android app (Java, package `org.onetwoone.gateway`) that turns a rooted Qualcomm
 - Runtime requires: Qualcomm chipset, root (Magisk), SELinux permissive, and the app set as default dialer (ROLE_DIALER) so `GatewayInCallService` binds.
 - **Never mute the mic via `AudioManager`** — it breaks the `Incall_Music` ALSA playback path. Mic mute must go through the ALSA mixer (`DeviceMuteManager`).
 - GSM CallerID crosses SIP in a custom `X-GSM-CallerID` header; the SMS sender number rides in the SIP `From` display name.
-- The PBX is Asterisk (FreePBX). FreeSWITCH is not supported.
+- The PBX chooses which SIM an outbound GSM call leaves on via a custom `X-GSM-SIM` header (`1` or `2`) on the incoming INVITE or MESSAGE (`SipHeaderReader`). Absent the header, the app falls back to mapping the caller extension to a slot (`GatewayConfig.getSimSlotForCaller`).
+- The PBX is Asterisk (FreePBX). FreeSWITCH is not supported. Two separate server-side configs live here: `asterisk-config/` (plain Asterisk, hand-written dialplan) and `freepbx/` (FreePBX, mostly GUI-managed — see its own CLAUDE.md).
 - Lint: `./gradlew lintDebug` — pre-existing issues are baselined in `app/lint-baseline.xml`; only new issues fail. Release builds are not lint-gated. No code formatter is configured.
 - The app can be controlled via exported broadcasts: `org.onetwoone.gateway.{START,STOP,CONFIGURE,GET_STATUS}` (`GatewayControlReceiver`).

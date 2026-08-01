@@ -121,8 +121,11 @@ public class CallManager {
     /**
      * Handle incoming SIP call.
      * This will answer the SIP call and extract destination for GSM call.
+     *
+     * @param simSlotHint SIM slot the PBX requested via X-GSM-SIM, or 0 to fall back to
+     *                    deriving the slot from the caller extension
      */
-    public void onIncomingSipCall(GatewayCall call) {
+    public void onIncomingSipCall(GatewayCall call, int simSlotHint) {
         if (state != CallState.IDLE) {
             Log.w(TAG, "Already have active call, rejecting incoming");
             rejectCall(call);
@@ -140,7 +143,7 @@ public class CallManager {
             Log.d(TAG, "Incoming SIP call from: " + remoteUri);
 
             // Extract GSM destination and SIM slot from headers or URI
-            extractCallDetails(call, info);
+            extractCallDetails(call, info, simSlotHint);
 
             // Answer the call
             answerSipCall(call);
@@ -155,7 +158,7 @@ public class CallManager {
     /**
      * Extract destination number and SIM slot from SIP call.
      */
-    private void extractCallDetails(GatewayCall call, CallInfo info) throws Exception {
+    private void extractCallDetails(GatewayCall call, CallInfo info, int simSlotHint) throws Exception {
         // SIP URIs:
         // - remoteUri = caller (e.g., "102" <sip:102@server>)
         // - localUri = called destination (e.g., <sip:+79810293335@server>)
@@ -166,9 +169,14 @@ public class CallManager {
         // Extract destination from LOCAL URI (the number being called = GSM destination)
         String dest = extractPhoneNumber(localUri);
 
-        // Determine SIM slot from caller extension in remote URI
-        String callerExt = extractExtension(remoteUri);
-        int simSlot = config.getSimSlotForCaller(callerExt);
+        // The PBX picks the SIM with X-GSM-SIM. Without that header - an older dialplan, or a
+        // call that reached us some other way - derive it from the caller extension instead.
+        int simSlot = simSlotHint;
+        String simSource = "header";
+        if (simSlot == 0) {
+            simSlot = config.getSimSlotForCaller(extractExtension(remoteUri));
+            simSource = "caller ext";
+        }
 
         if (dest == null || dest.isEmpty()) {
             Log.e(TAG, "No destination in localUri: " + localUri);
@@ -178,7 +186,7 @@ public class CallManager {
         pendingGsmDestination = dest;
         pendingGsmSimSlot = simSlot;
 
-        Log.d(TAG, "Call details: dest=" + dest + ", SIM=" + simSlot);
+        Log.d(TAG, "Call details: dest=" + dest + ", SIM=" + simSlot + " (from " + simSource + ")");
     }
 
     /**

@@ -27,7 +27,7 @@ public class SipAccountManager {
 
     public interface AccountListener {
         void onRegistrationState(boolean registered, String reason);
-        void onIncomingCall(GatewayAccount account, int callId);
+        void onIncomingCall(GatewayAccount account, int callId, int simSlotHint);
         void onInstantMessage(String from, String to, String body, int simSlot);
     }
 
@@ -224,10 +224,13 @@ public class SipAccountManager {
 
         @Override
         public void onIncomingCall(OnIncomingCallParam prm) {
-            Log.d(TAG, "Incoming call, callId=" + prm.getCallId());
+            int simSlotHint = readSimSlotHint(prm.getRdata());
+
+            Log.d(TAG, "Incoming call, callId=" + prm.getCallId()
+                    + (simSlotHint > 0 ? ", " + SipHeaderReader.SIM_HEADER + "=" + simSlotHint : ""));
 
             if (listener != null) {
-                listener.onIncomingCall(this, prm.getCallId());
+                listener.onIncomingCall(this, prm.getCallId(), simSlotHint);
             }
         }
 
@@ -239,8 +242,11 @@ public class SipAccountManager {
                 String body = prm.getMsgBody();
                 String contentType = prm.getContentType();
 
-                // Determine SIM slot from caller extension
-                int simSlot = config.getSimSlotForCaller(extractExtension(from));
+                // The PBX picks the SIM with X-GSM-SIM; without it, fall back to the caller extension.
+                int simSlot = readSimSlotHint(prm.getRdata());
+                if (simSlot == 0) {
+                    simSlot = config.getSimSlotForCaller(extractExtension(from));
+                }
 
                 Log.i(TAG, ">>> RECEIVED SIP MESSAGE: from=" + from + ", to=" + to + ", body=\"" + body + "\", contentType=" + contentType + ", SIM=" + simSlot);
 
@@ -253,6 +259,19 @@ public class SipAccountManager {
                 }
             } catch (Exception e) {
                 Log.e(TAG, "Error handling IM: " + e.getMessage());
+            }
+        }
+
+        /**
+         * Read the SIM slot the PBX requested, or 0 when it did not ask for one.
+         * Never throws - a missing or unreadable rdata just means "no preference".
+         */
+        private int readSimSlotHint(SipRxData rdata) {
+            try {
+                return rdata == null ? 0 : SipHeaderReader.readSimSlot(rdata.getWholeMsg());
+            } catch (Exception e) {
+                Log.w(TAG, "Could not read " + SipHeaderReader.SIM_HEADER + ": " + e.getMessage());
+                return 0;
             }
         }
 

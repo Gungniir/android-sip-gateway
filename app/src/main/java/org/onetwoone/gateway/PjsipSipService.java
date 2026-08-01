@@ -319,10 +319,10 @@ public class PjsipSipService extends Service implements SipCallService {
         }
 
         @Override
-        public void onIncomingCall(GatewayAccount account, int callId) {
+        public void onIncomingCall(GatewayAccount account, int callId, int simSlotHint) {
             try {
                 GatewayCall call = new GatewayCall(PjsipSipService.this, account, callId);
-                mainHandler.post(() -> handleIncomingSipCall(call));
+                mainHandler.post(() -> handleIncomingSipCall(call, simSlotHint));
             } catch (Exception e) {
                 Log.e(TAG, "Error creating call: " + e.getMessage());
             }
@@ -336,10 +336,10 @@ public class PjsipSipService extends Service implements SipCallService {
 
     // ========== Call Handling ==========
 
-    private void handleIncomingSipCall(GatewayCall call) {
+    private void handleIncomingSipCall(GatewayCall call, int simSlotHint) {
         Log.d(TAG, "Incoming SIP call");
         powerController.wakeScreen();
-        callManager.onIncomingSipCall(call);
+        callManager.onIncomingSipCall(call, simSlotHint);
     }
 
     private final CallManager.CallListener callListener = new CallManager.CallListener() {
