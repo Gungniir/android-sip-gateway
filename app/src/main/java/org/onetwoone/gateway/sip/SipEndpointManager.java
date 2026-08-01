@@ -263,12 +263,28 @@ public class SipEndpointManager {
             tlsConfig.setVerifyServer(false);
             tlsConfig.setVerifyClient(false);
 
-            endpoint.transportCreate(pjsip_transport_type_e.PJSIP_TRANSPORT_TLS, transportConfig);
+            try {
+                endpoint.transportCreate(pjsip_transport_type_e.PJSIP_TRANSPORT_TLS, transportConfig);
+            } catch (Exception e) {
+                // Port 5061 may be taken (e.g. by the phone's IMS/VoLTE stack) - fall back to ephemeral port.
+                // The PBX learns our contact from REGISTER, so the local port doesn't matter.
+                Log.w(TAG, "TLS port 5061 unavailable, falling back to ephemeral port: " + e.getMessage());
+                transportConfig.setPort(0);
+                endpoint.transportCreate(pjsip_transport_type_e.PJSIP_TRANSPORT_TLS, transportConfig);
+            }
             Log.d(TAG, "Created TLS transport");
         } else {
             // UDP transport
             transportConfig.setPort(5060);
-            endpoint.transportCreate(pjsip_transport_type_e.PJSIP_TRANSPORT_UDP, transportConfig);
+            try {
+                endpoint.transportCreate(pjsip_transport_type_e.PJSIP_TRANSPORT_UDP, transportConfig);
+            } catch (Exception e) {
+                // Port 5060 may be taken (e.g. by the phone's IMS/VoLTE stack) - fall back to ephemeral port.
+                // The PBX learns our contact from REGISTER, so the local port doesn't matter.
+                Log.w(TAG, "UDP port 5060 unavailable, falling back to ephemeral port: " + e.getMessage());
+                transportConfig.setPort(0);
+                endpoint.transportCreate(pjsip_transport_type_e.PJSIP_TRANSPORT_UDP, transportConfig);
+            }
             Log.d(TAG, "Created UDP transport");
         }
     }
