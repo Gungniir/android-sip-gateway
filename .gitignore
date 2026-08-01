@@ -24,12 +24,10 @@ crash.log
 *.jpg
 *.png
 
-# FreeSWITCH configs (not for public repo)
-freeswitch-config/
-freeswitch-lxc/
-
-# Documentation (keep only README.md)
+# Documentation (keep only README.md and Claude Code files)
 *.md
 !README.md
+!CLAUDE.md
+!SKILL.md
 openvpn_configs
 wireguard/

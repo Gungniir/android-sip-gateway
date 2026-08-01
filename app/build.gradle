@@ -61,10 +61,12 @@ android {
         targetCompatibility JavaVersion.VERSION_1_8
     }
 
-    // Disable lint checks for release builds (not for Google Play)
+    // Lint: run with ./gradlew lintDebug; release builds are not gated (not for Google Play).
+    // Pre-existing issues are captured in lint-baseline.xml — only new issues fail the build.
     lint {
         checkReleaseBuilds false
-        abortOnError false
+        abortOnError true
+        baseline file('lint-baseline.xml')
     }
 
     // jniLibs for PJSIP native libraries
@@ -98,9 +100,6 @@ dependencies {
 
     // WorkManager for battery watchdog (runs even if service dies)
     implementation 'androidx.work:work-runtime:2.7.1'
-
-    // Linphone SIP SDK - SRTP/TLS encryption, SIP header access
-    implementation 'org.linphone:linphone-sdk-android:5.3.77'
 
     // NanoHTTPD for embedded web config server
     implementation 'org.nanohttpd:nanohttpd:2.3.1'
