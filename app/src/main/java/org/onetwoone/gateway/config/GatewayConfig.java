@@ -71,6 +71,15 @@ public class GatewayConfig {
     private static final String KEY_AUDIO_PROFILE = "audio_profile";  // auto | qualcomm | mediatek
     private static final String KEY_TX_GAIN = "tx_gain";  // GSM → SIP
     private static final String KEY_RX_GAIN = "rx_gain";  // SIP → GSM
+    private static final String KEY_TEST_DESTINATION = "test_destination";
+    private static final String KEY_TEST_MODE = "test_mode";  // tone | loopback | bridge
+    private static final String KEY_VERBOSE_SIP_LOG = "verbose_sip_log";
+
+    // ========== Default SIP diagnostics values ==========
+    // *43 is the FreePBX echo test: Asterisk answers and echoes audio back, so a single
+    // call exercises both media directions without a second party.
+    private static final String DEFAULT_TEST_DESTINATION = "*43";
+    private static final String DEFAULT_TEST_MODE = "tone";
 
     // ========== Default audio device values ==========
     private static final int DEFAULT_CAPTURE_DEVICE = 0;
@@ -252,6 +261,35 @@ public class GatewayConfig {
 
     public void setWebInterfaceEnabled(boolean enabled) {
         gatewayPrefs.edit().putBoolean(KEY_WEB_INTERFACE_ENABLED, enabled).apply();
+    }
+
+    // ========== SIP Diagnostics (test call) ==========
+
+    /** Destination dialled by the diagnostic test call. Defaults to the FreePBX echo test. */
+    public String getTestDestination() {
+        return gatewayPrefs.getString(KEY_TEST_DESTINATION, DEFAULT_TEST_DESTINATION);
+    }
+
+    public void setTestDestination(String destination) {
+        gatewayPrefs.edit().putString(KEY_TEST_DESTINATION, destination).apply();
+    }
+
+    /** Audio source for the diagnostic test call: "tone", "loopback" or "bridge". */
+    public String getTestMode() {
+        return gatewayPrefs.getString(KEY_TEST_MODE, DEFAULT_TEST_MODE);
+    }
+
+    public void setTestMode(String mode) {
+        gatewayPrefs.edit().putString(KEY_TEST_MODE, mode).apply();
+    }
+
+    /** Raise the PJSIP log level to 5 so full SIP messages (incl. SDP) are logged. */
+    public boolean isVerboseSipLog() {
+        return gatewayPrefs.getBoolean(KEY_VERBOSE_SIP_LOG, false);
+    }
+
+    public void setVerboseSipLog(boolean enabled) {
+        gatewayPrefs.edit().putBoolean(KEY_VERBOSE_SIP_LOG, enabled).apply();
     }
 
     // ========== Audio Configuration ==========

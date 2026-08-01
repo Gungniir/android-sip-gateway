@@ -15,6 +15,7 @@ import android.util.Log;
  * - org.onetwoone.gateway.STOP          - остановить шлюз
  * - org.onetwoone.gateway.CONFIGURE     - настроить конфигурацию SIP
  * - org.onetwoone.gateway.GET_STATUS    - получить статус (результат в результирующем Intent)
+ * - org.onetwoone.gateway.TEST_CALL     - диагностический SIP-звонок (без GSM-плеча)
  *
  * Параметры для CONFIGURE (extras):
  * - sip_server (String)          - адрес SIP сервера
@@ -26,6 +27,15 @@ import android.util.Log;
  * - sim1_destination (String)    - SIP ext для SIM1 (GSM→SIP)
  * - sim2_destination (String)    - SIP ext для SIM2 (GSM→SIP)
  * - incoming_mode (int)          - режим входящих звонков (0=SIP_FIRST, 1=ANSWER_FIRST)
+ *
+ * Параметры для TEST_CALL (extras):
+ * - destination (String)         - куда звонить (по умолчанию из настроек, "*43")
+ * - mode (String)                - tone | loopback | bridge
+ * - duration (int)               - авто-отбой через N секунд
+ * - stop (boolean)               - завершить текущий тестовый звонок
+ *
+ * adb shell am broadcast -a org.onetwoone.gateway.TEST_CALL \
+ *     --es destination '*43' --es mode tone --ei duration 20
  *
  * Пример использования из другого приложения:
  *
@@ -58,6 +68,7 @@ public class GatewayControlReceiver extends BroadcastReceiver {
     public static final String ACTION_STOP = "org.onetwoone.gateway.STOP";
     public static final String ACTION_CONFIGURE = "org.onetwoone.gateway.CONFIGURE";
     public static final String ACTION_GET_STATUS = "org.onetwoone.gateway.GET_STATUS";
+    public static final String ACTION_TEST_CALL = "org.onetwoone.gateway.TEST_CALL";
 
     @Override
     public void onReceive(Context context, Intent intent) {
@@ -82,6 +93,10 @@ public class GatewayControlReceiver extends BroadcastReceiver {
             case ACTION_GET_STATUS:
                 // TODO: реализовать получение статуса (нужен ResultReceiver или ContentProvider)
                 Log.i(TAG, "GET_STATUS not yet implemented");
+                break;
+
+            case ACTION_TEST_CALL:
+                testCall(intent);
                 break;
 
             default:
@@ -123,6 +138,28 @@ public class GatewayControlReceiver extends BroadcastReceiver {
             Intent intent = new Intent(context, PjsipSipService.class);
             context.stopService(intent);
         }
+    }
+
+    private void testCall(Intent intent) {
+        PjsipSipService service = PjsipSipService.getInstance();
+        if (service == null) {
+            Log.w(TAG, "Gateway service not running, cannot place test call");
+            return;
+        }
+
+        if (intent.getBooleanExtra("stop", false)) {
+            Log.i(TAG, "Stopping test call");
+            service.stopTestCall();
+            return;
+        }
+
+        String destination = intent.getStringExtra("destination");
+        String mode = intent.getStringExtra("mode");
+        int duration = intent.getIntExtra("duration", 0);
+
+        Log.i(TAG, "Test call: destination=" + destination + " mode=" + mode
+                + " duration=" + duration);
+        service.startTestCall(destination, mode, duration);
     }
 
     private void configure(Context context, Intent intent) {

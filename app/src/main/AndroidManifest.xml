@@ -119,6 +119,7 @@
                 <action android:name="org.onetwoone.gateway.STOP" />
                 <action android:name="org.onetwoone.gateway.CONFIGURE" />
                 <action android:name="org.onetwoone.gateway.GET_STATUS" />
+                <action android:name="org.onetwoone.gateway.TEST_CALL" />
             </intent-filter>
         </receiver>
 

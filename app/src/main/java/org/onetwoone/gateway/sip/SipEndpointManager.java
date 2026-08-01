@@ -5,6 +5,8 @@ import android.os.Looper;
 import android.util.Log;
 
 import org.onetwoone.gateway.config.GatewayConfig;
+import org.onetwoone.gateway.diag.PjsipLogWriter;
+import org.onetwoone.gateway.diag.SipDiagnostics;
 import org.pjsip.pjsua2.*;
 
 import java.util.concurrent.CountDownLatch;
@@ -209,10 +211,15 @@ public class SipEndpointManager {
         uaConfig.setUserAgent("GatewayPJSIP/1.0");
         uaConfig.setMaxCalls(4);
 
-        // Log config
+        // Log config. Without an explicit writer PJSIP logs to stdout, which Android
+        // discards - route it to logcat (and a ring buffer the diagnostics can read) so
+        // SIP messages and SDP are actually visible. msgLogging=1 includes full bodies.
         LogConfig logConfig = epConfig.getLogConfig();
-        logConfig.setLevel(4);
-        logConfig.setConsoleLevel(4);
+        int logLevel = config.isVerboseSipLog() ? 5 : 4;
+        logConfig.setLevel(logLevel);
+        logConfig.setConsoleLevel(logLevel);
+        logConfig.setMsgLogging(1);
+        logConfig.setWriter(PjsipLogWriter.get());
 
         // Media config
         MediaConfig mediaConfig = epConfig.getMedConfig();
@@ -237,6 +244,10 @@ public class SipEndpointManager {
 
         // Disable video codecs
         disableVideoCodecs();
+
+        // Log the audio codec inventory once: tells us at a glance whether the codecs
+        // the PBX allows are even compiled into this PJSIP build.
+        Log.i(TAG, SipDiagnostics.dumpCodecs());
 
         // Set null audio device (we use custom audio bridging)
         setNullAudioDevice();

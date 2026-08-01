@@ -55,6 +55,9 @@ public class MainViewModel extends AndroidViewModel {
     private final MutableLiveData<String> manualMuteControls = new MutableLiveData<>("");
     private final MutableLiveData<List<TinymixManager.MixerControl>> availableControls = new MutableLiveData<>();
 
+    // SIP diagnostics (test call)
+    private final MutableLiveData<String> testReport = new MutableLiveData<>("No test call yet");
+
     // Managers
     private final TinymixManager tinymixManager;
     private final PermissionManager permissionManager;
@@ -163,6 +166,10 @@ public class MainViewModel extends AndroidViewModel {
 
     public LiveData<List<TinymixManager.MixerControl>> getAvailableControls() {
         return availableControls;
+    }
+
+    public LiveData<String> getTestReport() {
+        return testReport;
     }
 
     public LiveData<PermissionManager.PermissionState> getPermissionState() {
@@ -285,6 +292,46 @@ public class MainViewModel extends AndroidViewModel {
         serviceState.setValue(state);
         statusText.setValue(state.statusMessage);
         isRegistered.setValue(state.isRegistered);
+
+        if (pjsipService != null) {
+            String report = pjsipService.getTestCallReport();
+            if (report != null && !report.isEmpty()) {
+                testReport.setValue(report);
+            }
+        }
+    }
+
+    // ========== SIP Diagnostics ==========
+
+    /**
+     * Place a diagnostic SIP call (no GSM leg). Destination and mode are persisted so
+     * the same settings come back on the next launch.
+     */
+    public void startTestCall(String destination, String mode) {
+        if (pjsipService == null) {
+            toastMessage.setValue("Service not connected");
+            return;
+        }
+
+        GatewayConfig config = GatewayConfig.getInstance();
+        config.setTestDestination(destination);
+        config.setTestMode(mode);
+
+        pjsipService.startTestCall(destination, mode, 0);
+        toastMessage.setValue("Test call to " + destination + " (" + mode + ")");
+    }
+
+    public void stopTestCall() {
+        if (pjsipService != null) {
+            pjsipService.stopTestCall();
+        }
+    }
+
+    public void setVerboseSipLog(boolean enabled) {
+        GatewayConfig.getInstance().setVerboseSipLog(enabled);
+        toastMessage.setValue(enabled
+                ? "Verbose PJSIP logging on (restart service to apply)"
+                : "Verbose PJSIP logging off (restart service to apply)");
     }
 
     // ========== Configuration ==========

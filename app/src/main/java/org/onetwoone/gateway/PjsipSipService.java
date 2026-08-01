@@ -19,6 +19,8 @@ import android.util.Log;
 import org.onetwoone.gateway.audio.AudioBridgeManager;
 import org.onetwoone.gateway.call.CallManager;
 import org.onetwoone.gateway.config.GatewayConfig;
+import org.onetwoone.gateway.diag.SipTestCallManager;
+import org.onetwoone.gateway.diag.SipUriBuilder;
 import org.onetwoone.gateway.power.PowerController;
 import org.onetwoone.gateway.sip.ReconnectionStrategy;
 import org.onetwoone.gateway.sip.ServiceWatchdog;
@@ -58,6 +60,7 @@ public class PjsipSipService extends Service implements SipCallService {
     private ServiceWatchdog watchdog;
     private SmsHandler smsHandler;
     private WebConfigServer webServer;
+    private SipTestCallManager testCall;
 
     // Telephony
     private TelephonyManager telephonyManager;
@@ -129,6 +132,10 @@ public class PjsipSipService extends Service implements SipCallService {
 
         // Audio bridge
         audioBridge = new AudioBridgeManager(this, config);
+
+        // Diagnostic SIP test call (no GSM leg) - see SipTestCallManager
+        testCall = new SipTestCallManager(this, config, accountManager, audioBridge,
+                this, mainHandler);
 
         // Reconnection strategy
         reconnection = new ReconnectionStrategy(this::attemptReconnect);
@@ -384,12 +391,23 @@ public class PjsipSipService extends Service implements SipCallService {
     // Callback from GatewayCall (SipCallService interface)
     @Override
     public void onCallState(GatewayCall call, int state) {
+        // The diagnostic test call must stay out of the GSM state machine: no GSM dial,
+        // no terminateAllCalls(), no automatic bridge wiring.
+        if (testCall != null && testCall.owns(call)) {
+            testCall.onCallState(state);
+            return;
+        }
         callManager.onSipCallState(call, state);
     }
 
     // Callback from GatewayCall (SipCallService interface)
     @Override
     public void onCallMediaState(GatewayCall call) {
+        if (testCall != null && testCall.owns(call)) {
+            testCall.onMediaState();
+            return;
+        }
+
         try {
             CallInfo info = call.getInfo();
             if (info.getState() == pjsip_inv_state.PJSIP_INV_STATE_CONFIRMED) {
@@ -626,7 +644,7 @@ public class PjsipSipService extends Service implements SipCallService {
             boolean useTls = config.isUseTls();
 
             // Build SIP URI (with TLS transport if enabled)
-            String uri = "sip:" + destination + "@" + server + (useTls ? ";transport=tls" : "");
+            String uri = SipUriBuilder.build(destination, server, useTls);
 
             GatewayCall call = new GatewayCall(this, account);
 
@@ -661,6 +679,41 @@ public class PjsipSipService extends Service implements SipCallService {
 
     public synchronized void hangupCall() {
         callManager.terminateAllCalls();
+    }
+
+    // ========== SIP diagnostics ==========
+
+    /**
+     * Place a diagnostic SIP call that needs no GSM leg.
+     *
+     * @param destination extension to dial, empty for the configured default (*43)
+     * @param mode        "tone", "loopback" or "bridge"
+     * @param durationSec auto-hangup after this many seconds, 0 for the default
+     */
+    public void startTestCall(String destination, String mode, int durationSec) {
+        if (testCall == null) {
+            Log.w(TAG, "Test call manager not ready");
+            return;
+        }
+        if (callManager.getCurrentSipCall() != null) {
+            Log.w(TAG, "Refusing test call: a gateway SIP call is in progress");
+            return;
+        }
+        testCall.start(destination, SipTestCallManager.Mode.parse(mode), durationSec);
+    }
+
+    public void stopTestCall() {
+        if (testCall != null) {
+            testCall.stop();
+        }
+    }
+
+    public boolean isTestCallActive() {
+        return testCall != null && testCall.isActive();
+    }
+
+    public String getTestCallReport() {
+        return testCall == null ? "" : testCall.getReport();
     }
 
     public void stop() {

@@ -199,6 +199,84 @@
                 android:text="Disconnect"/>
         </LinearLayout>
 
+        <!-- SIP Diagnostics: test call without a GSM leg -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="SIP Diagnostics:"
+            android:textStyle="bold"
+            android:layout_marginTop="8dp"/>
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Places a SIP call with no GSM leg. *43 is the FreePBX echo test."
+            android:textSize="11sp"
+            android:textColor="#666666"
+            android:layout_marginBottom="4dp"/>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="4dp">
+
+            <EditText
+                android:id="@+id/testDestination"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:hint="Destination"
+                android:inputType="text"
+                android:importantForAutofill="no"/>
+
+            <Spinner
+                android:id="@+id/testModeSpinner"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"/>
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="4dp">
+
+            <Button
+                android:id="@+id/testCallButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Test Call"/>
+
+            <Button
+                android:id="@+id/testHangupButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Hang Up"/>
+        </LinearLayout>
+
+        <CheckBox
+            android:id="@+id/verboseSipLogCheckbox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Verbose PJSIP logging (level 5, needs restart)"
+            android:textSize="12sp"/>
+
+        <TextView
+            android:id="@+id/testReportText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="No test call yet"
+            android:background="#f0f0f0"
+            android:padding="8dp"
+            android:fontFamily="monospace"
+            android:textSize="9sp"
+            android:textIsSelectable="true"
+            android:layout_marginBottom="16dp"/>
+
         <!-- Battery Charge Limit -->
         <TextView
             android:layout_width="match_parent"

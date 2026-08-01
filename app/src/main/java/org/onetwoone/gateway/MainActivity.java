@@ -88,6 +88,16 @@ public class MainActivity extends AppCompatActivity {
     private Switch webInterfaceSwitch;
     private TextView webInterfaceLabel;
 
+    // SIP diagnostics (test call)
+    private EditText testDestinationEdit;
+    private Spinner testModeSpinner;
+    private Button testCallButton;
+    private Button testHangupButton;
+    private CheckBox verboseSipLogCheckbox;
+    private TextView testReportText;
+
+    private static final String[] TEST_MODES = {"tone", "loopback", "bridge"};
+
     // Selected values (for spinners)
     private int selectedCard = 0;
     private int selectedCaptureDevice = 0;
@@ -108,6 +118,7 @@ public class MainActivity extends AppCompatActivity {
         setupSpinners();
         setupDevicePresetSpinner();
         setupWebInterfaceSwitch();
+        setupTestCallControls();
 
         // Initialize permissions via root
         viewModel.initPermissions();
@@ -172,6 +183,13 @@ public class MainActivity extends AppCompatActivity {
 
         webInterfaceSwitch = findViewById(R.id.webInterfaceSwitch);
         webInterfaceLabel = findViewById(R.id.webInterfaceLabel);
+
+        testDestinationEdit = findViewById(R.id.testDestination);
+        testModeSpinner = findViewById(R.id.testModeSpinner);
+        testCallButton = findViewById(R.id.testCallButton);
+        testHangupButton = findViewById(R.id.testHangupButton);
+        verboseSipLogCheckbox = findViewById(R.id.verboseSipLogCheckbox);
+        testReportText = findViewById(R.id.testReportText);
     }
 
     private void setupObservers() {
@@ -243,6 +261,13 @@ public class MainActivity extends AppCompatActivity {
         // Available mixer controls
         viewModel.getAvailableControls().observe(this, this::populateMuteCheckboxes);
 
+        // SIP diagnostics report
+        viewModel.getTestReport().observe(this, report -> {
+            if (report != null && !report.isEmpty()) {
+                testReportText.setText(report);
+            }
+        });
+
         // Toast messages
         viewModel.getToastMessage().observe(this, msg -> {
             if (msg != null && !msg.isEmpty()) {
@@ -257,6 +282,11 @@ public class MainActivity extends AppCompatActivity {
         disconnectButton.setOnClickListener(v -> viewModel.stopService());
         saveAudioButton.setOnClickListener(v -> saveAudioConfig());
         restartButton.setOnClickListener(v -> viewModel.restartService());
+
+        testCallButton.setOnClickListener(v -> viewModel.startTestCall(
+                testDestinationEdit.getText().toString().trim(),
+                TEST_MODES[testModeSpinner.getSelectedItemPosition()]));
+        testHangupButton.setOnClickListener(v -> viewModel.stopTestCall());
 
         // Incoming call mode
         incomingModeRadioGroup.setOnCheckedChangeListener((group, checkedId) -> {
@@ -372,6 +402,31 @@ public class MainActivity extends AppCompatActivity {
             viewModel.setWebInterfaceEnabled(isChecked);
             updateWebInterfaceLabel(isChecked);
         });
+    }
+
+    private void setupTestCallControls() {
+        GatewayConfig config = GatewayConfig.getInstance();
+
+        testDestinationEdit.setText(config.getTestDestination());
+
+        ArrayAdapter<String> modeAdapter = new ArrayAdapter<>(this,
+            android.R.layout.simple_spinner_item, TEST_MODES);
+        modeAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        testModeSpinner.setAdapter(modeAdapter);
+
+        String savedMode = config.getTestMode();
+        for (int i = 0; i < TEST_MODES.length; i++) {
+            if (TEST_MODES[i].equals(savedMode)) {
+                testModeSpinner.setSelection(i);
+                break;
+            }
+        }
+
+        // Set the initial value before wiring the listener so restoring it doesn't
+        // count as a user change.
+        verboseSipLogCheckbox.setChecked(config.isVerboseSipLog());
+        verboseSipLogCheckbox.setOnCheckedChangeListener(
+                (button, checked) -> viewModel.setVerboseSipLog(checked));
     }
 
     // ========== UI Updates ==========

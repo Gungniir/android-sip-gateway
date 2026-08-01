@@ -126,6 +126,25 @@ public class GatewayConfigTest {
     }
 
     @Test
+    public void testSipDiagnosticsDefaults() {
+        assertEquals("Default test destination should be the FreePBX echo test",
+                "*43", config.getTestDestination());
+        assertEquals("Default test mode should be tone", "tone", config.getTestMode());
+        assertFalse("Verbose SIP logging should be off by default", config.isVerboseSipLog());
+    }
+
+    @Test
+    public void testSipDiagnosticsRoundTrip() {
+        config.setTestDestination("101");
+        config.setTestMode("loopback");
+        config.setVerboseSipLog(true);
+
+        assertEquals("Test destination should be stored", "101", config.getTestDestination());
+        assertEquals("Test mode should be stored", "loopback", config.getTestMode());
+        assertTrue("Verbose SIP logging should be stored", config.isVerboseSipLog());
+    }
+
+    @Test
     public void testAudioConfig() {
         assertEquals("Default audio card should be 0", 0, config.getAudioCard());
         assertEquals("Default multimedia route should be MultiMedia1", "MultiMedia1", config.getMultimediaRoute());
