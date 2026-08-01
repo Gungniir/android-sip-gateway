@@ -9,7 +9,7 @@ This app bridges GSM calls and SMS to VoIP (SIP), allowing:
 - **GSM→SIP calls**: Receive incoming GSM calls and route them to PBX
 - **SMS GSM↔SIP**: Bidirectional SMS forwarding via SIP MESSAGE
 - **Dual-SIM support**: Per-SIM routing (SIM1↔ext101, SIM2↔ext102)
-- **Video calls**: H264/VP8 video between SIP clients via FreeSWITCH
+- **Video calls**: H264/VP8 video between SIP clients via the PBX
 - **TLS/SRTP encryption**: Secure external SIP access
 - **Web configuration**: Browser-based settings on port 8080
 - **Auto-reconnect**: Exponential backoff (5s → 60s) on connection loss
@@ -32,8 +32,8 @@ This app bridges GSM calls and SMS to VoIP (SIP), allowing:
 
 ### Software
 - Android 8.1+ (LineageOS recommended)
-- SIP PBX: FreeSWITCH (recommended) or Asterisk
-- See `freeswitch-config/` for PBX configuration examples
+- SIP PBX: Asterisk (FreePBX)
+- See `asterisk-config/` for PBX configuration examples
 
 ### Important!
 - **Qualcomm only!** Uses Qualcomm-specific mixer controls: `VOC_REC_DL`, `VOC_REC_UL`, `Incall_Music`
@@ -288,7 +288,7 @@ tinymix -D 0 "DEC1 MUX" "ZERO"
 
 ```
 ┌─────────────┐     SIP/RTP      ┌─────────────────┐    ALSA/tinyalsa   ┌─────────┐
-│ FreeSWITCH  │ <──────────────> │  Gateway App    │ <────────────────> │   GSM   │
+│  Asterisk   │ <──────────────> │  Gateway App    │ <────────────────> │   GSM   │
 │    PBX      │                  │  (PJSIP + JNI)  │                    │  Modem  │
 └─────────────┘                  └─────────────────┘                    └─────────┘
 ```
