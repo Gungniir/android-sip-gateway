@@ -79,6 +79,10 @@ public class SipEndpointManager {
         if (endpoint == null) {
             return false;
         }
+        // Called from several threads that pjlib did not create - the reconnect
+        // scheduler and the service-restart path among them - and an unregistered
+        // caller aborts the process instead of throwing. Cheap when already known.
+        registerThread(Thread.currentThread().getName());
         try {
             // Use transportEnum() to get list of transport IDs
             IntVector transports = endpoint.transportEnum();
@@ -136,6 +140,14 @@ public class SipEndpointManager {
                 throw new TlsChangedException(endpointUseTls, useTls);
             } else {
                 Log.d(TAG, "Reusing existing endpoint");
+
+                // The endpoint outlives the service, so this branch runs on whichever
+                // thread restarted it - "SipInit", never the thread that created the
+                // endpoint. Its caller only registers with pjlib *after* createEndpoint()
+                // returns, and pjlib aborts the process the first time an unknown thread
+                // calls in, so hasTransport() below would kill us before we ever got
+                // there. Register up front.
+                registerThread(Thread.currentThread().getName());
 
                 // CRITICAL: Check if transport exists when reusing endpoint
                 // If transport is missing (e.g. after previous creation failure), recreate it
@@ -349,6 +361,13 @@ public class SipEndpointManager {
         }
 
         try {
+            // libIsThreadRegistered() is a thread-local lookup, not a pj_thread_this()
+            // call, so it is safe on a thread pjlib has never seen - which is the whole
+            // point of asking. Skipping the re-register also stops each pass from
+            // leaking another thread descriptor into pjsua's pool.
+            if (endpoint.libIsThreadRegistered()) {
+                return true;
+            }
             endpoint.libRegisterThread(threadName);
             Log.d(TAG, "Thread registered: " + threadName);
             return true;
