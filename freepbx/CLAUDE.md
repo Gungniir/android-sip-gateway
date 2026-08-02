@@ -74,6 +74,13 @@ endpoint's own identity and authenticates it). Each gateway trunk sets
 **Context = `from-gsm-gateway`**, which turns that header into a real CallerID and then
 hands the call straight back to `from-pstn` so normal Inbound Routes still apply.
 
+The CallerID it builds is `"GW2SIM1 +7…" <*021+7…>` — readable number in the name, prefixed
+number in the *number*, so calling back from the phone's history returns on the SIM that was
+called instead of taking the caller's default route. Two consequences of the prefix living
+in `CALLERID(num)`: a softphone will not match the caller against its address book, and
+`app-blacklist-check` sees the prefixed string, so blacklist entries would have to be
+written that way. The display name is what phones show when it is set, which is always here.
+
 ## SMS: SIP MESSAGE both ways
 
 SMS reuses the DID plan, but a MESSAGE never *runs* an Inbound or Outbound Route — routes
