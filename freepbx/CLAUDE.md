@@ -14,9 +14,9 @@ routing is GUI-managed and only the files below are hand-written.
 | File | Live path | Hand-written? |
 |---|---|---|
 | `extensions_custom.conf` | `/etc/asterisk/extensions_custom.conf` | yes — calls and SMS |
-| `globals_custom.conf` | `/etc/asterisk/globals_custom.conf` | yes — the gateway→endpoint and SMS maps |
+| `globals_custom.conf` | `/etc/asterisk/globals_custom.conf` | yes — the gateway→endpoint map and the SMS domain, nothing else |
 | `pjsip.endpoint_custom_post.conf` | `/etc/asterisk/pjsip.endpoint_custom_post.conf` | yes — `message_context` only |
-| `func_odbc_custom.conf` | `/etc/asterisk/func_odbc_custom.conf` | yes — Inbound Route lookup for SMS |
+| `func_odbc_custom.conf` | `/etc/asterisk/func_odbc_custom.conf` | yes — reads Inbound/Outbound Routes for SMS |
 | `freepbx-generated.reference.conf` | several | **no** — GUI output, snapshot only |
 
 `freepbx-generated.reference.conf` is a read-only record of what the GUI produced, so a
@@ -29,14 +29,25 @@ redacted.
 DIDs follow `10<gw><sim>`, and the dialplan decodes the gateway and SIM out of the number
 itself — that is what keeps it generic:
 
-| DID | Meaning |
-|---|---|
-| 1011 / 1012 | gateway 1 (`gw1rn9`), SIM 1 / SIM 2 |
-| 1021 / 1022 | gateway 2, SIM 1 / SIM 2 |
-| 2001, 2002 | softphones |
+| DID | Label | Prefix | Meaning |
+|---|---|---|---|
+| 1011 / 1012 | GW1SIM1 / GW1SIM2 | `*011` / `*012` | gateway 1 (`gw1rn9`), SIM 1 / SIM 2 |
+| 1021 / 1022 | GW2SIM1 / GW2SIM2 | `*021` / `*022` | gateway 2 (`gw2rn7`), SIM 1 / SIM 2 |
+| 2001, 2002 | | | softphones |
 
 The same number means the same thing in both directions: outbound it selects a SIM,
 inbound it says which SIM rang.
+
+A SIM has exactly two other spellings, and both are the DID again: **`GW<gw>SIM<sim>`** is
+what a human sees, **`*0<gw><sim>`** is what you dial — literally `*0` plus the DID's last
+two digits. The prefix has to name the gateway too, not just the slot: `*1` used to mean
+"SIM 1" and became ambiguous the moment a second gateway existed, so a redial off a GW2
+call went out GW1. The `*0` namespace was chosen because it is the only one on this box
+with no feature code in it — `*9…` collides with `_*91.` (call-forward-busy deactivate) and
+a bare `*21` with `_*21X!` (Find Me/Follow Me).
+
+The slot the app is told about (`X-GSM-SIM`) is still just 1 or 2 — the gateway is the
+endpoint the INVITE went to, so the app never needs to know its own number.
 
 ## Outbound: SIP → GSM
 
@@ -50,10 +61,10 @@ The app reads that header in `SipHeaderReader.readSimSlot()` and `CallManager` u
 pick the SIM. The `b()` predial handler is essential — it runs on the *outbound* channel,
 the only place `PJSIP_HEADER(add,...)` reaches the INVITE.
 
-`[gsm-out]` also rewrites `CONNECTEDLINE` so the caller sees `SIM1 +7…` as the name and a
-redial-able `*1+7…` as the number.
+`[gsm-out]` also rewrites `CONNECTEDLINE` so the caller sees `GW2SIM1 +7…` as the name and
+a redial-able `*021+7…` as the number.
 
-Prefix `*1`/`*2` forces a SIM; without a prefix the outbound route's **CallerId column**
+Prefix `*0<gw><sim>` forces a SIM; without a prefix the outbound route's **CallerId column**
 gives each softphone its default SIM. No dialplan change needed for either.
 
 ## Inbound: GSM → SIP
@@ -65,33 +76,41 @@ hands the call straight back to `from-pstn` so normal Inbound Routes still apply
 
 ## SMS: SIP MESSAGE both ways
 
-SMS reuses the DID plan, but none of it goes through Inbound/Outbound Routes — routes only
-exist for calls. A MESSAGE is routed by the endpoint's **`message_context`**, which FreePBX
-has no GUI field for, so it lives in `pjsip.endpoint_custom_post.conf`.
+SMS reuses the DID plan, but a MESSAGE never *runs* an Inbound or Outbound Route — routes
+are call dialplan. It is routed by the endpoint's **`message_context`**, which FreePBX has
+no GUI field for, so it lives in `pjsip.endpoint_custom_post.conf`; the routes are then
+*read* out of FreePBX's database instead of executed (see below).
 
 ```
 GSM  -> SIP   app MESSAGEs sip:1011@pbx, X-GSM-CallerID: +7…
               → [from-gsm-sms] → Inbound Route for 1011 → MessageSend to 2001
-SIP  -> GSM   2001 MESSAGEs +7… (or *1+7… to force a SIM)
+SIP  -> GSM   2001 MESSAGEs +7… (or *011+7… to force a SIM)
               → [gsm-sms-out] → [gsm-sms-send] → MESSAGE to gw1rn9, X-GSM-SIM: 1
 ```
 
-**Inbound Routes decide where an SMS goes**, but not by running — the route is call
-dialplan (`sub-record-check`, `AGI(sangomacrm.agi)`, then `Goto(from-did-direct,2001,1)`
-into a `Dial()`), and none of that survives a message channel. Instead `ODBC_GSMSMSDEST()`
-reads the route's destination out of `asterisk.incoming` and takes the extension from the
-Goto triple, so the GUI stays the single place a DID is pointed somewhere. `GSMSMSTO_<did>`
-in `globals_custom.conf` is only the fallback — no route, a route to something that cannot
-receive an SMS, or a lost `func_odbc.conf` include.
+**The GUI decides SMS routing too, by being read rather than run.** A route is call dialplan
+(`sub-record-check`, `AGI(sangomacrm.agi)`, then `Goto(from-did-direct,2001,1)` into a
+`Dial()`), and none of that survives a message channel — so `func_odbc_custom.conf` queries
+FreePBX's own tables for the same two answers:
+
+| | reads | answers |
+|---|---|---|
+| `ODBC_GSMSMSDEST(<did>)` | `asterisk.incoming` | which extension an **Inbound Route** points a SIM DID at — the extension comes out of the destination's Goto triple |
+| `ODBC_GSMSMSSIM(<ext>)` | `outbound_route_patterns` → `outbound_route_trunks` → `trunks` | which SIM DID an extension's **Outbound Route** (the one whose CallerID column is that extension) calls from, taken from the trunk's `Local/<did>*$OUTNUM$@gsm-out/n` dial string |
+
+So an extension's SMS always leaves on the same SIM its calls do, and there is no parallel
+map to keep in step. There is no fallback layer: if the `#include func_odbc_custom.conf`
+line goes missing, both lookups return nothing and SMS stops with a logged reason
+(`No SMS destination for <did>` / `No SIM for <ext>`) rather than quietly rerouting.
 
 The app must have its SIM destinations set to the SIM DIDs (`1011` / `1012`) — that is what
 tells the dialplan which SIM took the SMS, exactly like a call's DID.
 
 Details worth knowing:
 
-- **The inbound From is `"SIM1 +7…" <sip:*1+7…@domain>`** — number in the display name,
-  `*<sim>` prefixed in the URI, so a reply goes back out the SIM it arrived on. Same trick
-  as `CONNECTEDLINE` in `[gsm-out]`.
+- **The inbound From is `"GW2SIM1 +7…" <sip:*021+7…@domain>`** — number in the display name,
+  `*0<gw><sim>` prefixed in the URI, so a reply goes back out the SIM it arrived on. Same
+  trick as `CONNECTEDLINE` in `[gsm-out]`.
 - **Routing vs. addressing.** `MessageSend(pjsip:<endpoint>)` routes to the registered
   contact; `MESSAGE(to)` set beforehand rewrites only the To header, which is where the app
   reads the destination number (`extractPhoneNumber`). The `pjsip:<endpoint>/<uri>` form
@@ -107,36 +126,34 @@ Details worth knowing:
 - **`SUCCESS` only means the phone accepted the MESSAGE**, not that GSM delivered it. The app
   does not report SMS delivery back to the PBX.
 - `[gsm-sms-bounce]` sends the sender a failure notice when a message is not accepted —
-  offline softphone, unreachable gateway, missing global. It replaces the old `[myMessages]`
-  bounce, and `[gsm-sms-out]`'s `_X.` catch-all replaces its extension-to-extension relay.
+  offline softphone, unreachable gateway, an extension with no SIM. It replaces the old
+  `[myMessages]` bounce, and `[gsm-sms-out]`'s `_X.` catch-all replaces its
+  extension-to-extension relay.
 - **The app's destination regex takes 10–15 digits**, so short codes (900, 3333) are rejected
   on the SIP→GSM leg.
 
 ## Adding a gateway
 
-One line here:
+One line in these files, and it is the only fact FreePBX cannot be asked for — the Custom
+Trunk row that holds the DID and the PJSIP Trunk row that holds the endpoint name are
+unrelated in its database:
 
 ```
-GSMGW_102 = gw2name          # globals_custom.conf
+GSMGW_103 = gw3name          # globals_custom.conf
 ```
 
-Plus, for SMS, which extension receives each SIM's messages:
-
-```
-GSMSMSTO_1021 = 2001         # globals_custom.conf
-GSMSMSTO_1022 = 2001
-```
-
-Everything else is GUI — a PJSIP trunk, two Custom Trunks, Inbound Routes, Outbound
-Routes. `extensions_custom.conf` does not change.
+Everything else is GUI — a PJSIP trunk, two Custom Trunks, Inbound Routes for 1031/1032,
+and two forced-SIM Outbound Routes with prefixes `*031` / `*032`. Neither
+`extensions_custom.conf` nor `func_odbc_custom.conf` changes.
 
 ## Adding an extension
 
-Calls need nothing. SMS needs two lines — a default SIM, and permission to send at all:
+Calls need nothing. SMS needs one block here, plus the same Outbound Route the extension
+already needs to make calls — its **CallerID column** is what gives it a default SIM, for
+calls and SMS alike:
 
 ```
-GSMSMSDID_2002 = 1012        # globals_custom.conf
-[2002](+)                    # pjsip.endpoint_custom_post.conf
+[2003](+)                    # pjsip.endpoint_custom_post.conf
 message_context=gsm-sms-out
 ```
 
@@ -152,10 +169,14 @@ On the gateway's PJSIP trunk:
   audio after registration succeeds
 - **Max Channels** = 1
 
-Custom Trunks (one per SIM): `Local/1011*$OUTNUM$@gsm-out/n`.
+Custom Trunks (one per SIM): `Local/1011*$OUTNUM$@gsm-out/n`. `ODBC_GSMSMSSIM` parses the
+DID back out of this string, so keep the `<did>*` shape.
 
-Outbound Routes: forced-SIM routes above the defaults; **Route CID blank** — the header
-selects the SIM now, and a Route CID would overwrite the softphone's ID for nothing.
+Outbound Routes: forced-SIM routes (prefix `*0<gw><sim>`, e.g. `*021` + `+7XXXXXXXXXX`)
+above the per-extension defaults; **Route CID blank** — the header selects the SIM now, and
+a Route CID would overwrite the softphone's ID for nothing. A default route's **CallerID
+column** must be the extension: that is what makes it that extension's default SIM, and it
+is the row `ODBC_GSMSMSSIM` looks for.
 
 ## Restoring
 
@@ -179,14 +200,14 @@ file has content before anything else.
 ## Gotchas
 
 - **The app handles one call at a time.** Max Channels caps each Custom Trunk separately,
-  so FreePBX will allow one call on SIM1 and one on SIM2 at once; the app rejects the
-  second with `486 Busy Here`.
+  so FreePBX will allow one call on each SIM of a gateway at once; the app rejects the
+  second with `486 Busy Here`. Two gateways really are two calls — different phones.
 - **Codecs.** The trunk still offers `opus,alaw`. Prefer `alaw` alone: the app pins no
   codec list, and PJSIP fires a codec-locking `UPDATE` right after the 200 OK that once
   caused one-way audio. A single-codec offer leaves nothing to renegotiate.
 - **Connected-line updates are advisory.** Most SIP clients repaint only when the
-  connected *number* changes, so on a `*1`-prefixed call — where our value equals what was
-  dialled — the name is silently dropped. Not a dialplan bug.
+  connected *number* changes, so on a `*0<gw><sim>`-prefixed call — where our value equals
+  what was dialled — the name is silently dropped. Not a dialplan bug.
 - **`asterisk -rx` needs more than the `asterisk` group.** The CLI socket is `0755`, so
   only root or the `asterisk` user can use it. Group membership grants log reads and
   `/etc/asterisk` writes, but not CLI or `fwconsole`.
