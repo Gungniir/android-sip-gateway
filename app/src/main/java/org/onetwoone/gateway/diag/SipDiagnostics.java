@@ -152,6 +152,35 @@ public final class SipDiagnostics {
         }
     }
 
+    /**
+     * Does conference slot {@code slot} still exist on the bridge?
+     *
+     * pjmedia asserts - {@code abort()}, not a Java exception, so no catch block can
+     * contain it - when handed a slot outside the conference's port range, which is what
+     * a destroyed call media leaves behind. Anything that disconnects ports after a call
+     * may have ended has to prove both slots are live first.
+     *
+     * Enumerating the bridge is the only assertion-free way to ask: it returns just the
+     * ports that exist, and {@link AudioMedia#getPortId()} is a plain field read that
+     * never enters pjmedia.
+     */
+    public static boolean isLiveConfPort(int slot) {
+        if (slot < 0) {
+            return false;
+        }
+        try {
+            AudioMediaVector2 ports = Endpoint.instance().mediaEnumPorts2();
+            for (int i = 0; i < ports.size(); i++) {
+                if (ports.get(i).getPortId() == slot) {
+                    return true;
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Cannot enumerate conference ports: " + e.getMessage());
+        }
+        return false;
+    }
+
     /** Dump to logcat and return the same text. */
     public static String dumpAndLog(Call call, AudioMedia localSource, String label) {
         String text = dump(call, localSource, label);

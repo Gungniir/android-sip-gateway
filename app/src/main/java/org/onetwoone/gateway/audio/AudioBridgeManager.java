@@ -194,30 +194,44 @@ public class AudioBridgeManager {
     /**
      * Drop the conference-bridge links made by {@link #startBridge}.
      *
-     * The call media may already be gone (call disconnected before we got here), so
-     * failures are expected and only logged at debug level.
+     * The call media is usually already gone by the time we get here: a GSM hangup runs
+     * terminateAllCalls(), which hangs the SIP call up - destroying its conference port -
+     * before this reaches us. Disconnecting a destroyed port trips a pjmedia assertion
+     * ("src_slot<conf->max_ports"), and that is an abort() rather than a Java exception,
+     * so the catch blocks below cannot contain it. Both slots must be proven live first;
+     * the catches only cover ordinary pjsua2 errors.
      */
     private void unwireBridge() {
-        if (wiredCallMedia == null) {
-            wiredConfSlot = -1;
+        AudioMedia media = wiredCallMedia;
+        wiredCallMedia = null;
+        wiredConfSlot = -1;
+
+        if (media == null || gsmAudioPort == null) {
             return;
         }
 
-        if (gsmAudioPort != null) {
-            try {
-                gsmAudioPort.stopTransmit(wiredCallMedia);
-            } catch (Exception e) {
-                Log.d(TAG, "stopTransmit GSM->SIP: " + e.getMessage());
-            }
-            try {
-                wiredCallMedia.stopTransmit(gsmAudioPort);
-            } catch (Exception e) {
-                Log.d(TAG, "stopTransmit SIP->GSM: " + e.getMessage());
-            }
+        // Ask the objects themselves rather than trusting wiredConfSlot: these are the
+        // ids pjsua_conf_disconnect() will actually be handed, and getPortId() is a
+        // plain field read that is safe on a torn-down media.
+        int callSlot = media.getPortId();
+        int localSlot = gsmAudioPort.getPortId();
+
+        if (!SipDiagnostics.isLiveConfPort(callSlot) || !SipDiagnostics.isLiveConfPort(localSlot)) {
+            Log.d(TAG, "Conference ports already gone (call=" + callSlot
+                    + ", local=" + localSlot + ") - nothing to unwire");
+            return;
         }
 
-        wiredCallMedia = null;
-        wiredConfSlot = -1;
+        try {
+            gsmAudioPort.stopTransmit(media);
+        } catch (Exception e) {
+            Log.d(TAG, "stopTransmit GSM->SIP: " + e.getMessage());
+        }
+        try {
+            media.stopTransmit(gsmAudioPort);
+        } catch (Exception e) {
+            Log.d(TAG, "stopTransmit SIP->GSM: " + e.getMessage());
+        }
     }
 
     /**
