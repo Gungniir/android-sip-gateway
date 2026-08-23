@@ -386,6 +386,18 @@ they made an existing main-thread blocking call measurably worse. The fix is GW-
 `stopCapture` must not run on the main thread at all. Track on **GW-26**'s ANR ledger and
 re-check the number once the control thread exists.
 
+#### B1b. A mute held when the process is killed survives it
+Same class as B4b, different resource. GW-02's fail-safe (`MUTE_MAX_HOLD_MS`) and the
+`onDestroy` release both live *in the process*. `am force-stop`, SIGKILL or a crash while
+a lease is held leaves the mixer muted with nothing left to restore it — the mic stays
+dead until the next call cycle happens to complete in the right order.
+
+Closing it needs out-of-process state: persist a restore record (control → original
+value) when a lease is taken, clear it on release, and replay any record found at next
+startup. That also covers B4b's charging case, so **the two should be solved together** —
+one "restore what the previous process left patched" pass at service start.
+Found by the GW-02 agent.
+
 #### B4b. `BatteryWatchdog` only rescues a phone below 25% — the kill path has no real backstop
 `BatteryWatchdog.java:27` (`CRITICAL_LEVEL`). If the process is killed
 (`am force-stop`, SIGKILL, crash) `BatteryLimitService.onDestroy` never runs, so GW-05's
