@@ -92,6 +92,21 @@ public class GsmAudioNative {
     public static native int getMixerControl(int card, String controlName);
 
     /**
+     * Get a mixer control's current ENUM value as its item name.
+     *
+     * The counterpart of {@link #setMixerControlEnum}. Added for
+     * {@link DeviceMuteManager}, which previously read originals by shelling out to
+     * {@code tinymix} — see AUDIT B1c.
+     *
+     * @param card        Sound card number
+     * @param controlName Mixer control name (e.g. "DEC1 MUX")
+     * @return the current item name, or {@code null} if the control is missing, is not an
+     *         ENUM, or cannot be read. {@code null} rather than {@code ""} so callers can
+     *         distinguish "unreadable" from an empty item name.
+     */
+    public static native String getMixerControlEnum(int card, String controlName);
+
+    /**
      * Set mixer control ENUM value by string.
      *
      * @param card        Sound card number

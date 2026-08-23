@@ -517,4 +517,69 @@ public class DeviceMuteManagerTest {
             assertEverythingRestored();
         }
     }
+
+    /**
+     * AUDIT B1c regression. On a device where the mixer reads fail — which is what the old
+     * {@code tinymix ... get} shell-out did on every real device, because that subcommand
+     * does not exist — the mute must write NOTHING.
+     *
+     * <p>Before the fix this wrote all twelve preset controls to their muted values while
+     * recording zero originals, so {@code release()} restored nothing and the microphone
+     * stayed dead until the phone was rebooted. Reproduced on lavender 2026-08-23:
+     * {@code DEC1-5 Volume} left at {@code 0}, log line {@code Lease 8 muted 0 controls}.
+     */
+    @Test
+    public void unreadableControlsAreNeverMuted() throws Exception {
+        if (manager != null) {
+            manager.quitForTest();
+        }
+        final List<String> writes = Collections.synchronizedList(new ArrayList<String>());
+        DeviceMuteManager.MixerBackend blind = new DeviceMuteManager.MixerBackend() {
+            @Override public void setEnum(int card, String control, String value) {
+                writes.add("setEnum " + control + "=" + value);
+            }
+            @Override public void setValue(int card, String control, int value) {
+                writes.add("setValue " + control + "=" + value);
+            }
+            // Both readers report failure, exactly as the broken tinymix path did.
+            @Override public String getEnum(int card, String control) { return ""; }
+            @Override public int getValue(int card, String control) { return -1; }
+        };
+        manager = DeviceMuteManager.forTesting(
+                DeviceMuteManager.PRESET_REDMI_NOTE_7, CARD, blind);
+
+        long lease = manager.newLease();
+        manager.acquire(lease);
+        awaitMuteIdle();
+
+        assertEquals("a control that cannot be read must not be muted",
+                Collections.<String>emptyList(), writes);
+
+        // And releasing a lease that touched nothing must also touch nothing.
+        manager.release(lease);
+        awaitMuteIdle();
+        assertEquals(Collections.<String>emptyList(), writes);
+    }
+
+    /**
+     * The readable case still mutes and still restores — the B1c guard must not have
+     * turned the whole feature off.
+     */
+    @Test
+    public void readableControlsAreStillMutedAndRestored() throws Exception {
+        start(DeviceMuteManager.PRESET_REDMI_NOTE_7);
+        long lease = manager.newLease();
+        manager.acquire(lease);
+        awaitMuteIdle();
+
+        assertEquals(Integer.valueOf(0), mixer.values.get("DEC1 Volume"));
+        assertTrue(manager.isMuted());
+
+        manager.release(lease);
+        awaitMuteIdle();
+
+        assertEquals("original must come back",
+                ORIGINAL_VALUES.get("DEC1 Volume"), mixer.values.get("DEC1 Volume"));
+        assertEquals(ORIGINAL_ENUMS.get("EAR_S"), mixer.enums.get("EAR_S"));
+    }
 }

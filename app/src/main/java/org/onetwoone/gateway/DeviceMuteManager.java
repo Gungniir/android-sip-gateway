@@ -25,15 +25,23 @@ import java.util.concurrent.TimeUnit;
  *
  * To add support for a new device:
  * 1. Run: adb shell "su -c 'tinymix'" during an active call
+ *    (note: use {@code tinymix -D 0 -v "NAME"} to read one control — there is no
+ *    {@code get} subcommand, see AUDIT B1c)
  * 2. Find controls for speaker (EAR_S, SPK, RCV, etc.) and mic (DEC Volume/MUX)
  * 3. Add a new preset below
  *
  * <h2>Threading — the mute is a lease, not a fire-and-forget action (AUDIT B1, G3)</h2>
  *
- * Muting costs roughly six seconds: every control is read back with
- * {@code su -c 'tinymix get'} before it is overwritten. The old API ran that from a
- * throwaway {@code MuteControls} thread while the matching {@code unmuteAll()} ran
- * <em>synchronously on the main thread</em>, which gave two failures:
+ * Muting used to cost roughly six seconds — measured at <b>~13 s</b> on the
+ * {@code redmi_note_7} preset — because every control was read back with a
+ * {@code su -c 'tinymix ...'} process spawn before being overwritten. Reads now go through
+ * the JNI mixer bridge ({@link #NATIVE}), so the whole sequence is a dozen in-process
+ * ioctls. The lease machinery below is unchanged: it was built for the slow path and is
+ * simply cheaper to run now.
+ *
+ * The old API ran the mute from a throwaway {@code MuteControls} thread while the matching
+ * {@code unmuteAll()} ran <em>synchronously on the main thread</em>, which gave two
+ * failures:
  *
  * <ul>
  *   <li>a call that ended before the mute thread was scheduled unmuted <em>first</em>
@@ -184,13 +192,34 @@ public class DeviceMuteManager {
     }
 
     /**
-     * Production backend: writes go through the tinyalsa JNI bridge, reads shell out to
-     * {@code tinymix} (the native bridge has no ENUM getter, and the INT getter needs the
-     * ALSA permissions that {@code tinymix} obtains for itself via {@code su}).
+     * Production backend: every read and every write goes through the tinyalsa JNI bridge.
      *
-     * This is where the ~6 s of {@code muteAll} lives — every read is a process spawn.
+     * <p>It used to read by shelling out to {@code su -c 'tinymix -D N get "name"'}, on the
+     * stated grounds that the native bridge had no ENUM getter and that its INT getter
+     * lacked the ALSA permissions {@code tinymix} obtains via {@code su}. Both were wrong,
+     * and the consequence was <b>AUDIT B1c</b> — on Qualcomm, every gateway call left the
+     * microphone dead:
+     *
+     * <ul>
+     *   <li>That {@code tinymix} build has <b>no {@code get} subcommand</b>. Its usage is
+     *       {@code tinymix [options] [control] [value]}, so {@code get} was parsed as the
+     *       control <em>name</em> and the call failed with
+     *       {@code Invalid mixer control: get}. On some devices {@code tinymix} is not
+     *       installed at all.</li>
+     *   <li>So every read returned the failure sentinel, nothing was ever recorded as an
+     *       original, and {@code release()} faithfully restored an empty set. The mute
+     *       writes — which already went through JNI — succeeded, so the controls went to
+     *       {@code 0} and stayed there.</li>
+     *   <li>{@link GsmAudioNative#getMixerControl} existed the whole time, and the writes
+     *       succeeding is itself proof the permissions were there.</li>
+     * </ul>
+     *
+     * <p>{@link GsmAudioNative#getMixerControlEnum} was added to close the one genuine gap.
+     * This also removes ~1 s of process spawn per control: {@code muteAll} over the
+     * {@code redmi_note_7} preset measured <b>~13 s</b> on device and is now a dozen
+     * in-process ioctls.
      */
-    static final MixerBackend TINYMIX = new MixerBackend() {
+    static final MixerBackend NATIVE = new MixerBackend() {
         @Override
         public void setEnum(int card, String control, String value) {
             GsmAudioNative.setMixerControlEnum(card, control, value);
@@ -203,54 +232,15 @@ public class DeviceMuteManager {
 
         @Override
         public String getEnum(int card, String control) {
-            String line = tinymixGet(card, control);
-            if (line != null && !line.isEmpty()) {
-                // Parse output like "EAR_S: ZERO >Switch" -> return current value.
-                // The current value has a > prefix.
-                String[] parts = line.split("\\s+");
-                for (String part : parts) {
-                    if (part.startsWith(">")) {
-                        return part.substring(1);
-                    }
-                }
-                // Fallback: return last part
-                if (parts.length > 1) {
-                    return parts[parts.length - 1];
-                }
-            }
-            return "";
+            // Native returns null for missing/non-ENUM/unreadable; the interface contract
+            // here is "" for the same, so callers keep using isEmpty() as the readable test.
+            String value = GsmAudioNative.getMixerControlEnum(card, control);
+            return value == null ? "" : value;
         }
 
         @Override
         public int getValue(int card, String control) {
-            String line = tinymixGet(card, control);
-            if (line != null && !line.isEmpty()) {
-                // Parse output like "DEC1 Volume: 84" -> return 84
-                String[] parts = line.split("\\s+");
-                for (String part : parts) {
-                    try {
-                        return Integer.parseInt(part);
-                    } catch (NumberFormatException ignored) {
-                        // keep scanning
-                    }
-                }
-            }
-            return -1;
-        }
-
-        private String tinymixGet(int card, String name) {
-            try {
-                String cmd = "su -c 'tinymix -D " + card + " get \"" + name + "\"'";
-                Process p = Runtime.getRuntime().exec(new String[]{"sh", "-c", cmd});
-                java.io.BufferedReader reader = new java.io.BufferedReader(
-                    new java.io.InputStreamReader(p.getInputStream()));
-                String line = reader.readLine();
-                p.waitFor();
-                return line;
-            } catch (Exception e) {
-                Log.e(TAG, "Failed to read control " + name + ": " + e.getMessage());
-                return null;
-            }
+            return GsmAudioNative.getMixerControl(card, control);
         }
     };
 
@@ -334,7 +324,7 @@ public class DeviceMuteManager {
 
     public static synchronized DeviceMuteManager getInstance(Context context) {
         if (instance == null) {
-            instance = new DeviceMuteManager(context.getApplicationContext(), TINYMIX);
+            instance = new DeviceMuteManager(context.getApplicationContext(), NATIVE);
         }
         return instance;
     }
@@ -640,27 +630,36 @@ public class DeviceMuteManager {
     /**
      * Mute controls for a device preset.
      *
+     * <p><b>A control whose original cannot be read is left alone</b> (AUDIT B1c). The old
+     * rule was "always try to set, even if we can't read current value", which is how the
+     * microphone got bricked: reads were failing for every control, so the mute applied
+     * twelve writes and recorded nothing to undo them. Muting something you cannot restore
+     * trades a temporary problem for a permanent one.
+     *
+     * <p>The cost of the safer rule is that a genuinely unreadable control stays unmuted,
+     * so the local mic may bleed into the GSM uplink on that device. That is an audio
+     * defect the user can hear and report, not a phone that silently stops working.
+     *
      * @return false if the lease was cancelled part-way through
      */
     private boolean mutePresetControls(long leaseId, int card, DevicePreset preset, List<Applied> applied) {
         // Mute speaker controls (ENUM -> ZERO)
-        // Always try to set, even if we can't read current value
         for (String control : preset.speakerControls) {
-            if (!muteEnum(leaseId, card, control, applied, false, "speaker")) {
+            if (!muteEnum(leaseId, card, control, applied, true, "speaker")) {
                 return false;
             }
         }
 
         // Mute mic volume controls (INT -> 0)
         for (String control : preset.micVolumeControls) {
-            if (!muteInt(leaseId, card, control, applied, false, "mic volume")) {
+            if (!muteInt(leaseId, card, control, applied, true, "mic volume")) {
                 return false;
             }
         }
 
         // Mute mic routing controls (ENUM -> ZERO)
         for (String control : preset.micRoutingControls) {
-            if (!muteEnum(leaseId, card, control, applied, false, "mic routing")) {
+            if (!muteEnum(leaseId, card, control, applied, true, "mic routing")) {
                 return false;
             }
         }
@@ -722,7 +721,10 @@ public class DeviceMuteManager {
             // Recorded BEFORE the write, so an unwind can always put it back.
             applied.add(Applied.forEnum(card, control, original));
         } else if (requireRead) {
-            return true;   // custom preset: unreadable controls are left alone
+            // Left alone on purpose: muting what we cannot restore is AUDIT B1c.
+            Log.w(TAG, "Not muting " + what + " '" + control
+                    + "': its current value could not be read, so it could not be restored");
+            return true;
         }
 
         // Re-check: release may have landed while tinymix was running.
@@ -756,6 +758,9 @@ public class DeviceMuteManager {
         if (readable) {
             applied.add(Applied.forValue(card, control, original));
         } else if (requireRead) {
+            // Left alone on purpose: muting what we cannot restore is AUDIT B1c.
+            Log.w(TAG, "Not muting " + what + " '" + control
+                    + "': its current value could not be read, so it could not be restored");
             return true;
         }
 

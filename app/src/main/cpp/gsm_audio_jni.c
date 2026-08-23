@@ -611,6 +611,74 @@ Java_org_onetwoone_gateway_GsmAudioNative_getMixerControl(
 }
 
 /*
+ * Get mixer control ENUM value as its item name.
+ *
+ * The counterpart of setMixerControlEnum. Exists so DeviceMuteManager can snapshot a
+ * control's original value before muting it *without* shelling out to tinymix — see
+ * AUDIT B1c: the shell-out used a `tinymix get` subcommand that does not exist on the
+ * devices this runs on, so every read failed, no original was ever recorded, and the
+ * unmute had nothing to restore. That left the microphone dead after every gateway call.
+ *
+ * @param card        Sound card number
+ * @param controlName Mixer control name (e.g. "DEC1 MUX")
+ * @return the current item name, or NULL if the control is missing, is not an ENUM,
+ *         or cannot be read. NULL (not "") so the Java side can tell "unreadable" from
+ *         a genuinely empty item name.
+ */
+JNIEXPORT jstring JNICALL
+Java_org_onetwoone_gateway_GsmAudioNative_getMixerControlEnum(
+        JNIEnv *env, jclass clazz,
+        jint card, jstring controlName) {
+
+    const char *name = (*env)->GetStringUTFChars(env, controlName, NULL);
+    if (!name) {
+        return NULL;
+    }
+
+    struct mixer *mix = mixer_open(card);
+    if (!mix) {
+        LOGE("Failed to open mixer for card %d", card);
+        (*env)->ReleaseStringUTFChars(env, controlName, name);
+        return NULL;
+    }
+
+    struct mixer_ctl *ctl = mixer_get_ctl_by_name(mix, name);
+    if (!ctl) {
+        LOGE("Mixer control '%s' not found", name);
+        mixer_close(mix);
+        (*env)->ReleaseStringUTFChars(env, controlName, name);
+        return NULL;
+    }
+
+    if (mixer_ctl_get_type(ctl) != MIXER_CTL_TYPE_ENUM) {
+        LOGE("Mixer control '%s' is not an ENUM", name);
+        mixer_close(mix);
+        (*env)->ReleaseStringUTFChars(env, controlName, name);
+        return NULL;
+    }
+
+    /* For an ENUM, value 0 is the index of the currently selected item. */
+    int idx = mixer_ctl_get_value(ctl, 0);
+    if (idx < 0 || (unsigned int) idx >= mixer_ctl_get_num_enums(ctl)) {
+        LOGE("Mixer control '%s' has out-of-range enum index %d", name, idx);
+        mixer_close(mix);
+        (*env)->ReleaseStringUTFChars(env, controlName, name);
+        return NULL;
+    }
+
+    const char *item = mixer_ctl_get_enum_string(ctl, idx);
+    /* Copy into a Java string before mixer_close() frees the mixer's own storage. */
+    jstring result = item ? (*env)->NewStringUTF(env, item) : NULL;
+    if (!item) {
+        LOGE("Mixer control '%s' enum index %d has no name", name, idx);
+    }
+
+    mixer_close(mix);
+    (*env)->ReleaseStringUTFChars(env, controlName, name);
+    return result;
+}
+
+/*
  * Set mixer control ENUM value by string
  *
  * @param card        Sound card number
