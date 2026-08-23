@@ -275,31 +275,68 @@ That span is where `stop_media_session` removes the call's conference port.
    because `terminateAllCalls` runs first and stops the audio port *before* pjsua touches
    the media. Same teardown code, port already quiet, no delay.
 
-**Mechanism (strongly indicated, not yet proven).** The conference bridge calls our
-`AudioMediaPort` director callbacks from its clock thread while holding the conference
-mutex; those callbacks do blocking ALSA I/O (`pcm_read`, `pcm_write`) via JNI. At 20 ms
-frames the mutex is held for most of every tick, so `pjmedia_conf_remove_port` — a plain
-non-FIFO mutex acquire — can starve for an unbounded time. This is exactly the violation
-ROADMAP rule 3 warns about, arrived at from the opposite direction.
+**Mechanism — PROVEN.** Native backtraces captured 2026-08-23 22:04:44, ~0.5 s into a
+block, by a `debuggerd -b` trap armed on the `deinitializing media` log line. Full dumps
+in [evidence/E5-conf-mutex-starvation.md](evidence/E5-conf-mutex-starvation.md). Both
+threads, same instant:
 
-**To prove it**, catch a native backtrace of the pjsua worker *during* the block
-(`su -c "debuggerd -b <pid>"` triggered on the `deinitializing media` log line) and read
-what it is waiting on. Do this before designing the fix — if it is not the conference
-mutex, the fix below is wrong.
+*Waiter* — pjsua worker, still inside handling the received BYE:
+```
+#02 NonPI::MutexLockWithTimeout
+#03 pj_mutex_lock+28
+#04 pjmedia_conf_remove_port+44
+#05 pjsua_aud_stop_stream+148
+#07 pjsua_media_channel_deinit+536
+#12 pjsip_dlg_on_tsx_state ... #20 pjsip_tpmgr_receive_packet
+```
 
-**Candidate fixes**, in order of preference:
-1. Make the RT callbacks non-blocking: decouple ALSA from the conference callback with a
-   lock-free ring buffer filled/drained by a dedicated I/O thread, so the mutex is held
-   for a memcpy rather than a device round-trip. This is **GW-23**'s territory and closes
-   H2/H3 at the same time.
-2. Stop the audio port *before* the media teardown on the SIP-initiated path too, making
-   it symmetric with the GSM path. Cheap, and it turns a 50 s bug into a 15 ms one —
-   but it treats the symptom.
-3. A watchdog backstop (**GW-25**/H9's reverse-orphan detection) bounds the damage but
-   does not fix the block.
+*Holder* — conference clock thread, inside our callback:
+```
+#00 __ioctl+8
+#02 pcm_read+232                             libgsm_audio.so
+#03 Java_..._GsmAudioNative_readFrame+208    libgsm_audio.so
+#05 GsmAudioPort.onFrameRequested+388
+#06 SwigDirector_AudioMediaPort_onFrameRequested+176
+#14-#17 libpjsua2.so                         (conf.c get_frame — owns the mutex)
+```
 
-Given that (2) is small, safe and matches a path already proven fast on device, it is a
-reasonable interim ship while (1) is done properly.
+So the conference bridge holds its mutex across the SWIG director callback, and that
+callback blocks in an ALSA `ioctl`. `pjmedia_conf_remove_port`'s first act is to take that
+same mutex. The callback re-enters every 20 ms tick, so the mutex is held almost
+continuously and a plain non-FIFO `pthread_mutex` acquire starves unboundedly — matching
+the measured 1.8–50.7 s spread. This is exactly the violation ROADMAP rule 3 warns about,
+reached from the opposite direction.
+
+**Caveat on the numbers.** The measured build is debuggable, so `CheckJNI` is active
+(frames #10–#11 of the holder) and inflates every JNI crossing. That worsens the hold time
+but is not the cause — the block is the `ioctl`, which a release build does identically.
+Re-measure the spread on a release build before quoting these figures elsewhere.
+
+**The fix.** With the mechanism proven, only one option actually addresses it:
+
+**Decouple ALSA from the conference callback.** A dedicated I/O thread owns `pcm_read` /
+`pcm_write`; `onFrameRequested`/`onFrameReceived` do nothing but copy from/to a lock-free
+ring buffer. The conference mutex is then held for a `memcpy` instead of a device
+round-trip, and *every* operation that needs that mutex stops starving — not just this
+teardown. This is **GW-23**'s territory and closes H2/H3 at the same time.
+Underrun/overrun policy must be explicit: the RT side emits silence rather than waiting,
+which is what a real-time path should have done from the start.
+
+**An earlier "stop the port first" hook was considered and rejected.** The idea was to
+mirror the GSM-initiated path — which is fast precisely because `terminateAllCalls` quiets
+the port before pjsua touches the media. It does not work on the SIP-initiated path: the
+backtrace shows `pjsua_media_channel_deinit` is called *underneath*
+`pjsip_dlg_on_tsx_state` while processing the BYE, i.e. **before** any state callback
+reaches Java. `onCallState(DISCONNECTED)` fires after the block, not before it — that is
+the 6 ms measured at the end. `onCallTsxState` exists in the bindings and fires earlier,
+but relying on the internal ordering of pjsua's disconnect path to win a race against its
+own media teardown is exactly the kind of "prove liveness with no window in between"
+reasoning ROADMAP rule 4 forbids. Do not ship it.
+
+**Backstop, not a fix.** **GW-25**/H9's reverse-orphan detection bounds the billing damage
+(GSM leg live, SIP leg gone → terminate) and is worth having regardless, but it does not
+touch the block. If GW-23 is far off, this is the mitigation to ship first, because it caps
+the worst case at one watchdog interval instead of 51 s.
 
 ---
 
