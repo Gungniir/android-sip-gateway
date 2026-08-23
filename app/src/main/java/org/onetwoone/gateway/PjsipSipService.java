@@ -67,6 +67,23 @@ public class PjsipSipService extends Service implements SipCallService {
     private PhoneStateListener phoneStateListener;
     private int lastPhoneState = TelephonyManager.CALL_STATE_IDLE;
 
+    /**
+     * The {@link DeviceMuteManager} lease held by the GSM call that is currently up, or
+     * {@link DeviceMuteManager#NO_LEASE}. Written from the Telecom callback (main) and from
+     * onDestroy; atomic so the read-and-clear on the DISCONNECTED path cannot hand the same
+     * lease to two releases (AUDIT B1).
+     */
+    private final java.util.concurrent.atomic.AtomicLong muteLease =
+            new java.util.concurrent.atomic.AtomicLong(DeviceMuteManager.NO_LEASE);
+
+    /**
+     * How long onDestroy waits for the mute restore to land. Service teardown only — the
+     * per-call teardown path never blocks (AUDIT H2c). The restore itself is only mixer
+     * writes, no {@code tinymix} reads, so it is milliseconds unless a mute is still in
+     * flight ahead of it — and that one is already cancelled and unwinding.
+     */
+    private static final long MUTE_RESTORE_TIMEOUT_MS = 2000L;
+
     // State
     private boolean isRunning = false;
     private volatile boolean stopRequested = false;
@@ -181,6 +198,15 @@ public class PjsipSipService extends Service implements SipCallService {
         isRunning = false;
         instance = null;
 
+        // Hand the device's mic and earpiece back FIRST (AUDIT B1). Queued here rather than
+        // waited on here, so the restore runs while the teardown below does its own work.
+        DeviceMuteManager mute = null;
+        long lease = muteLease.getAndSet(DeviceMuteManager.NO_LEASE);
+        if (lease != DeviceMuteManager.NO_LEASE) {
+            mute = DeviceMuteManager.getInstance(this);
+            mute.release(lease);
+        }
+
         // Stop components
         watchdog.stop();
         reconnection.setEnabled(false);
@@ -201,6 +227,13 @@ public class PjsipSipService extends Service implements SipCallService {
         // Cleanup telephony
         if (telephonyManager != null && phoneStateListener != null) {
             telephonyManager.listen(phoneStateListener, PhoneStateListener.LISTEN_NONE);
+        }
+
+        // Only now wait on the restore queued at the top: by this point it has almost always
+        // finished behind shutdownSip(), so the wait costs nothing. Bounded either way — a
+        // phone left without a microphone is worse than a slow teardown, but not unboundedly.
+        if (mute != null && !mute.awaitRestore(MUTE_RESTORE_TIMEOUT_MS)) {
+            Log.w(TAG, "Mute restore still running after " + MUTE_RESTORE_TIMEOUT_MS + " ms");
         }
 
         stopForeground(true);
@@ -486,17 +519,31 @@ public class PjsipSipService extends Service implements SipCallService {
             // Skipped when the SoC audio profile mutes the mic as part of its
             // routing (e.g. MediaTek disables PCM_2_PB <- ADDA_UL in setupMixer).
             if (!audioBridge.handlesMicMute()) {
-                new Thread(() -> {
-                    DeviceMuteManager.getInstance(this).muteAll();
-                }, "MuteControls").start();
+                // This call takes out a mute lease. acquire() returns immediately; the
+                // ~6 s of tinymix runs on DeviceMuteManager's own thread. If the call ends
+                // first, release() cancels it before or during the writes, so the mute can
+                // never land after the hangup and strand the mic (AUDIT B1).
+                DeviceMuteManager mute = DeviceMuteManager.getInstance(this);
+                long lease = mute.newLease();
+                long stale = muteLease.getAndSet(lease);
+                if (stale != DeviceMuteManager.NO_LEASE) {
+                    // No DISCONNECTED arrived for the previous call. Hand its controls back
+                    // before this lease reads them, or its originals are lost for good.
+                    Log.w(TAG, "GSM call became active while lease " + stale + " was still held");
+                    mute.release(stale);
+                }
+                mute.acquire(lease);
             } else {
                 Log.d(TAG, "Mic mute handled by audio profile - skipping DeviceMuteManager");
             }
         } else if (state == android.telecom.Call.STATE_DISCONNECTED) {
             callManager.onGsmCallEnded();
-            // Restore device speaker/mic (only if DeviceMuteManager was used)
-            if (!audioBridge.handlesMicMute()) {
-                DeviceMuteManager.getInstance(this).unmuteAll();
+            // Restore device speaker/mic. Driven by the lease rather than by
+            // handlesMicMute(), so a profile that changed mid-call cannot strand a mute we
+            // took out earlier. Non-blocking: AUDIT H2c, this path must not grow.
+            long lease = muteLease.getAndSet(DeviceMuteManager.NO_LEASE);
+            if (lease != DeviceMuteManager.NO_LEASE) {
+                DeviceMuteManager.getInstance(this).release(lease);
             }
         }
     }
