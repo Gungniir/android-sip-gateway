@@ -536,7 +536,7 @@ startup. That also covers B4b's charging case, so **the two should be solved tog
 one "restore what the previous process left patched" pass at service start.
 Found by the GW-02 agent.
 
-#### B1c. On Qualcomm the mic mute records **no** originals, so every gateway call bricks the microphone — P0
+#### B1c. On Qualcomm the mic mute records **no** originals, so every gateway call bricks the microphone — P0 — ✅ FIXED `bf22992`
 **Reproduced on device 2026-08-23, lavender (Redmi Note 7, SDM660), release build.** After
 10 gateway call cycles a normal dialler call had no microphone. `DEC1-5 Volume` read **0**;
 a reboot was required to recover (see the note on un-bricking below).
