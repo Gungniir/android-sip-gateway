@@ -155,6 +155,25 @@ ConfigReload (indirectly).
 two concurrent `audioBridge.stopBridge()` (see E1); state flips
 `TERMINATING → IDLE → TERMINATING` and the watchdog reads a torn value.
 
+#### D1b. `onSipCallState(CONFIRMED)` does not check the call is the current one
+`CallManager.onSipCallState` fires `listener.onSipCallConnected(call)` on CONFIRMED
+without comparing `call` to `currentSipCall`. A stale or superseded call's CONFIRMED
+therefore wires the audio bridge to **the wrong call** — `AudioBridgeManager.startBridge`
+takes whatever call it is handed. With the diagnostic test call able to coexist with a
+gateway call, this is reachable rather than theoretical.
+
+Not in the original audit — found by the GW-06 agent. Fix belongs with **GW-12**
+(generation-tagged bridge wiring) or **GW-11**; a bare identity check is not enough once
+calls can legitimately be replaced.
+
+#### D1c. `hangupSipCall()` never disposes on the disconnect path
+`CallManager.onSipCallState` clears `currentSipCall` **before** calling
+`terminateAllCalls()`, so `hangupSipCall()` hits its `currentSipCall == null` early return
+and never calls `dispose()`. It works today only because `GatewayCall.onCallState` sets
+`disposed = true` itself for DISCONNECTED before dispatching — an undocumented coupling
+between two classes, either of which could be "cleaned up" independently.
+Formalise in **GW-11**'s transition table.
+
 #### D2. Outgoing SIP call is registered *after* it is placed
 `PjsipSipService.java:679-682`:
 ```java

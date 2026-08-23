@@ -49,6 +49,13 @@ held wake lock can all persist indefinitely if a state transition is missed.
    (`diag/SipDiagnostics.java:35-45`). Do **not** auto-terminate on this signal initially:
    ship it as detection-only, confirm it never false-positives over a week of real calls,
    and only then decide whether to act on it.
+2b. **Reap a registered call the state machine has forgotten.** `checkOrphanedCalls`
+   short-circuits on `!hasActiveCall()` (i.e. `state == IDLE`), so a non-null
+   `currentSipCall` while IDLE is never reaped. GW-06 made that unreachable on the
+   outgoing path, but the watchdog still cannot see it if any other path produces it.
+   Add the check: IDLE with a non-null, non-disposed `currentSipCall` is an invariant
+   violation — log it and clear.
+
 3. **Hard deadlines as fail-safes.** Each with a loud error log — reaching one means a
    transition was missed and that is a bug to investigate, not a normal path:
    - Max call duration (suggest 2 h) → terminate.

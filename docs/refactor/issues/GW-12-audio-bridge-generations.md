@@ -50,6 +50,13 @@ a fix.
    `stopTransmit()` execute back-to-back on the same thread with nothing able to
    intervene. Add a comment saying that is *why* the assertion holds — it is not
    incidental.
+4b. **Close AUDIT D1b — the bridge can be wired to the wrong call.**
+   `CallManager.onSipCallState` fires `onSipCallConnected(call)` on CONFIRMED without
+   checking `call` is the current one, and `startBridge` bridges whatever it is handed.
+   The generation tag in §3 is the fix: `startBridge` must reject a call whose generation
+   is not current, rather than trusting the caller. A bare `call == currentSipCall`
+   identity check is not sufficient once calls can legitimately be replaced.
+
 5. **Preserve the re-wire logic.** The `bridgeActive && !isTransmitting(...)` rewire path
    (`:115-125`) exists because PJSIP destroys and re-creates the media stream on the
    codec-locking UPDATE it sends after the 200 OK, silently dropping conference links
