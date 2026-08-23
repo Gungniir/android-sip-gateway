@@ -41,22 +41,34 @@ public class GsmAudioNative {
 
     /**
      * Close audio devices.
+     *
+     * <p>Safe to call while the pjmedia RT thread is inside {@link #readFrame} /
+     * {@link #writeFrame}: the native side stops both PCMs and then waits (bounded at
+     * 250&nbsp;ms) for the in-flight I/O to return before it frees anything. Because of
+     * that drain, this call <b>blocks for up to ~250&nbsp;ms</b> - never call it from the
+     * RT thread, and prefer not to call it on the main thread.
      */
     public static native void close();
 
     /**
      * Read audio frame from capture device (GSM -> SIP direction).
      *
+     * <p>Blocks for up to one ALSA period. Returns -1 (rather than crashing) if
+     * {@link #close} has run or runs concurrently.
+     *
      * @param buffer Byte array to fill with PCM data
-     * @return Number of bytes read, or -1 on error
+     * @return Number of bytes read, or -1 on error / device closed
      */
     public static native int readFrame(byte[] buffer);
 
     /**
      * Write audio frame to playback device (SIP -> GSM direction).
      *
+     * <p>Returns -1 (rather than crashing) if {@link #close} has run or runs
+     * concurrently.
+     *
      * @param buffer Byte array with PCM data
-     * @return Number of bytes written, or -1 on error
+     * @return Number of bytes written, or -1 on error / device closed
      */
     public static native int writeFrame(byte[] buffer);
 
@@ -99,6 +111,10 @@ public class GsmAudioNative {
 
     /**
      * Check if audio is open.
+     *
+     * <p>Advisory only - the device may be closed the instant after this returns. It is
+     * safe to act on a stale {@code true}: {@link #readFrame} / {@link #writeFrame}
+     * re-check under the native lock and return -1 instead of touching a freed PCM.
      */
     public static native boolean isOpen();
 
