@@ -114,6 +114,9 @@ public class DeviceMuteManagerTest {
         final Map<String, Integer> values = new ConcurrentHashMap<>();
         final List<String> writes = Collections.synchronizedList(new ArrayList<String>());
         final AtomicInteger writeCount = new AtomicInteger();
+        /** Controls whose writes the 'kernel' refuses (AUDIT B1d). */
+        final java.util.Set<String> refuse =
+                Collections.synchronizedSet(new java.util.HashSet<String>());
 
         /** Writes this many controls, then blocks on {@link #gateReached}/{@link #gate}. */
         volatile int gateAfterWrites = -1;
@@ -138,17 +141,23 @@ public class DeviceMuteManagerTest {
         }
 
         @Override
-        public void setEnum(int card, String control, String value) {
+        public boolean setEnum(int card, String control, String value) {
             writes.add("setEnum " + control + "=" + value);
             enums.put(control, value);
             onWrite();
+            return !refuse.contains(control);
         }
 
         @Override
-        public void setValue(int card, String control, int value) {
+        public boolean setValue(int card, String control, int value) {
             writes.add("setValue " + control + "=" + value);
+            // A refused write leaves the control where it was - the kernel rejected it.
+            if (refuse.contains(control)) {
+                return false;
+            }
             values.put(control, value);
             onWrite();
+            return true;
         }
 
         @Override
@@ -448,8 +457,8 @@ public class DeviceMuteManagerTest {
                 }
             }
 
-            @Override public void setEnum(int c, String k, String v) { check(); mixer.setEnum(c, k, v); }
-            @Override public void setValue(int c, String k, int v) { check(); mixer.setValue(c, k, v); }
+            @Override public boolean setEnum(int c, String k, String v) { check(); return mixer.setEnum(c, k, v); }
+            @Override public boolean setValue(int c, String k, int v) { check(); return mixer.setValue(c, k, v); }
             @Override public String getEnum(int c, String k) { check(); return mixer.getEnum(c, k); }
             @Override public int getValue(int c, String k) { check(); return mixer.getValue(c, k); }
         };
@@ -535,11 +544,13 @@ public class DeviceMuteManagerTest {
         }
         final List<String> writes = Collections.synchronizedList(new ArrayList<String>());
         DeviceMuteManager.MixerBackend blind = new DeviceMuteManager.MixerBackend() {
-            @Override public void setEnum(int card, String control, String value) {
+            @Override public boolean setEnum(int card, String control, String value) {
                 writes.add("setEnum " + control + "=" + value);
+                return true;
             }
-            @Override public void setValue(int card, String control, int value) {
+            @Override public boolean setValue(int card, String control, int value) {
                 writes.add("setValue " + control + "=" + value);
+                return true;
             }
             // Both readers report failure, exactly as the broken tinymix path did.
             @Override public String getEnum(int card, String control) { return ""; }
@@ -581,5 +592,45 @@ public class DeviceMuteManagerTest {
         assertEquals("original must come back",
                 ORIGINAL_VALUES.get("DEC1 Volume"), mixer.values.get("DEC1 Volume"));
         assertEquals(ORIGINAL_ENUMS.get("EAR_S"), mixer.enums.get("EAR_S"));
+    }
+
+    /**
+     * AUDIT B1d. The kernel can refuse a restore write: on Qualcomm, setting
+     * {@code DEC1 Volume} back to 84 returns -1 once the call has torn down, while setting
+     * it to 0 during the call succeeds. Before the setters returned boolean this was
+     * invisible — {@code restoreHeld} logged "Restored: DEC1 Volume" either way, which is
+     * what made it look for two debugging rounds like the restore had never run.
+     *
+     * <p>The manager cannot force the write through; what it must not do is claim success.
+     * This pins the observable contract: the control really is left muted, and
+     * {@link DeviceMuteManager#isMuted()} still clears so the lease is not leaked.
+     */
+    @Test
+    public void aRefusedRestoreLeavesTheControlMutedAndDoesNotClaimSuccess() throws Exception {
+        start(DeviceMuteManager.PRESET_REDMI_NOTE_7);
+        long lease = manager.newLease();
+        manager.acquire(lease);
+        awaitMuteIdle();
+        assertEquals(Integer.valueOf(0), mixer.values.get("DEC1 Volume"));
+
+        // The kernel starts refusing this control, exactly as it does after teardown.
+        mixer.refuse.add("DEC1 Volume");
+
+        manager.release(lease);
+        awaitMuteIdle();
+
+        // Refused: still muted, and the fake proves the write was attempted.
+        assertEquals("a refused write must not change the control",
+                Integer.valueOf(0), mixer.values.get("DEC1 Volume"));
+        assertTrue("the restore must still have been attempted",
+                mixer.writeLog().contains("setValue DEC1 Volume=84"));
+
+        // Everything the kernel did accept must still be back.
+        assertEquals(ORIGINAL_VALUES.get("DEC2 Volume"), mixer.values.get("DEC2 Volume"));
+        assertEquals(ORIGINAL_ENUMS.get("EAR_S"), mixer.enums.get("EAR_S"));
+
+        // And the lease must be released regardless, or the next call cannot mute at all.
+        assertFalse("lease must clear even when a control refused the restore",
+                manager.isMuted());
     }
 }

@@ -178,11 +178,17 @@ public class DeviceMuteManager {
      * Do not grow it into a general-purpose mixer abstraction.
      */
     public interface MixerBackend {
-        /** Set an ENUM control to one of its item names. */
-        void setEnum(int card, String control, String value);
+        /**
+         * Set an ENUM control to one of its item names.
+         *
+         * @return false if the write was refused. Callers must not assume success: see
+         *         AUDIT B1d, where the kernel rejected a restore and the old {@code void}
+         *         signature made it look like the restore had never run at all.
+         */
+        boolean setEnum(int card, String control, String value);
 
-        /** Set an INT control. */
-        void setValue(int card, String control, int value);
+        /** Set an INT control. @return false if the write was refused (see AUDIT B1d). */
+        boolean setValue(int card, String control, int value);
 
         /** @return the current item name, or "" if the control is missing or unreadable. */
         String getEnum(int card, String control);
@@ -221,13 +227,13 @@ public class DeviceMuteManager {
      */
     static final MixerBackend NATIVE = new MixerBackend() {
         @Override
-        public void setEnum(int card, String control, String value) {
-            GsmAudioNative.setMixerControlEnum(card, control, value);
+        public boolean setEnum(int card, String control, String value) {
+            return GsmAudioNative.setMixerControlEnum(card, control, value);
         }
 
         @Override
-        public void setValue(int card, String control, int value) {
-            GsmAudioNative.setMixerControl(card, control, value);
+        public boolean setValue(int card, String control, int value) {
+            return GsmAudioNative.setMixerControl(card, control, value);
         }
 
         @Override
@@ -779,8 +785,20 @@ public class DeviceMuteManager {
     /** Put back exactly the controls a cancelled acquire wrote, newest first. */
     private void unwind(List<Applied> applied) {
         assertOffMain("unwind");
+        int refused = 0;
         for (int i = applied.size() - 1; i >= 0; i--) {
-            applied.get(i).restore(mixer);
+            Applied a = applied.get(i);
+            if (!a.restore(mixer)) {
+                // AUDIT B1d — same failure mode as restoreHeld, and just as invisible
+                // before the setters started reporting it.
+                refused++;
+                Log.e(TAG, "UNWIND REFUSED: " + a.control + " could not be set back to "
+                        + a.originalForLog() + " - it is still muted");
+            }
+        }
+        if (refused > 0) {
+            Log.e(TAG, "Mute unwind incomplete: " + refused + " of " + applied.size()
+                    + " control(s) remain muted (AUDIT B1d)");
         }
     }
 
@@ -799,10 +817,25 @@ public class DeviceMuteManager {
         held = Collections.emptyList();
         isMuted = false;
 
+        int refused = 0;
         for (int i = snapshot.size() - 1; i >= 0; i--) {
             Applied a = snapshot.get(i);
-            a.restore(mixer);
-            Log.d(TAG, "Restored: " + a.control);
+            if (a.restore(mixer)) {
+                Log.d(TAG, "Restored: " + a.control + " = " + a.originalForLog());
+            } else {
+                // AUDIT B1d. Do NOT log this as restored: the control is still muted and
+                // the device is left in the broken state this whole class exists to avoid.
+                refused++;
+                Log.e(TAG, "RESTORE REFUSED: " + a.control + " could not be set back to "
+                        + a.originalForLog() + " - it is still muted");
+            }
+        }
+        if (refused > 0) {
+            Log.e(TAG, "Mute restore incomplete: " + refused + " of " + snapshot.size()
+                    + " control(s) refused the write and remain muted. On Qualcomm this is"
+                    + " AUDIT B1d - the mic volume write is rejected once the call has torn"
+                    + " down. The device will not have a working microphone until the audio"
+                    + " path is re-established or the phone is rebooted.");
         }
     }
 
@@ -905,12 +938,17 @@ public class DeviceMuteManager {
             return new Applied(card, control, false, null, original);
         }
 
-        void restore(MixerBackend mixer) {
+        /** @return false if the mixer refused to put the original back (AUDIT B1d). */
+        boolean restore(MixerBackend mixer) {
             if (isEnum) {
-                mixer.setEnum(card, control, enumValue);
-            } else {
-                mixer.setValue(card, control, intValue);
+                return mixer.setEnum(card, control, enumValue);
             }
+            return mixer.setValue(card, control, intValue);
+        }
+
+        /** The original value, for logging. */
+        String originalForLog() {
+            return isEnum ? enumValue : Integer.toString(intValue);
         }
 
         void mute(MixerBackend mixer) {
