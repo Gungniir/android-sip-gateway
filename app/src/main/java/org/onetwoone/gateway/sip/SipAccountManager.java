@@ -22,16 +22,22 @@ public class SipAccountManager {
     private final SipEndpointManager endpointManager;
 
     /**
-     * Written by {@code SipInit} ({@link #createAccount}) and by {@code ConfigReload} /
-     * main ({@link #deleteAccount}); read from main, {@code SipInit}, {@code ConfigReload}
-     * and NanoHTTPD workers. Snapshot before use.
+     * Written on the {@code GatewayControl} thread ({@link #createAccount} from SIP init and
+     * from reload, {@link #deleteAccount} from reload) and on main ({@code onDestroy}'s
+     * shutdown); read from the control thread, main (SMS, the diagnostic call) and NanoHTTPD
+     * workers. Snapshot before use.
      */
     private volatile GatewayAccount account;
 
-    /** Written on a pjsua worker ({@link #onRegState}); read from main and NanoHTTPD. */
+    /**
+     * Written on a pjsua worker ({@link #onRegState}), <em>synchronously</em> and before the
+     * listener is invoked - GW-10 posts the listener's handling onto the control thread but
+     * never the flag itself, because it gates later calls into pjsua2 (plan §2.6). Read from
+     * the control thread, main and NanoHTTPD.
+     */
     private volatile boolean registered = false;
 
-    /** Written on a pjsua worker ({@link #onRegState}); read from main and NanoHTTPD. */
+    /** Written on a pjsua worker ({@link #onRegState}); read from the control thread and NanoHTTPD. */
     private volatile String lastError = null;
 
     public interface AccountListener {
@@ -175,7 +181,11 @@ public class SipAccountManager {
     }
 
     /**
-     * Called by GatewayAccount when registration state changes.
+     * Called by GatewayAccount when registration state changes, on a pjsua worker.
+     *
+     * <p>The flag is set here and now, synchronously. The listener's <em>handling</em> is
+     * what {@code PjsipSipService} posts onto the control thread - never the flag, which
+     * everything from SMS forwarding to the Telecom retry chain gates on.
      */
     public void onRegState(boolean isRegistered, String reason) {
         this.registered = isRegistered;

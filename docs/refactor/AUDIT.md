@@ -164,6 +164,11 @@ twice (`:307`, `:311`); `rejectCall()` twice (`:319`, `:321`); the timeout runna
 (`:234`, `:236`). `onCallRemoved` can null it between any pair → **NPE on hangup**.
 No `volatile` → a pjsua worker may also never observe the write at all.
 
+GW-03 fixed every reader inside `GatewayInCallService` and made the field `volatile`. The
+one left outside it — `PjsipSipService.onSipCallConnected`, which read
+`getCurrentCall()` twice and dereferenced the second read — is **fixed by GW-10**, because
+posting that callback widens the window rather than leaving it as it was. C1 is now closed.
+
 #### C2. A second GSM call silently orphans the first
 `onCallAdded` (`:88`) overwrites `currentCall` unconditionally; `onCallRemoved` (`:297`)
 only clears it when the identity matches. A call-waiting / second inbound leg replaces
@@ -228,7 +233,7 @@ with no defined ordering. Neither is idempotent: the connect path also spawns a
 `MuteControls` thread each time, and the end path can run **after** a subsequent call's
 start path.
 
-#### D4. `SipTestCallManager` ownership check is racy
+#### D4. `SipTestCallManager` ownership check is racy — ✅ ownership half fixed by GW-10
 `SipTestCallManager.java:90` (`call`, non-volatile) is read by `owns()` (`:141`) from
 pjsua workers and written by `startInternal`/`stopInternal` on main. A stale read routes
 a real gateway call into the test-call handler (skipping the GSM state machine entirely)
@@ -236,6 +241,14 @@ or the reverse. `PjsipSipService.startTestCall` (`:704`) checks
 `callManager.getCurrentSipCall()` on the caller's thread and then posts — an incoming
 gateway call can land in the gap, leaving both calls fighting over the single static
 `gsmAudioPort`.
+
+**GW-10** pulled GW-11 §4 forward: `GatewayCall` now carries a `final Owner`
+(`GATEWAY` | `DIAGNOSTIC`) set at construction, and `PjsipSipService` demuxes on it rather
+than on `owns()`. Ownership is immutable, so it can no longer go stale — which posting the
+callbacks made mandatory, not merely tidy. The **start-gate race is still open**: the
+`hasLiveSipCall()` check and `testCall.start()` now both run on the control thread, so
+nothing can land between them there, but `start()` then hops to main where the diagnostic
+internals live, and an incoming gateway call can still arrive in *that* gap. → GW-11.
 
 ---
 
@@ -738,6 +751,62 @@ handed. Candidate for deletion in **GW-12**.
 
 #### H7c. `SipEndpointManager.destroyEndpoint()` is unreachable
 No caller anywhere in the tree. Either wire it up or delete it in **GW-15**.
+
+#### H8c. Service destroy can collide with an in-flight SIP init — P2, bounded
+Found by the GW-10 agent while installing the control thread; a consequence of the fold, not
+of a mistake in it.
+
+`PjsipSipService.onDestroy` calls `control.quitSafely(1500)` — the **only** place main waits
+on the control thread anywhere in the app, and deliberately bounded (plan §2.4). The
+pathological interleaving:
+
+1. SIP init is running on the control thread and is parked inside
+   `SipEndpointManager.createEndpointOnMainThread`'s 30 s latch, waiting for a runnable it
+   posted to main.
+2. The service is destroyed. `onDestroy` is itself a main-looper callback, so the runnable
+   from step 1 is queued **behind** it and cannot run.
+3. Main sits in the join for 1.5 s, gives up, logs, and finishes teardown.
+4. The control thread waits out the full 30 s, throws "Timeout waiting for endpoint
+   creation", and schedules a reconnect for a service that no longer exists.
+
+Not a deadlock — both waits are bounded, which is exactly why the join must stay bounded and
+why no second main-blocks-on-control wait may ever be added. But it wastes 30 s of a thread
+and leaves a reconnect scheduled against a dead service. The real fix is for destroy to
+**cancel** in-flight SIP init rather than wait for it, which is non-blocking shutdown →
+**GW-26**.
+
+#### D4b. A stale diagnostic DISCONNECTED clears the *next* test call's `mediaValid` — P2
+`SipTestCallManager.onCallState(int)` takes a state and no call identity, so it cannot tell
+whose disconnect it is being told about. If test call A's DISCONNECTED arrives while test
+call B is running, B's `mediaValid` is dropped and B then skips its `stopTransmit` calls and
+its final diagnostics.
+
+This **fails closed** (a skipped `stopTransmit` is safe; the unsafe direction is calling it
+on a destroyed port, which is an `abort()`), and it is strictly better than the pre-GW-10
+behaviour, where the same stale callback was routed into `CallManager` and ran
+`terminateAllCalls()` on a live gateway call. Fix by threading the call identity into
+`onCallState`, evaluated **on the callback thread** — where it is not stale, since the
+manager assigns `call` before `makeCall`. → **GW-11**, alongside the D4 start-gate.
+
+#### H7d. Two getters became dead when the snapshot landed — for GW-31
+`SipTestCallManager.owns()` no longer has a caller: callback dispatch moved to
+`GatewayCall.getOwner()` and only that is correct under posting. `PjsipSipService.getStatus()`
+likewise — `MainViewModel` reads `GatewayStatus.getStatusText()` now. Both kept in GW-10
+because that diff does not delete code. Add to the GW-31 sweep alongside the getters already
+listed in PHASE-1-PLAN §3b.
+
+#### H2d. The mute-lease release is now one control-thread hop from the Telecom event — P2
+GW-10 moved `PjsipSipService.onGsmCallStateChanged`'s body onto the control thread, so the
+`DeviceMuteManager.release(lease)` that cancels an in-flight mute is queued rather than run
+inline on main.
+
+The ordering itself is unchanged — `STATE_ACTIVE` and `STATE_DISCONNECTED` were already
+serialised against each other on main, and are now serialised against each other on the
+control thread. What is new is that the control thread also carries SIP init and config
+reload, so a call that ends *during a reload* waits behind that reload's ~600 ms of
+`Thread.sleep` (F5). `DeviceMuteManager`'s own lease design absorbs this — the cancel still
+wins whenever it lands, and the fail-safe backstops a lost release — so this is latency, not
+a brick. It disappears when **GW-14** removes the sleeps from the reload pipeline.
 
 #### H10. Dead code that violates a documented hard rule
 `GatewayInCallService.setMicrophoneMute` (`:410`) uses `AudioManager.setMicrophoneMute`,

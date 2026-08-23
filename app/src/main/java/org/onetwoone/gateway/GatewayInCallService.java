@@ -23,11 +23,15 @@ import android.util.Log;
  * <h3>Threading</h3>
  * Telecom delivers every callback here on the main looper, but the public API
  * ({@link #getCurrentCall()}, {@link #answerCall()}, {@link #disconnectCall()},
- * {@link #playDtmfTone(char)}, ...) is called from pjsua worker threads via
- * {@code CallManager} / {@code PjsipSipService}. {@link #currentCall} and
- * {@link #instance} are therefore {@code volatile}, and <b>every</b> consumer must
- * snapshot the field into a local and operate on the local - re-reading the field
- * mid-method races {@link #onCallRemoved(Call)} nulling it and yields an NPE.
+ * {@link #playDtmfTone(char)}, ...) is called from the {@code GatewayControl} thread via
+ * {@code CallManager} / {@code PjsipSipService} (before GW-10, from pjsua workers).
+ * {@link #currentCall} and {@link #instance} are therefore {@code volatile}, and
+ * <b>every</b> consumer must snapshot the field into a local and operate on the local -
+ * re-reading the field mid-method races {@link #onCallRemoved(Call)} nulling it and yields
+ * an NPE.
+ *
+ * <p>The main→control direction is always a fire-and-forget post: nothing here waits for a
+ * control-thread result (plan §2.4).
  */
 public class GatewayInCallService extends InCallService {
     private static final String TAG = "GatewayInCall";

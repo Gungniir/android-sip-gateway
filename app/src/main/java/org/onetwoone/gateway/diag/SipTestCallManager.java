@@ -89,9 +89,10 @@ public class SipTestCallManager {
     private final StringBuilder report = new StringBuilder();
 
     /**
-     * Written on main (start/stopInternal), read from pjsua workers via {@link #owns} and
-     * from main/NanoHTTPD via {@link #isActive} - hence volatile, snapshotted at every
-     * consumer (AUDIT D4).
+     * Written on main (start/stopInternal), read from main/NanoHTTPD via {@link #isActive}
+     * and from the control thread via {@code PjsipSipService.startTestCall} - hence
+     * volatile, snapshotted at every consumer (AUDIT D4). Since GW-10 it is no longer read
+     * from a pjsua worker to demux callbacks; see {@link #owns}.
      */
     private volatile GatewayCall call;
 
@@ -154,7 +155,15 @@ public class SipTestCallManager {
         return call != null;
     }
 
-    /** True when the given call is the diagnostic call, not a gateway call. */
+    /**
+     * True when the given call is <em>this manager's current</em> diagnostic call.
+     *
+     * <p><b>Not for callback dispatch.</b> {@code PjsipSipService} demuxes on the call's
+     * immutable {@link GatewayCall#getOwner()} instead, because this field is nulled by
+     * {@link #startInternal}'s catch block on a failed dial, and a callback evaluated after
+     * that would be routed into the gateway state machine (plan §2.6). Left in place for
+     * "is this the call I am currently running" questions only; GW-31 decides its fate.
+     */
     public boolean owns(GatewayCall other) {
         return other != null && other == call;
     }
@@ -173,6 +182,20 @@ public class SipTestCallManager {
 
     // ========== Callbacks from PjsipSipService ==========
 
+    /**
+     * Called <em>synchronously on the pjsua callback thread</em>, deliberately.
+     *
+     * <p>GW-10 posts the gateway callbacks onto the control thread, but this one may not be
+     * deferred as a whole: {@link #mediaValid} has to drop the instant PJSIP says
+     * DISCONNECTED. It guards every later {@code stopTransmit} against a conference port
+     * PJSIP has already destroyed, and that failure is a pjmedia assertion - an
+     * {@code abort()}, not something the catch blocks below can contain. A teardown already
+     * queued ahead of a late flag flip ({@link #autoHangup}, a user {@code stop()}, the 2 s
+     * poller) would run against destroyed media.
+     *
+     * <p>So: post the handling, never the flag. The flag is set here; the work it gates is
+     * posted onto the main looper, which is where this class's internals live.
+     */
     public void onCallState(int pjsipState) {
         if (pjsipState == pjsip_inv_state.PJSIP_INV_STATE_DISCONNECTED) {
             mediaValid = false;
@@ -227,7 +250,7 @@ public class SipTestCallManager {
             // and owns(call) must already match or the callback is dropped and the test call
             // never reports its failure. Same reasoning as AUDIT D2 / GW-06 on the gateway
             // path; the catch below unregisters it again if makeCall throws.
-            call = new GatewayCall(callbackService, account);
+            call = new GatewayCall(callbackService, account, GatewayCall.Owner.DIAGNOSTIC);
             call.makeCall(uri, new CallOpParam(true));
             append("INVITE sent");
         } catch (Exception e) {

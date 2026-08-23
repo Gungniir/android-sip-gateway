@@ -24,15 +24,16 @@ public class AudioBridgeManager {
     private final Context context;
     private final GatewayConfig config;
 
-    // Static to survive service restart (like Endpoint). Written by initialize() on SipInit,
-    // read from pjsua workers (startBridge), main (start/stopAudioStreams, the test call) and
-    // ConfigReload (stopBridge) - hence volatile, and snapshotted at every consumer.
+    // Static to survive service restart (like Endpoint). Since GW-10 initialize(), the
+    // start/stop pairs and the bridge wiring all run on the GatewayControl thread; main (the
+    // diagnostic test call) and NanoHTTPD still read it - hence volatile, and snapshotted at
+    // every consumer.
     private static volatile GsmAudioPort gsmAudioPort;
 
-    // startBridge() runs on pjsua workers, stopBridge() on main, on a pjsua worker
-    // (onCallsTerminated) and on ConfigReload; isBridgeActive()/getStatusString() are read
-    // from NanoHTTPD. volatile makes those reads defined - it does not serialise the
-    // start/stop pair, which is E1 and belongs to GW-12.
+    // start/stopBridge() run on the GatewayControl thread; the diagnostic call reaches
+    // startBridge/stopBridge from main, and isBridgeActive()/getStatusString() are read from
+    // NanoHTTPD and by the status snapshot. volatile makes those reads defined - it does not
+    // serialise the start/stop pair, which is E1 and belongs to GW-12.
     private volatile boolean bridgeActive = false;
 
     // The call media currently wired to gsmAudioPort, kept so stopBridge() can unwire
