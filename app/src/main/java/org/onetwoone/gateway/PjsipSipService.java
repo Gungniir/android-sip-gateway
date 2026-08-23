@@ -676,10 +676,15 @@ public class PjsipSipService extends Service implements SipCallService {
 
             txOpt.setHeaders(headers);
 
-            call.makeCall(uri, prm);
-
-            // Store call in CallManager for tracking and cleanup
-            callManager.setOutgoingSipCall(call);
+            // The call MUST be registered with CallManager before makeCall() runs: PJSIP can
+            // deliver onCallState(DISCONNECTED) synchronously on this thread (immediate
+            // transport failure, or a 403/404 from the PBX), and a callback that cannot find
+            // its own call leaves a dead one registered forever. placeOutgoingSipCall owns
+            // that ordering and the compare-and-clear on failure - see AUDIT D2 / GW-06.
+            if (!callManager.placeOutgoingSipCall(call, c -> c.makeCall(uri, prm))) {
+                Log.e(TAG, "SIP call to " + uri + " was not placed");
+                return;
+            }
 
             Log.d(TAG, "SIP call to " + uri + " (CallerID: " + callerId + ", SIM: " + simSlot + ")");
 
@@ -706,7 +711,10 @@ public class PjsipSipService extends Service implements SipCallService {
             Log.w(TAG, "Test call manager not ready");
             return;
         }
-        if (callManager.getCurrentSipCall() != null) {
+        // Ask for a *live* call, not just a non-null reference: a disposed leftover is not a
+        // call in progress, and refusing on one is what made the audio bridge undiagnosable
+        // after a failed outgoing call (AUDIT D2).
+        if (callManager.hasLiveSipCall()) {
             Log.w(TAG, "Refusing test call: a gateway SIP call is in progress");
             return;
         }

@@ -203,6 +203,12 @@ public class SipTestCallManager {
         append("mode=" + mode + " duration=" + seconds + "s uri=" + uri);
 
         try {
+            // Assign `call` BEFORE makeCall - do not "tidy" this into `call = new ...;
+            // newCall.makeCall(...)` or move the assignment below. PJSIP can deliver
+            // onCallState(DISCONNECTED) synchronously on this thread from inside makeCall,
+            // and owns(call) must already match or the callback is dropped and the test call
+            // never reports its failure. Same reasoning as AUDIT D2 / GW-06 on the gateway
+            // path; the catch below unregisters it again if makeCall throws.
             call = new GatewayCall(callbackService, account);
             call.makeCall(uri, new CallOpParam(true));
             append("INVITE sent");
