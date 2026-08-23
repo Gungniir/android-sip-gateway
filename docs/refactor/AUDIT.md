@@ -236,6 +236,71 @@ is a leak documented as a fix.
 `GsmAudioPort.java:56`, `:58`. `startCapture` (`:228`) reads/writes `openThread` on main;
 `stopCapture` (`:338`) nulls it from main / pjsua / ConfigReload.
 
+#### E5. A SIP-side hangup leaves the GSM leg up for 2–51 s, burning real minutes — P0
+**Measured on device 2026-08-23**, five SIP-initiated hangups, `BYE` received → media
+detached: **23.74 s, 4.47 s, 50.69 s, 1.79 s, 4.86 s.** The user-visible symptom is a GSM
+call that stays connected and billed for up to a minute after the SIP party hung up.
+
+**Not a Phase 0 regression.** `onFrameRequested`/`onFrameReceived` are byte-identical to
+`2626f5d`, and the blocking `pcm_read` inside the JNI call predates Phase 0. GW-01's
+`io_acquire`/`io_release` correctly take the reference and **release the lock before**
+blocking in `pcm_read`, so they add no hold time. This bug was always there; it was simply
+never measured.
+
+**The app's own code is not slow.** Once pjsua delivers `DISCONNECTED`, the GSM leg drops
+in **6 ms** and the whole teardown is clean — `Closing audio` → `Audio closed` in 2 ms
+(GW-01's drain), every mixer switch restored to `0`. The entire delay is upstream.
+
+**Where it blocks.** On the pjsua worker, between two adjacent pjmedia log lines, with
+nothing logged in between for the whole interval:
+```
+21:41:47.242  pjsua_media.c  Call 1: deinitializing media..
+21:41:47.245  [DISCONNECTED] ... RTP stats dump ...
+              <-- 50.687 s, thread logs nothing -->
+21:42:37.932  udp0x...       UDP media transport detached
+21:42:37.936  GatewayCall: Call state: DISCONNECTED (6)
+21:42:37.942  GatewayInCall: Disconnecting GSM call (state: ACTIVE)
+```
+That span is where `stop_media_session` removes the call's conference port.
+
+**Why it is starvation, not a timeout.** Four independent signs:
+1. The durations are scattered over 1.8–50.7 s with no clustering — no timeout constant
+   behaves like that.
+2. The conference clock thread runs *throughout*: `onFrameReceived` keeps incrementing on
+   schedule (22000 @ 21:37:10, 22500 @ 21:37:20, mid-block), and `MixerEnforce` keeps
+   re-asserting every 2 s. The bridge is fully live while the removal waits.
+3. Nothing external correlates with the release — no GSM event, no timer, no config
+   change. It simply eventually wins.
+4. **The asymmetry is decisive.** GSM-initiated hangups take **15 ms / 107 ms / 1.77 s**,
+   because `terminateAllCalls` runs first and stops the audio port *before* pjsua touches
+   the media. Same teardown code, port already quiet, no delay.
+
+**Mechanism (strongly indicated, not yet proven).** The conference bridge calls our
+`AudioMediaPort` director callbacks from its clock thread while holding the conference
+mutex; those callbacks do blocking ALSA I/O (`pcm_read`, `pcm_write`) via JNI. At 20 ms
+frames the mutex is held for most of every tick, so `pjmedia_conf_remove_port` — a plain
+non-FIFO mutex acquire — can starve for an unbounded time. This is exactly the violation
+ROADMAP rule 3 warns about, arrived at from the opposite direction.
+
+**To prove it**, catch a native backtrace of the pjsua worker *during* the block
+(`su -c "debuggerd -b <pid>"` triggered on the `deinitializing media` log line) and read
+what it is waiting on. Do this before designing the fix — if it is not the conference
+mutex, the fix below is wrong.
+
+**Candidate fixes**, in order of preference:
+1. Make the RT callbacks non-blocking: decouple ALSA from the conference callback with a
+   lock-free ring buffer filled/drained by a dedicated I/O thread, so the mutex is held
+   for a memcpy rather than a device round-trip. This is **GW-23**'s territory and closes
+   H2/H3 at the same time.
+2. Stop the audio port *before* the media teardown on the SIP-initiated path too, making
+   it symmetric with the GSM path. Cheap, and it turns a 50 s bug into a 15 ms one —
+   but it treats the symptom.
+3. A watchdog backstop (**GW-25**/H9's reverse-orphan detection) bounds the damage but
+   does not fix the block.
+
+Given that (2) is small, safe and matches a path already proven fast on device, it is a
+reasonable interim ship while (1) is done properly.
+
 ---
 
 ### P1 — SIP endpoint & account lifecycle
