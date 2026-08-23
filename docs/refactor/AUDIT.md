@@ -536,6 +536,80 @@ startup. That also covers B4b's charging case, so **the two should be solved tog
 one "restore what the previous process left patched" pass at service start.
 Found by the GW-02 agent.
 
+#### B1c. On Qualcomm the mic mute records **no** originals, so every gateway call bricks the microphone — P0
+**Reproduced on device 2026-08-23, lavender (Redmi Note 7, SDM660), release build.** After
+10 gateway call cycles a normal dialler call had no microphone. `DEC1-5 Volume` read **0**;
+a reboot was required to recover (see the note on un-bricking below).
+
+**Pre-existing, not a Phase 0 regression.** `2626f5d` contains the identical logic, comment
+included:
+```java
+// Always try to set, even if we can't read current value
+int original = readIntControl(control);
+if (original >= 0) { originalIntValues.put(control, original); }
+setIntControl(control, 0);          // mutes regardless of whether the read worked
+```
+GW-02 preserved that semantics faithfully. What GW-02 *did* change is that the failure is
+now **visible**: `Lease 8 muted 0 controls` is the lease honestly reporting it has nothing
+to restore, where the old code silently ended up with empty maps. The lease machinery is
+working correctly — it is being handed nothing.
+
+**Root cause: the read path shells out to a `tinymix` subcommand that does not exist.**
+`DeviceMuteManager.tinymixGet` (`:241-243`):
+```java
+String cmd = "su -c 'tinymix -D " + card + " get \"" + name + "\"'";
+```
+Two independent reasons this fails on real hardware:
+1. **No `get` subcommand.** Both test devices' `tinymix` takes `tinymix [options] [control]
+   [value]`; `tinymix -D 0 get "X"` is parsed as *control named `get`* and errors with
+   `Invalid mixer control: get`. The working form is `tinymix -D 0 -v "X"`.
+2. **`tinymix` is not installed at all** on lavender — it had to be pushed from merlinx to
+   `/data/local/tmp` just to run this audit.
+
+So every read returns the failure sentinel — `-1` for INT, `""` for ENUM — nothing is
+recorded, and `unmuteAll()` faithfully restores the empty set. Log evidence:
+```
+Muted mic volume: DEC1 Volume (was: -1)     <- read failed
+Muted mic routing: DEC1 MUX  (was: )        <- read failed
+Lease 8 muted 0 controls                    <- nothing to restore
+```
+
+**Why it is the microphone specifically.** Of the preset's controls, only `DEC* Volume`
+matters: the mute writes `ZERO` to `EAR_S`, `SPK` and `DEC* MUX`, which is **also their
+idle value**, so failing to restore those is harmless *and* undetectable. `DEC* Volume`
+(84 live / 0 muted) is the only control that both causes the damage and can diagnose it.
+
+**The fix is small and already half-built.** The comment at `DeviceMuteManager:188` —
+"the native bridge has no ENUM getter, and the INT getter needs the ALSA permissions that
+`tinymix` obtains for itself via `su`" — is **wrong on both counts**:
+- `Java_org_onetwoone_gateway_GsmAudioNative_getMixerControl` **exists**
+  (`gsm_audio_jni.c:582`, via `mixer_ctl_get_value`).
+- The app's native *writes* already succeed (that is why the controls get muted at all), so
+  it plainly has the ALSA permissions.
+
+Therefore:
+1. Point `getValue()` at the existing native getter. **This alone closes the brick**, since
+   `DEC* Volume` is the only damaging control.
+2. Add a native ENUM getter for `EAR_S` / `SPK` / `DEC* MUX` and drop the shell-out
+   entirely.
+3. Consider refusing to mute a control whose original could not be read — muting something
+   you cannot restore is how this bug does its damage.
+
+**Secondary: the mute takes ~13 s.** Twelve controls, each a `su -c` process spawn at ~1 s.
+Measured 22:39:46 → 22:39:59. The doc's "~6 s" figure is optimistic for this preset. It
+also explains the **~5 s gap between call start and media start** reported on this device.
+Native reads/writes would make the whole sequence milliseconds. Related: G3, H1.
+
+**Also observed: setup and teardown overlap.** `QualcommAudioProfile: Tearing down mixer...`
+at 22:39:56 while the mute was still writing `DEC3/4/5 MUX` at 22:39:58-59. Bounded here
+because both run on the `MuteControls` thread, but it means teardown ran against a
+half-applied mute.
+
+> **Un-bricking a device in this state:** reboot. `tinymix` borrowed from another device
+> can *read* the controls but its writes are rejected (`Error: invalid value` for a value
+> well inside the reported `dsrange 0->124`), so it cannot restore them. A reboot resets
+> the mixer to kernel defaults — verified: `DEC1-5 Volume` back to `84`.
+
 #### B4b. `BatteryWatchdog` only rescues a phone below 25% — the kill path has no real backstop
 `BatteryWatchdog.java:27` (`CRITICAL_LEVEL`). If the process is killed
 (`am force-stop`, SIGKILL, crash) `BatteryLimitService.onDestroy` never runs, so GW-05's
