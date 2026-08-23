@@ -414,6 +414,39 @@ running, and share the path list. Found by the GW-05 agent; genuinely out of its
 **Deserves its own issue** — it is the last gap in the "device never strands itself"
 property, and GW-05 explicitly cannot close it from inside the service.
 
+#### B4c. Nothing in the app ever stops `BatteryLimitService`, so GW-05's escape hatch is nearly unreachable — P1
+Found on device, 2026-08-23, while running Phase 0 verification Step 1.
+
+**The hatch itself works, and works well.** Reaching `onDestroy` produces a force-enable in
+**~217 ms** against its 7 s budget, with both halves firing in the designed order — inline
+on main (`+4 ms`), then re-applied on the control thread (`+110 ms`). GW-05 is correct.
+
+The problem is that **nothing calls it.** `grep stopService` over the whole app finds three
+call sites and none targets `BatteryLimitService`:
+- `GatewayControlReceiver.stopGateway` (`:130-140`) stops `PjsipSipService` only, though
+  its `startGateway` (`:116-127`) starts *both*. The `STOP` broadcast is asymmetric with
+  the `START` broadcast.
+- `MainViewModel.stopService` (`:220`) — the UI's Disconnect button — likewise only stops
+  `PjsipSipService`.
+- No UI control stops it. Lowering `battery_limit` to 100 only makes the *next* `START`
+  skip it; a running instance keeps enforcing.
+
+So the ways `BatteryLimitService` actually ends are: `am force-stop`, APK reinstall, OOM
+kill, or a crash — and **`onDestroy` runs in none of them**. The escape hatch guards the
+one path that essentially never happens, while every real termination path is B4b.
+
+Both were reproduced on device the same evening:
+- `adb install -r` killed the process at `input_suspend=1`; it stayed `1` until the service
+  was started again.
+- `am stopservice` from shell is refused outright —
+  `Permission Denial: ... not exported from uid 10352` (the service is
+  `android:exported="false"`), so even a knowledgeable user cannot reach the hatch without
+  root. It succeeded only under `su`.
+
+This changes B4b's priority: it is not a corner case behind a rare kill, it is the
+**normal** shutdown path. Fix alongside B1b/B4b, and additionally make `stopGateway` and
+`MainViewModel.stopService` symmetric with the start path.
+
 #### H9b. `handleIncomingGsmCall` leaks a ringing call when `answer()` throws
 `GatewayInCallService.handleIncomingGsmCall`, MODE_ANSWER_FIRST branch: if
 `call.answer()` throws, it cancels the incoming timeout and returns, leaving
