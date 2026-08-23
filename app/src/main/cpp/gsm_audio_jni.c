@@ -3,6 +3,26 @@
  *
  * Replaces tinycap/tinyplay processes with direct ALSA access.
  * All parameters are configurable - no hardcoded device paths.
+ *
+ * Concurrency (see docs/refactor/issues/GW-01, AUDIT A1/A2)
+ * --------------------------------------------------------
+ * Three kinds of thread reach this file:
+ *   - the pjmedia real-time thread, 50x/second, in readFrame()/writeFrame();
+ *   - whichever thread ends a call (main / pjsua worker / ConfigReload), in close();
+ *   - the GsmAudioOpen worker, in open().
+ *
+ * Every field of g_ctx is guarded by g_ctx->lock. open() and close() hold it across
+ * their whole body, so a half-built context is never observable.
+ *
+ * The hot path must NOT hold the lock across pcm_read()/pcm_write(): that would make
+ * close() block a full ALSA period behind a reader, and would serialise capture against
+ * playback. Instead readFrame()/writeFrame() take a *reference* to the pcm under the
+ * lock (io_acquire()) and drop it afterwards (io_release()). close() flips is_open to
+ * 0, issues pcm_stop() on both PCMs while still holding the lock - the DROP ioctl is
+ * what wakes a reader parked in the kernel - then waits, bounded, for the reference
+ * count to reach zero before freeing anything.
+ *
+ * Nothing on the read/write path allocates.
  */
 
 #include <jni.h>
@@ -12,6 +32,7 @@
 #include <stdio.h>
 #include <pthread.h>
 #include <errno.h>
+#include <time.h>
 
 #include "tinyalsa/include/tinyalsa/asoundlib.h"
 
@@ -20,7 +41,12 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 
-/* Audio context - holds all state */
+/* Upper bound on how long close() will wait for in-flight pcm_read/pcm_write to return.
+ * One ALSA period is ~20 ms, so this is ~12 periods of head-room. It MUST stay bounded:
+ * an unbounded wait would turn a rare crash into a deterministic hang on every hangup. */
+#define IO_DRAIN_TIMEOUT_MS 250
+
+/* Audio context - holds all state. Every field is guarded by `lock`. */
 struct gsm_audio_ctx {
     struct pcm *capture_pcm;
     struct pcm *playback_pcm;
@@ -37,10 +63,125 @@ struct gsm_audio_ctx {
     unsigned int period_count;
 
     int is_open;
+    int active_io;              /* readers + writers currently inside pcm_read/pcm_write */
+
     pthread_mutex_t lock;
+    pthread_cond_t io_drained;  /* broadcast when active_io falls to 0 */
 };
 
-static struct gsm_audio_ctx *g_ctx = NULL;
+/* Statically allocated on purpose: the lock has to exist before any thread can reach it
+ * (the old lazy calloc() in open() was itself a race - AUDIT A2), and a context that is
+ * never freed can never be freed out from under a racing caller. */
+static struct gsm_audio_ctx g_ctx_storage = {
+    .lock = PTHREAD_MUTEX_INITIALIZER,
+    /* io_drained is initialised in JNI_OnLoad, against CLOCK_MONOTONIC. */
+};
+static struct gsm_audio_ctx *const g_ctx = &g_ctx_storage;
+
+/*
+ * Library entry point. Initialises the drain condvar alongside the (statically
+ * initialised) mutex, and pins it to CLOCK_MONOTONIC so the bounded wait in close()
+ * cannot be stretched by a wall-clock jump - an Android phone resets its realtime clock
+ * from NITZ/NTP at arbitrary moments. Runs once, before any native method below can be
+ * called; the condvar is never destroyed.
+ */
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
+    (void)vm;
+    (void)reserved;
+
+    pthread_condattr_t attr;
+    pthread_condattr_init(&attr);
+    pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+    pthread_cond_init(&g_ctx->io_drained, &attr);
+    pthread_condattr_destroy(&attr);
+
+    return JNI_VERSION_1_6;
+}
+
+/*
+ * A borrowed reference to one open PCM, plus the format fields the write path needs.
+ * Snapshotted under the lock so the hot path never touches g_ctx unlocked. Callers put
+ * this on the stack - io_acquire()/io_release() allocate nothing.
+ */
+struct io_ref {
+    struct pcm  *pcm;
+    unsigned int capture_rate;
+    unsigned int capture_channels;
+    unsigned int playback_rate;
+    unsigned int playback_channels;
+};
+
+/*
+ * Take a reference to the capture (capture != 0) or playback PCM. While the reference is
+ * held, close() cannot free it: it sees active_io > 0 and waits.
+ *
+ * @return 1 on success - the caller MUST balance it with io_release();
+ *         0 if the device is closed - the caller must NOT call io_release().
+ */
+static int io_acquire(int capture, struct io_ref *out) {
+    pthread_mutex_lock(&g_ctx->lock);
+
+    struct pcm *p = capture ? g_ctx->capture_pcm : g_ctx->playback_pcm;
+    if (!g_ctx->is_open || !p) {
+        pthread_mutex_unlock(&g_ctx->lock);
+        return 0;
+    }
+
+    out->pcm               = p;
+    out->capture_rate      = g_ctx->capture_rate;
+    out->capture_channels  = g_ctx->capture_channels;
+    out->playback_rate     = g_ctx->playback_rate;
+    out->playback_channels = g_ctx->playback_channels;
+    g_ctx->active_io++;
+
+    pthread_mutex_unlock(&g_ctx->lock);
+    return 1;
+}
+
+/* Drop a reference taken by io_acquire() and wake a waiting close() on the last one. */
+static void io_release(void) {
+    pthread_mutex_lock(&g_ctx->lock);
+    if (--g_ctx->active_io == 0) {
+        pthread_cond_broadcast(&g_ctx->io_drained);
+    }
+    pthread_mutex_unlock(&g_ctx->lock);
+}
+
+/*
+ * Wait for every in-flight pcm_read/pcm_write to return. Must be called with the lock
+ * held (pthread_cond_timedwait drops it while waiting, which is what lets io_release()
+ * run). Bounded: on timeout it logs loudly and returns so close() can never hang.
+ */
+static void drain_io_locked(void) {
+    if (g_ctx->active_io == 0) {
+        return;
+    }
+
+    struct timespec deadline;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec  += IO_DRAIN_TIMEOUT_MS / 1000;
+    deadline.tv_nsec += (long)(IO_DRAIN_TIMEOUT_MS % 1000) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_nsec -= 1000000000L;
+        deadline.tv_sec  += 1;
+    }
+
+    LOGI("close: draining %d in-flight PCM I/O", g_ctx->active_io);
+
+    while (g_ctx->active_io > 0) {
+        int rc = pthread_cond_timedwait(&g_ctx->io_drained, &g_ctx->lock, &deadline);
+        if (rc == 0) {
+            continue;
+        }
+        LOGE("!!! PCM drain gave up after %d ms with %d I/O still in flight (rc=%d) - "
+             "closing anyway. A racing pcm_read/pcm_write may now touch freed memory; "
+             "if this ever fires, pcm_stop() is not waking the reader.",
+             IO_DRAIN_TIMEOUT_MS, g_ctx->active_io, rc);
+        return;
+    }
+
+    LOGD("close: PCM I/O drained");
+}
 
 /* Helper: Get PCM format from bits */
 static enum pcm_format bits_to_format(unsigned int bits) {
@@ -107,6 +248,10 @@ static struct pcm *open_pcm_adaptive(unsigned int card, unsigned int device,
  * playback memif locks to 48 kHz once the mute/inject routing is applied, while
  * the capture memif has an SRC and accepts 8 kHz. writeFrame() upsamples from
  * captureRate (= the PJSIP port rate) to playbackRate.
+ *
+ * The entire body runs under g_ctx->lock: the fields written here are read by the
+ * pjmedia RT thread through io_acquire(), and a close() racing an open() must observe
+ * one or the other, never a half-built context (AUDIT A2).
  */
 JNIEXPORT jboolean JNICALL
 Java_org_onetwoone_gateway_GsmAudioNative_open(
@@ -121,19 +266,12 @@ Java_org_onetwoone_gateway_GsmAudioNative_open(
          playbackDevice, playbackRate, playbackChannels, bits,
          capturePeriod, playbackPeriod, periodCount);
 
-    if (g_ctx != NULL && g_ctx->is_open) {
-        LOGE("Already open, close first");
-        return JNI_FALSE;
-    }
+    pthread_mutex_lock(&g_ctx->lock);
 
-    /* Allocate context */
-    if (g_ctx == NULL) {
-        g_ctx = (struct gsm_audio_ctx *)calloc(1, sizeof(struct gsm_audio_ctx));
-        if (!g_ctx) {
-            LOGE("Failed to allocate context");
-            return JNI_FALSE;
-        }
-        pthread_mutex_init(&g_ctx->lock, NULL);
+    if (g_ctx->is_open) {
+        LOGE("Already open, close first");
+        pthread_mutex_unlock(&g_ctx->lock);
+        return JNI_FALSE;
     }
 
     g_ctx->card = card;
@@ -148,7 +286,10 @@ Java_org_onetwoone_gateway_GsmAudioNative_open(
 
     /* Per-device config templates.
      * NOTE: pcm_open() writes the granted period_size back into the config
-     * struct, so each device gets its own copy. */
+     * struct, so each device gets its own copy. Do NOT collapse these two into a
+     * single shared struct - capture and playback negotiate different periods (and,
+     * on MediaTek, different rates) and the second open would inherit the first
+     * device's granted values. */
     struct pcm_config playback_config;
     memset(&playback_config, 0, sizeof(playback_config));
     playback_config.channels = playbackChannels;
@@ -165,27 +306,29 @@ Java_org_onetwoone_gateway_GsmAudioNative_open(
     capture_config.period_count = periodCount;
     capture_config.format = bits_to_format(bits);
 
-    /* Open PLAYBACK first, then capture.
+    /* Open PLAYBACK first, then capture. This ORDER IS LOAD-BEARING - do not swap it.
      * On MediaTek AFE, opening capture (dev 5) first and then playback (dev 2)
      * in the same process makes the playback hw_params ioctl fail with EINVAL
      * (the shared modem-voice backend ends up in a state the playback memif
      * rejects). Opening playback first - when it is the only stream on the
      * backend - succeeds, and capture then attaches cleanly. Verified on-device. */
 
-    /* Open playback device (adaptive period) */
+    /* Open playback device (adaptive period) - FIRST, see above */
     g_ctx->playback_pcm = open_pcm_adaptive(card, playbackDevice, PCM_OUT, &playback_config);
     if (!g_ctx->playback_pcm) {
         LOGE("Failed to open playback PCM %d:%d (all period combos)", card, playbackDevice);
+        pthread_mutex_unlock(&g_ctx->lock);
         return JNI_FALSE;
     }
     LOGI("Playback PCM opened: %d:%d", card, playbackDevice);
 
-    /* Open capture device (adaptive period) */
+    /* Open capture device (adaptive period) - SECOND, see above */
     g_ctx->capture_pcm = open_pcm_adaptive(card, captureDevice, PCM_IN, &capture_config);
     if (!g_ctx->capture_pcm) {
         LOGE("Failed to open capture PCM %d:%d (all period combos)", card, captureDevice);
         pcm_close(g_ctx->playback_pcm);
         g_ctx->playback_pcm = NULL;
+        pthread_mutex_unlock(&g_ctx->lock);
         return JNI_FALSE;
     }
     LOGI("Capture PCM opened: %d:%d", card, captureDevice);
@@ -199,21 +342,50 @@ Java_org_onetwoone_gateway_GsmAudioNative_open(
         LOGI("Mixer opened for card %d", card);
     }
 
+    /* Published last: io_acquire() hands out references only once this is set. */
     g_ctx->is_open = 1;
+
+    pthread_mutex_unlock(&g_ctx->lock);
     return JNI_TRUE;
 }
 
 /*
- * Close audio devices
+ * Close audio devices.
+ *
+ * Called from whichever thread ends the call (main, a pjsua worker, or ConfigReload)
+ * while the pjmedia RT thread is, with high probability, blocked inside pcm_read().
+ * pcm_close() free()s the struct pcm, so it must not run until every in-flight
+ * pcm_read/pcm_write has returned (AUDIT A1).
+ *
+ * Blocks the caller for up to IO_DRAIN_TIMEOUT_MS. Never call it from the RT thread.
  */
 JNIEXPORT void JNICALL
 Java_org_onetwoone_gateway_GsmAudioNative_close(JNIEnv *env, jclass clazz) {
     LOGI("Closing audio");
 
-    if (g_ctx == NULL) return;
-
     pthread_mutex_lock(&g_ctx->lock);
 
+    /* 1. No new I/O may start: io_acquire() refuses from here on. */
+    g_ctx->is_open = 0;
+
+    /* 2. Wake whoever is already parked in the kernel. pcm_stop() issues
+     *    SNDRV_PCM_IOCTL_DROP, which aborts a blocked READI/WRITEI; without it a reader
+     *    sits in pcm_read() for up to a full period and the drain below would time out.
+     *    This happens under the lock, before anything is freed, so the structs a reader
+     *    might be touching are still valid. */
+    if (g_ctx->capture_pcm && pcm_stop(g_ctx->capture_pcm) != 0) {
+        LOGD("pcm_stop(capture) returned an error (harmless if already stopped): %s",
+             pcm_get_error(g_ctx->capture_pcm));
+    }
+    if (g_ctx->playback_pcm && pcm_stop(g_ctx->playback_pcm) != 0) {
+        LOGD("pcm_stop(playback) returned an error (harmless if already stopped): %s",
+             pcm_get_error(g_ctx->playback_pcm));
+    }
+
+    /* 3. Bounded wait for in-flight readers/writers to leave. */
+    drain_io_locked();
+
+    /* 4. Only now is it safe to free. */
     if (g_ctx->capture_pcm) {
         pcm_close(g_ctx->capture_pcm);
         g_ctx->capture_pcm = NULL;
@@ -229,14 +401,15 @@ Java_org_onetwoone_gateway_GsmAudioNative_close(JNIEnv *env, jclass clazz) {
         g_ctx->mixer = NULL;
     }
 
-    g_ctx->is_open = 0;
-
     pthread_mutex_unlock(&g_ctx->lock);
     LOGI("Audio closed");
 }
 
 /*
  * Read audio frame from capture device (GSM -> SIP direction)
+ *
+ * Runs on the pjmedia RT thread, 50x/second. Allocates nothing and holds no lock across
+ * the blocking pcm_read(); the io_ref keeps the PCM alive for exactly that long.
  *
  * @param buffer Byte array to fill with PCM data
  * @return Number of bytes read, or -1 on error
@@ -245,10 +418,6 @@ JNIEXPORT jint JNICALL
 Java_org_onetwoone_gateway_GsmAudioNative_readFrame(
         JNIEnv *env, jclass clazz, jbyteArray buffer) {
 
-    if (g_ctx == NULL || !g_ctx->is_open || !g_ctx->capture_pcm) {
-        return -1;
-    }
-
     jsize len = (*env)->GetArrayLength(env, buffer);
     jbyte *buf = (*env)->GetByteArrayElements(env, buffer, NULL);
     if (!buf) {
@@ -256,20 +425,33 @@ Java_org_onetwoone_gateway_GsmAudioNative_readFrame(
         return -1;
     }
 
-    int ret = pcm_read(g_ctx->capture_pcm, buf, len);
-
-    (*env)->ReleaseByteArrayElements(env, buffer, buf, 0);
-
-    if (ret != 0) {
-        LOGE("pcm_read failed: %s", pcm_get_error(g_ctx->capture_pcm));
+    /* Reference taken after the JNI pin, so a GC stall inside GetByteArrayElements() is
+     * not something close() has to wait out. */
+    struct io_ref io;
+    if (!io_acquire(1, &io)) {
+        (*env)->ReleaseByteArrayElements(env, buffer, buf, JNI_ABORT);
         return -1;
     }
 
-    return len;
+    int ret = pcm_read(io.pcm, buf, len);
+    if (ret != 0) {
+        /* pcm_get_error() dereferences io.pcm - still alive, the reference is held. */
+        LOGE("pcm_read failed: %s", pcm_get_error(io.pcm));
+    }
+
+    io_release();
+
+    (*env)->ReleaseByteArrayElements(env, buffer, buf, 0);
+
+    return (ret != 0) ? -1 : (jint)len;
 }
 
 /*
  * Write audio frame to playback device (SIP -> GSM direction)
+ *
+ * Runs on the pjmedia RT thread, 50x/second. Holds no lock across the blocking
+ * pcm_write(); the io_ref keeps the PCM alive for exactly that long and carries the
+ * rate/channel snapshot the resampler needs, so no g_ctx field is read unlocked.
  *
  * @param buffer Byte array with PCM data
  * @return Number of bytes written, or -1 on error
@@ -278,10 +460,6 @@ JNIEXPORT jint JNICALL
 Java_org_onetwoone_gateway_GsmAudioNative_writeFrame(
         JNIEnv *env, jclass clazz, jbyteArray buffer) {
 
-    if (g_ctx == NULL || !g_ctx->is_open || !g_ctx->playback_pcm) {
-        return -1;
-    }
-
     jsize len = (*env)->GetArrayLength(env, buffer);
     jbyte *buf = (*env)->GetByteArrayElements(env, buffer, NULL);
     if (!buf) {
@@ -289,25 +467,33 @@ Java_org_onetwoone_gateway_GsmAudioNative_writeFrame(
         return -1;
     }
 
+    struct io_ref io;
+    if (!io_acquire(0, &io)) {
+        (*env)->ReleaseByteArrayElements(env, buffer, buf, JNI_ABORT);
+        return -1;
+    }
+
     int ret;
     /* Fast path: capture (= PJSIP port) and playback formats match -> write directly. */
-    if (g_ctx->capture_rate == g_ctx->playback_rate &&
-        g_ctx->capture_channels == g_ctx->playback_channels) {
-        ret = pcm_write(g_ctx->playback_pcm, buf, len);
-    } else if (g_ctx->capture_channels == 1 && g_ctx->playback_channels == 1) {
+    if (io.capture_rate == io.playback_rate &&
+        io.capture_channels == io.playback_channels) {
+        ret = pcm_write(io.pcm, buf, len);
+    } else if (io.capture_channels == 1 && io.playback_channels == 1) {
         /* Upsample mono captureRate -> mono playbackRate via linear interpolation.
          * (MediaTek: PJSIP delivers 8 kHz mono; the modem playback memif needs
-         * 48 kHz.) */
+         * 48 kHz.)
+         * NOTE: the per-frame malloc below is a known RT-path defect, tracked as GW-23. */
         const short *in = (const short *)buf;
         int in_n = len / 2;
-        long out_n = (long)in_n * g_ctx->playback_rate / g_ctx->capture_rate;
+        long out_n = (long)in_n * io.playback_rate / io.capture_rate;
         short *out = (short *)malloc((size_t)out_n * 2);
         if (!out) {
+            io_release();
             (*env)->ReleaseByteArrayElements(env, buffer, buf, JNI_ABORT);
             LOGE("writeFrame: malloc failed for %ld out samples", out_n);
             return -1;
         }
-        double step = (double)g_ctx->capture_rate / (double)g_ctx->playback_rate;
+        double step = (double)io.capture_rate / (double)io.playback_rate;
         for (long j = 0; j < out_n; j++) {
             double srcpos = j * step;
             int i0 = (int)srcpos;
@@ -315,21 +501,23 @@ Java_org_onetwoone_gateway_GsmAudioNative_writeFrame(
             int i1 = (i0 + 1 < in_n) ? i0 + 1 : in_n - 1;
             out[j] = (short)(in[i0] * (1.0 - frac) + in[i1] * frac);
         }
-        ret = pcm_write(g_ctx->playback_pcm, out, (unsigned int)(out_n * 2));
+        ret = pcm_write(io.pcm, out, (unsigned int)(out_n * 2));
         free(out);
     } else {
         /* Unsupported channel conversion - write as-is (should not happen). */
-        ret = pcm_write(g_ctx->playback_pcm, buf, len);
+        ret = pcm_write(io.pcm, buf, len);
     }
+
+    if (ret != 0) {
+        /* pcm_get_error() dereferences io.pcm - still alive, the reference is held. */
+        LOGE("pcm_write failed: %s", pcm_get_error(io.pcm));
+    }
+
+    io_release();
 
     (*env)->ReleaseByteArrayElements(env, buffer, buf, JNI_ABORT);
 
-    if (ret != 0) {
-        LOGE("pcm_write failed: %s", pcm_get_error(g_ctx->playback_pcm));
-        return -1;
-    }
-
-    return len;
+    return (ret != 0) ? -1 : (jint)len;
 }
 
 /*
@@ -517,11 +705,18 @@ Java_org_onetwoone_gateway_GsmAudioNative_getMixerControls(
 }
 
 /*
- * Check if audio is open
+ * Check if audio is open.
+ *
+ * Advisory only: the device can be closed the instant after this returns. It exists to
+ * skip work, never to make it safe to touch a PCM - readFrame()/writeFrame() re-check
+ * under the lock via io_acquire().
  */
 JNIEXPORT jboolean JNICALL
 Java_org_onetwoone_gateway_GsmAudioNative_isOpen(JNIEnv *env, jclass clazz) {
-    return (g_ctx != NULL && g_ctx->is_open) ? JNI_TRUE : JNI_FALSE;
+    pthread_mutex_lock(&g_ctx->lock);
+    int is_open = g_ctx->is_open;
+    pthread_mutex_unlock(&g_ctx->lock);
+    return is_open ? JNI_TRUE : JNI_FALSE;
 }
 
 /*
@@ -529,11 +724,17 @@ Java_org_onetwoone_gateway_GsmAudioNative_isOpen(JNIEnv *env, jclass clazz) {
  */
 JNIEXPORT jint JNICALL
 Java_org_onetwoone_gateway_GsmAudioNative_getFrameSize(JNIEnv *env, jclass clazz) {
-    if (g_ctx == NULL || !g_ctx->is_open) {
-        return 0;
+    jint size = 0;
+
+    pthread_mutex_lock(&g_ctx->lock);
+    if (g_ctx->is_open) {
+        /* 20ms capture frame: rate/50 samples * channels * bytes_per_sample */
+        size = (jint)((g_ctx->capture_rate / 50) * g_ctx->capture_channels *
+                      (g_ctx->bits / 8));
     }
-    /* 20ms capture frame: rate/50 samples * channels * bytes_per_sample */
-    return (g_ctx->capture_rate / 50) * g_ctx->capture_channels * (g_ctx->bits / 8);
+    pthread_mutex_unlock(&g_ctx->lock);
+
+    return size;
 }
 
 /*
