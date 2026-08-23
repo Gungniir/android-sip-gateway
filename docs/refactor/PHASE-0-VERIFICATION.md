@@ -7,7 +7,7 @@
 | 0 Baseline | — | done; pristine baseline = all six switches `Off` |
 | 1 Charging stop-gate | GW-05 | **PASS** — force-enable in ~217 ms vs a 7 s budget |
 | 2 Smoke | bridge | **PASS** — two-way audio both directions, re-wire line present |
-| 3 Native UAF | GW-01 | **NOT RUN** — and see the drain caveat below |
+| 3 Native UAF | GW-01 | **NO CRASH — but proves nothing.** 13 cycles, zero drains. See A1 correction |
 | 4 Mic brick | GW-04 | **PASS** (GW-04 only — GW-02 is untestable here, see below) |
 | 5 Cancelled open | GW-08 | **NOT RUN** |
 | 6 Telecom | GW-03 | **NOT RUN** |
@@ -47,6 +47,38 @@ end by restoring it:**
 adb shell su -c 'cmd telecom set-default-dialer org.onetwoone.gateway'
 ```
 This is also a second live instance of **B4b/B4c** — the kill ran no `onDestroy`.
+
+**4. The only crash this app has ever had here is F2, and it was already fixed.** All 8
+gateway tombstones on merlinx (2026-08-01 → 2026-08-23, three on 08-23 alone) carry the
+same abort — `pj_thread_this` assertion via `pjsua_enum_transports` ←
+`Endpoint::transportEnum()`, i.e. `hasTransport()` on an unregistered thread. **None** is a
+SIGSEGV in `pcm_read`. `2626f5d` fixed it before Phase 0 started, and there have been
+**zero new tombstones in 33 cycles** since. See the A1 correction in AUDIT.md.
+
+## Second device — lavender (Redmi Note 7, SDM660, Qualcomm)
+
+Added 2026-08-23 to cover what merlinx structurally cannot. **Release-signed build**
+(`assembleRelease`) — merlinx's debug APK could not be installed over it
+(`INSTALL_FAILED_UPDATE_INCOMPATIBLE`), and uninstalling would have wiped its config, so
+the release path was used instead. Bonus: no `CheckJNI`, so this device is the right place
+to re-measure **E5** without the debug-build inflation.
+
+- `tinymix` is **not present** on lavender. A copy from merlinx works —
+  `adb push` it to `/data/local/tmp/tinymix`, `chmod 755`; `libtinyalsa.so` is present.
+- Config preserved: `gw2rn7`, `sim1=1021`, `sim2=1022`, `mute_preset=redmi_note_7`.
+- Baseline (idle): `DEC1-5 Volume = 84`, `EAR_S`/`SPK`/`DEC1-5 MUX = ZERO`,
+  `Incall_Music* = Off`, tombstones 4.
+- **`DEC* Volume` is the only diagnostic control.** The mute writes `ZERO` to `EAR_S`,
+  `SPK` and the `DEC* MUX` enums — which is *also* their idle value, so a leaked mute is
+  indistinguishable from a clean idle on those. Only `DEC* Volume` (84 = live, 0 = muted)
+  can tell you the device is bricked.
+
+| Step | Result on lavender |
+|---|---|
+| Startup | **PASS** — `Audio profile auto-detected: Qualcomm`, registered `gw2rn7` over TLS, zero fatals, zero `called off the main thread` |
+| 1 Charging stop-gate | **PASS** — force-enable in ~210 ms, both hatches in order. GW-05 now verified on both SoCs |
+| GW-02 mute lease | **STILL UNRUN** — needs GSM calls on this device; `handlesMicMute()` is `false` here so `DeviceMuteManager` *is* used |
+| GW-04 on Qualcomm | **STILL UNRUN** — the rewritten `QualcommAudioProfile` loads, but its mixer path needs a call |
 
 **Note:** the earlier "NOT RUN" status below is superseded by the table above; the rest of
 the plan is unchanged and still applies to the steps not yet run.
