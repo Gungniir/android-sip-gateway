@@ -1,8 +1,55 @@
 # Phase 0 — on-device verification plan
 
-**Status: NOT RUN.** Every Phase 0 fix has been verified only on the JVM
-(103 tests, 0 failures, `assembleDebug` + `lintDebug` green). Nothing has touched the
-phone. All eight issues are static reasoning plus unit tests until this plan passes.
+**Status: PARTIALLY RUN — 2026-08-23, merlinx, APK versionCode 4 from `refactor/phase-0`.**
+
+| Step | Covers | Result |
+|---|---|---|
+| 0 Baseline | — | done; pristine baseline = all six switches `Off` |
+| 1 Charging stop-gate | GW-05 | **PASS** — force-enable in ~217 ms vs a 7 s budget |
+| 2 Smoke | bridge | **PASS** — two-way audio both directions, re-wire line present |
+| 3 Native UAF | GW-01 | **NOT RUN** — and see the drain caveat below |
+| 4 Mic brick | GW-04 | **PASS** (GW-04 only — GW-02 is untestable here, see below) |
+| 5 Cancelled open | GW-08 | **NOT RUN** |
+| 6 Telecom | GW-03 | **NOT RUN** |
+| 7 Test call | GW-06 | **NOT RUN** |
+| 8 Thread invariants | GW-07 | **PASS so far** — zero `called off the main thread` across the whole session |
+| 9 Soak | — | **NOT RUN** |
+
+Across everything run so far: **zero tombstones** (still 32, the baseline), zero
+`Fatal signal`, zero `FATAL EXCEPTION`, zero `ConcurrentModificationException`, zero
+`setupMixer() over a live snapshot`, zero mixer-write errors, zero
+`called off the main thread`.
+
+## Three things the run itself taught us
+
+**1. GW-02 cannot be verified on this device.** `MediaTekAudioProfile.handlesMicMute()`
+returns `true`, so `DeviceMuteManager` is never used — the log says
+`Mic mute handled by audio profile - skipping DeviceMuteManager` (18×), and there are
+**zero** `Lease` lines. The mute-lease rewrite is Qualcomm-only in practice. Step 4 was
+written as "GW-02 / GW-04"; on merlinx it exercises **GW-04 only**. GW-02 needs Qualcomm
+hardware, and until it gets it, it is code-reviewed and unit-tested but unproven.
+
+**2. GW-01's drain never fired, so Step 3 still matters.** `drain_io_locked()` returns
+silently when `active_io == 0`, and across 20 teardowns there were **zero**
+`close: draining N in-flight PCM I/O` lines. In the normal teardown order the conference
+port is removed and `isCapturing` cleared before `close()` runs, so no I/O is in flight by
+then. The refcount is correct but untested by these cycles — exactly the "if N is always 0
+this step proves nothing" case Step 3 warns about. Note the tension with **E5**: the
+backtrace proves `pcm_read` *is* in flight during the media teardown, just earlier in the
+sequence than `close()`.
+
+**3. Placing a normal dialler call can strip ROLE_DIALER and kill the gateway.**
+Observed at 22:14:20: `Killing 4190:org.onetwoone.gateway (adj 50): permissions revoked`,
+after which `cmd telecom get-default-dialer` returned `com.android.dialer`. With the role
+gone `GatewayInCallService` never binds and the gateway is silently dead. **Step 4.4 must
+end by restoring it:**
+```bash
+adb shell su -c 'cmd telecom set-default-dialer org.onetwoone.gateway'
+```
+This is also a second live instance of **B4b/B4c** — the kill ran no `onDestroy`.
+
+**Note:** the earlier "NOT RUN" status below is superseded by the table above; the rest of
+the plan is unchanged and still applies to the steps not yet run.
 
 Consolidated from the eight agents' individual checklists, ordered so that the steps which
 can **strand the device** are proven before anything riskier runs.
