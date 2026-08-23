@@ -17,19 +17,67 @@ can **strand the device** are proven before anything riskier runs.
 
 ---
 
-## Step 0 — Baseline capture (before installing)
+## Step 0 — Baseline capture
 
-Record these; several later steps are "back to baseline" assertions.
+### The test device is MediaTek, not Qualcomm
+
+`merlinx` / Redmi Note 9 / MT6768 (Helio G85), sound card `mt6768-mt6358`, card 0.
+**Every Qualcomm control named below — `DEC*`, `EAR_S`, `SPK`, `VOC_REC_DL`,
+`Incall_Music` — does not exist on this device.** Only the six MediaTek crossbar
+switches apply. `handlesMicMute()` is `true` on this profile, so the mic mute is the
+`ADDA_UL` pair, not a `DeviceMuteManager` preset. (The stored `mute_preset` pref is
+`redmi_note_7`, a Qualcomm preset name — inert here, but see AUDIT H4.)
+
+### tinymix syntax on this build
+
+This device's `tinymix` has **no `get` subcommand**: `tinymix -D 0 get "NAME"` fails with
+`Invalid mixer control: get`. The working forms are:
 
 ```bash
-PKG=org.onetwoone.gateway
-adb shell su -c 'tinymix -D 0 get "DEC1 Volume"'            # Qualcomm mute controls
-adb shell su -c 'tinymix -D 0 get "EAR_S"'                  # ...and each in your preset
-adb shell su -c 'tinymix -D 0 get "PCM_2_PB_CH1 ADDA_UL_CH1"'   # MediaTek
-adb shell cat /sys/class/power_supply/battery/input_suspend     # expect 0
-adb shell ls /data/tombstones                                    # note what is already there
-adb shell su -c "ls /proc/\$(pidof $PKG)/task | wc -l"           # thread baseline
+tinymix -D 0 "NAME"          # name + value
+tinymix -D 0 -v "NAME"       # value only  ← use this in scripts
+tinymix -D 0 "NAME" 1        # set
 ```
+
+### Pristine baseline — captured 2026-08-23 after a reboot
+
+A reboot is the only way to get a trustworthy baseline: mixer state does not survive it,
+and nothing else clears a leaked crossbar. Immediately after boot, before the gateway has
+ever bridged a call, **all six switches read `Off`**:
+
+| Switch | Pristine (idle) | During a bridged call |
+|---|---|---|
+| `UL2_CH1 PCM_2_CAP_CH1` | Off | On |
+| `UL2_CH2 PCM_2_CAP_CH1` | Off | On |
+| `PCM_2_PB_CH1 DL2_CH1` | Off | On |
+| `PCM_2_PB_CH2 DL2_CH2` | Off | On |
+| `PCM_2_PB_CH1 ADDA_UL_CH1` | Off | Off (mic muted into uplink) |
+| `PCM_2_PB_CH2 ADDA_UL_CH2` | Off | Off |
+
+So **"all six Off" is the between-calls assertion** for every step below. Any `On` at idle
+means a teardown was missed.
+
+> **Why this matters more than it looks.** On the pre-Phase-0 build the first four were
+> found `On` at idle with no call in progress — a leaked crossbar from an earlier session.
+> `setupMixer` reads the *current* value as the "original" to restore, so a session that
+> starts from an already-leaked state saves the leak and faithfully restores it forever.
+> GW-04 recovers from a snapshot **it** left behind (`setupMixer() over a live snapshot`),
+> but not from one left by a **previous process** — that state lives in the kernel, not in
+> the heap. This is AUDIT **B1b/B4b** applied to the mixer, and it is unfixed.
+> **Always reboot before a verification run**, or you are measuring against a corrupt zero.
+
+### Other baselines recorded on 2026-08-23
+
+- Tombstones already present: **32** (`ls /data/tombstones | grep -c 'tombstone_[0-9]*$'`)
+- Threads at idle, registered, no call: **~30**
+- `MixerEnforce` / `GsmAudioOpen` threads at idle: **0**
+- Config: `sip_user=gw1rn9`, TLS to `pbx.kurus.me:5061`, `sim1_destination=1011`,
+  `sim2_destination=1012`, `test_destination=2001`, `battery_limit=60`
+
+### Helper
+
+`gw-check.sh [mixer|state|crash|threads|all]` (in the session scratchpad) collapses the
+between-cycle checks into one command and flags any switch that is not `Off`.
 
 ---
 
@@ -38,17 +86,38 @@ adb shell su -c "ls /proc/\$(pidof $PKG)/task | wc -l"           # thread baseli
 **This must pass before any other step.** It is the only thing standing between a bug and
 a phone that will not charge. Run it plugged in, at ≥60%.
 
-1. Start the service; set the limit just below the current level.
+> **The `STOP` broadcast does not stop the battery service.** `GatewayControlReceiver`
+> starts `BatteryLimitService` alongside `PjsipSipService`, but `STOP` only tears down the
+> SIP service — nothing in the app ever calls `stopService` on the battery one, and no UI
+> control stops it. The escape hatch under test is `onDestroy`, so it must be reached
+> directly:
+> ```bash
+> adb shell am stopservice org.onetwoone.gateway/.BatteryLimitService
+> ```
+> Verified on 2026-08-23: a `STOP` broadcast at 93% with the limit at 60 left
+> `input_suspend=1`, which is **correct** (level is above the limit) and therefore proves
+> nothing about the escape hatch. Do not use `STOP` for this step.
+
+1. Start the service; confirm the limit is below the current level (here: limit 60,
+   level 93), so charging is legitimately suspended.
 2. Wait for `input_suspend` → `1`.
-3. Stop the service: `adb shell am broadcast -p $PKG -a org.onetwoone.gateway.STOP`
-4. **`input_suspend` must return to `0` within ~7 s.**
-5. Force-stop, restart, and stop again before init completes — `input_suspend` must be `0`.
-   Expect `SAFETY: Force enabling charging on all paths` in logcat.
+3. `adb shell am stopservice org.onetwoone.gateway/.BatteryLimitService`
+4. **`input_suspend` must return to `0` within ~7 s**, with
+   `SAFETY: Force enabling charging on all paths` then `SAFETY: Charging force-enabled`
+   in logcat.
+5. Restart, and stop again before init completes — `input_suspend` must still end at `0`.
 
 **If step 4 fails: stop the whole plan and revert.**
 
-Known gap, do not treat as a failure: `adb shell am force-stop` leaves charging disabled,
-because `onDestroy` never runs. That is AUDIT **B4b**, unfixed and filed.
+Known gaps, neither a failure of this step:
+- `adb shell am force-stop` leaves charging disabled, because `onDestroy` never runs.
+  That is AUDIT **B4b**, unfixed and filed.
+- **An APK reinstall does the same.** Observed 2026-08-23: `adb install -r` killed the
+  process with `input_suspend=1` and it stayed `1` until the service was started again.
+  Same root cause as B4b — the restore state lives only in the dying process.
+- The 5 s `ENFORCE_INTERVAL_MS` re-write is **expected**, not a regression: logcat shows
+  `Charging disabled on 1 path(s)` every 5 s on both the old and the new build. GW-05
+  coalesces *decisions*, not the periodic re-assert against the HAL.
 
 ---
 
@@ -89,12 +158,14 @@ work as a phone.**
 1. 20 cycles of *answer then hang up within 1 s* (GW-02's cancellation window).
 2. 20 cycles of *back-to-back calls, hang up and redial within 1 s* (GW-04's setup/teardown
    race).
-3. After **each** cycle, every mute control back at its Step 0 value:
-   - Qualcomm: `DEC1-5 Volume`, `DEC1-5 MUX`, `EAR_S`, `SPK`; and `VOC_REC_DL`,
-     `Incall_Music Audio Mixer MultiMedia1`, `Incall_Music_2 …` all `0`.
-   - MediaTek: `PCM_2_PB_CH1/2 ADDA_UL_CH1/2` = `1`; the four enable switches = `0`.
+3. After **each** cycle, every switch back at its Step 0 value — on this device that is
+   **all six `Off`** (`gw-check.sh mixer`). Note this corrects the earlier draft, which
+   said the `ADDA_UL` pair should return to `1`: that is their in-call value, restored by
+   the HAL, not their idle value.
 4. **Then place a normal call from the phone's own dialler.** Earpiece and mic must both
-   work. This is the real test — the mixer values can look right and the path still be dead.
+   work. This is the real test — the mixer values can look right and the path still be
+   dead, and on this SoC the `ADDA_UL` pair *is* the microphone path into the modem
+   uplink. Do this at least once after Step 3 and once after Step 5.
 5. `logcat | grep ConcurrentModificationException` — zero.
 6. `grep 'Lease N cancelled after K control writes - unwinding'` — should appear in the
    1 s-hangup cycles. Its absence means the cancellation path is untested.
