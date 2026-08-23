@@ -49,7 +49,12 @@ import org.onetwoone.gateway.BuildConfig;
  * thread can hold across I/O. See GW-01 / GW-23.
  */
 public final class GatewayControlThread {
-    private static final String TAG = "GatewayControl";
+    /**
+     * Deliberately NOT "GatewayControl": {@code GatewayControlReceiver} already logs under
+     * that tag, and two unrelated components sharing one tag makes the Phase 1 verification
+     * logs ambiguous. The <em>thread</em> is still named {@link #THREAD_NAME}.
+     */
+    private static final String TAG = "GwControlThread";
 
     /** The pjlib thread name and the {@link HandlerThread} name. */
     public static final String THREAD_NAME = "GatewayControl";
