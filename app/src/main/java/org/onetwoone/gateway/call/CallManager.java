@@ -114,15 +114,135 @@ public class CallManager {
         return System.currentTimeMillis() - gsmCallPlacedTime < GSM_CALL_GRACE_PERIOD_MS;
     }
 
+    /**
+     * True when a SIP call is registered <em>and</em> has not been disposed.
+     *
+     * Callers that only want to know "is the gateway busy on SIP right now" must ask this
+     * rather than {@code getCurrentSipCall() != null}: a disposed leftover is not a call in
+     * progress, and treating it as one is what used to block every diagnostic call.
+     */
+    public boolean hasLiveSipCall() {
+        GatewayCall call = currentSipCall;
+        return call != null && !call.isDisposed();
+    }
+
     // ========== SIP Call Handling ==========
 
     /**
-     * Set outgoing SIP call (for GSM→SIP direction).
-     * This stores the call for tracking and cleanup.
+     * How the SIP layer actually places a call that has already been registered.
+     *
+     * Kept as a callback so that the register-before-dial ordering in
+     * {@link #placeOutgoingSipCall} lives in exactly one place and cannot be got wrong -
+     * or "tidied" back into the wrong order - at a call site.
      */
-    public void setOutgoingSipCall(GatewayCall call) {
+    public interface SipCallPlacer {
+        void place(GatewayCall call) throws Exception;
+    }
+
+    /**
+     * Place an outgoing SIP call (GSM→SIP direction), registering it <em>before</em> it is
+     * dialled.
+     *
+     * PJSIP can deliver {@code onCallState(PJSIP_INV_STATE_DISCONNECTED)} synchronously, on
+     * this very thread, from inside {@code makeCall()} - an immediate transport failure, a
+     * 403/404 from the PBX, or a local pjsua rejection. If the call is only registered
+     * afterwards, that callback finds {@code currentSipCall == null}, skips the clear, and
+     * the assignment then stores an already-dead call as the current one. The state machine
+     * is left at {@code IDLE} with a non-null disposed {@code currentSipCall}, which blocks
+     * every later diagnostic call. Registering first makes the callback find its own call
+     * and clear it. See docs/refactor/AUDIT.md D2.
+     *
+     * @return true if the call was registered and handed to PJSIP without an immediate
+     *         exception; false if it was refused or failed to start (state is clean either
+     *         way)
+     */
+    public boolean placeOutgoingSipCall(GatewayCall call, SipCallPlacer placer) {
+        if (!setOutgoingSipCall(call)) {
+            return false;
+        }
+
+        try {
+            placer.place(call);
+            return true;
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to place outgoing SIP call: " + e.getMessage());
+            onOutgoingCallFailed(call);
+            notifyError("Failed to place SIP call: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Register an outgoing SIP call (for GSM→SIP direction) so it can be tracked and cleaned
+     * up.
+     *
+     * This must happen <em>before</em> the INVITE goes out - prefer
+     * {@link #placeOutgoingSipCall}, which enforces that.
+     *
+     * @return true if the call is now the current one; false if a live call already holds the
+     *         slot, in which case the new call must not be placed
+     */
+    public boolean setOutgoingSipCall(GatewayCall call) {
+        if (call == null) {
+            Log.w(TAG, "Ignoring null outgoing SIP call");
+            return false;
+        }
+
+        GatewayCall existing = currentSipCall;
+        if (existing != null && existing != call) {
+            if (!existing.isDisposed()) {
+                // Overwriting would strand the old call: nothing else holds a reference to
+                // it, so it could never be hung up. Refuse the new one instead.
+                Log.e(TAG, "Refusing to replace a live SIP call with a new outgoing one");
+                return false;
+            }
+            Log.w(TAG, "Replacing a disposed SIP call reference");
+        }
+
         currentSipCall = call;
-        Log.d(TAG, "Outgoing SIP call stored for tracking");
+        Log.d(TAG, "Outgoing SIP call registered before dialling");
+        return true;
+    }
+
+    /**
+     * An outgoing SIP call never got off the ground - {@code makeCall} threw.
+     *
+     * Compare-and-clear: the call is unregistered only if it is <em>still</em> the current
+     * one. A synchronous DISCONNECTED delivered from inside {@code makeCall} may already have
+     * cleared it and torn the state machine down, and this later failure report must not then
+     * reach in and cancel whatever took its place.
+     */
+    public void onOutgoingCallFailed(GatewayCall call) {
+        if (call == null) {
+            return;
+        }
+
+        if (currentSipCall != call) {
+            Log.d(TAG, "Failed outgoing SIP call is no longer the current one, nothing to clear");
+            disposeQuietly(call);
+            return;
+        }
+
+        Log.w(TAG, "Outgoing SIP call failed before it connected, resetting");
+
+        if (state != CallState.IDLE) {
+            // Clears currentSipCall via hangupSipCall(), drops the GSM leg and returns to IDLE.
+            terminateAllCalls();
+        }
+
+        // Nothing was torn down (already IDLE), so unregister by hand.
+        if (currentSipCall == call) {
+            currentSipCall = null;
+            disposeQuietly(call);
+        }
+    }
+
+    private void disposeQuietly(GatewayCall call) {
+        try {
+            call.dispose();
+        } catch (Exception e) {
+            Log.w(TAG, "Error disposing SIP call: " + e.getMessage());
+        }
     }
 
     /**
