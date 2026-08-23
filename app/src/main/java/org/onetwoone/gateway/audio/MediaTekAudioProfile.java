@@ -3,9 +3,6 @@ package org.onetwoone.gateway.audio;
 import android.content.Context;
 import android.util.Log;
 
-import org.onetwoone.gateway.GsmAudioNative;
-
-
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -23,6 +20,10 @@ import java.util.Map;
  *   mute local mic into uplink : PCM_2_PB_CH1/2 ← ADDA_UL_CH1/2 = 0
  *
  * teardownMixer restores every switch to the value it held when setupMixer ran.
+ * The switch names, values and the order they are written in are reverse-engineered
+ * and validated on real hardware — do not change them.
+ *
+ * Thread-safety: see {@link AudioProfile} for the setup/teardown/enforce contract.
  */
 public class MediaTekAudioProfile implements AudioProfile {
     private static final String TAG = "MediaTekAudioProfile";
@@ -50,10 +51,37 @@ public class MediaTekAudioProfile implements AudioProfile {
         "PCM_2_PB_CH2 ADDA_UL_CH2",
     };
 
-    private final Map<String, Integer> originalValues = new LinkedHashMap<>();
+    /** Fallback original for a switch we expect to be off outside a bridged call. */
+    private static final int ENABLE_SWITCH_FALLBACK = 0;
+
+    /** Fallback original for a switch we expect to be on during a call. */
+    private static final int DISABLE_SWITCH_FALLBACK = 1;
+
+    private final MixerControls mixer;
+
+    /**
+     * Pre-call values of every switch above, or null when no setup is in flight.
+     * Immutable and swapped with a single write, so a teardown on main / a pjsua
+     * worker can never iterate a map that the next setup is clearing on the
+     * GsmAudioOpen thread (AUDIT B2). On this SoC that map also carries the
+     * ADDA_UL un-mute values, so losing it leaves the phone with no microphone.
+     */
+    private volatile MixerSnapshot saved;
+
+    /**
+     * Serialises setupMixer/teardownMixer against each other. enforceMixer never
+     * takes it — it must not block the MixerEnforce thread and touches no state.
+     */
+    private final Object mixerLock = new Object();
 
     public MediaTekAudioProfile(Context context) {
+        this(context, MixerControls.NATIVE);
+    }
+
+    /** Visible for testing: inject a fake mixer backend. */
+    MediaTekAudioProfile(Context context, MixerControls mixer) {
         // context currently unused; kept for signature symmetry with other profiles
+        this.mixer = mixer;
     }
 
     @Override public String name() { return "MediaTek"; }
@@ -67,50 +95,75 @@ public class MediaTekAudioProfile implements AudioProfile {
 
     @Override
     public void setupMixer(int card) {
-        Log.d(TAG, "Setting up PCM_2 modem-voice routing...");
-        originalValues.clear();
+        synchronized (mixerLock) {
+            Log.d(TAG, "Setting up PCM_2 modem-voice routing...");
 
-        for (String sw : ENABLE_SWITCHES) {
-            originalValues.put(sw, readSwitch(card, sw, 0));
-            boolean ok = GsmAudioNative.setMixerControl(card, sw, 1);
-            Log.d(TAG, (ok ? "Enabled: " : "FAILED enabling: ") + sw);
+            // A snapshot still parked here means the previous session never tore
+            // down. Restore it before reading new originals, or the values we read
+            // are our own crossbar patch and the mic mute becomes permanent.
+            MixerSnapshot stale = saved;
+            saved = null;
+            if (stale != null) {
+                Log.e(TAG, "setupMixer() over a live snapshot - the previous session never tore "
+                        + "down; restoring its " + stale.size() + " saved switch(es) first");
+                restoreSaved(card, stale);
+            }
+
+            Map<String, Integer> originalValues = new LinkedHashMap<>();
+
+            for (String sw : ENABLE_SWITCHES) {
+                originalValues.put(sw, mixer.getValue(card, sw, ENABLE_SWITCH_FALLBACK));
+                boolean ok = mixer.setValue(card, sw, 1);
+                Log.d(TAG, (ok ? "Enabled: " : "FAILED enabling: ") + sw);
+            }
+            for (String sw : DISABLE_SWITCHES) {
+                originalValues.put(sw, mixer.getValue(card, sw, DISABLE_SWITCH_FALLBACK));
+                boolean ok = mixer.setValue(card, sw, 0);
+                Log.d(TAG, (ok ? "Disabled (mic mute): " : "FAILED disabling: ") + sw);
+            }
+
+            // Publish once, fully built.
+            saved = new MixerSnapshot(originalValues, null);
+            Log.d(TAG, "MediaTek mixer setup complete");
         }
-        for (String sw : DISABLE_SWITCHES) {
-            originalValues.put(sw, readSwitch(card, sw, 1));
-            boolean ok = GsmAudioNative.setMixerControl(card, sw, 0);
-            Log.d(TAG, (ok ? "Disabled (mic mute): " : "FAILED disabling: ") + sw);
-        }
-        Log.d(TAG, "MediaTek mixer setup complete");
     }
 
     @Override
     public void enforceMixer(int card) {
-        // Re-assert desired targets only; do NOT read/save originals here.
+        // Re-assert desired targets only; do NOT read/save originals here, and do
+        // NOT take mixerLock - this runs every 2s on the MixerEnforce thread.
         for (String sw : ENABLE_SWITCHES) {
-            GsmAudioNative.setMixerControl(card, sw, 1);
+            mixer.setValue(card, sw, 1);
         }
         for (String sw : DISABLE_SWITCHES) {
-            GsmAudioNative.setMixerControl(card, sw, 0);
+            mixer.setValue(card, sw, 0);
         }
     }
 
     @Override
     public void teardownMixer(int card) {
-        Log.d(TAG, "Restoring PCM_2 routing...");
-        for (Map.Entry<String, Integer> e : originalValues.entrySet()) {
-            GsmAudioNative.setMixerControl(card, e.getKey(), e.getValue());
-            Log.d(TAG, "Restored: " + e.getKey() + " = " + e.getValue());
+        synchronized (mixerLock) {
+            // Read-then-null, then restore from the detached snapshot.
+            MixerSnapshot snapshot = saved;
+            saved = null;
+            if (snapshot == null) {
+                Log.d(TAG, "teardownMixer(): nothing saved - already torn down, ignoring");
+                return;
+            }
+
+            Log.d(TAG, "Restoring PCM_2 routing...");
+            restoreSaved(card, snapshot);
         }
-        originalValues.clear();
     }
 
     /**
-     * Read a BOOL switch value via the native tinyalsa mixer API.
-     * Returns the given fallback if the control is missing / unreadable
-     * (e.g. before ALSA permissions are applied).
+     * Write every saved switch back, in the order it was saved.
+     * Caller holds {@link #mixerLock}.
      */
-    private int readSwitch(int card, String controlName, int fallback) {
-        int v = GsmAudioNative.getMixerControl(card, controlName);
-        return v < 0 ? fallback : v;
+    private void restoreSaved(int card, MixerSnapshot snapshot) {
+        for (Map.Entry<String, Integer> e : snapshot.values().entrySet()) {
+            mixer.setValue(card, e.getKey(), e.getValue());
+            Log.d(TAG, "Restored: " + e.getKey() + " = " + e.getValue());
+        }
     }
 }
