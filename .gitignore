@@ -29,5 +29,9 @@ crash.log
 !README.md
 !CLAUDE.md
 !SKILL.md
+# ...except docs/, which is checked in on purpose: the refactor briefs under
+# docs/refactor/ are the specification agents work from, and a git worktree only
+# ever gets tracked files.
+!docs/**
 openvpn_configs
 wireguard/
