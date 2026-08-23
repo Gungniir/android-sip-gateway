@@ -27,9 +27,14 @@ import java.util.concurrent.atomic.AtomicReference;
 public class SipEndpointManager {
     private static final String TAG = "SipEndpoint";
 
-    // Endpoint is static to survive service restart
-    private static Endpoint endpoint;
-    private static boolean endpointUseTls = false;
+    // Endpoint is static to survive service restart.
+    //
+    // Written on main (createEndpointInternal, which is forced onto main because pjlib
+    // auto-registers only the thread that loaded the native library) and read from every
+    // other context that talks to PJSIP: SipInit, ConfigReload, pjsua workers, the reconnect
+    // handler and NanoHTTPD. Hence volatile; every consumer snapshots before use (AUDIT H5).
+    private static volatile Endpoint endpoint;
+    private static volatile boolean endpointUseTls = false;
 
     private final GatewayConfig config;
 
@@ -76,7 +81,10 @@ public class SipEndpointManager {
      * This is critical before creating accounts - PJSIP will crash if account is created without transport.
      */
     public boolean hasTransport() {
-        if (endpoint == null) {
+        // Snapshot: destroyEndpoint() can null the field from another thread between the
+        // check and the transportEnum() call below.
+        Endpoint ep = endpoint;
+        if (ep == null) {
             return false;
         }
         // Called from several threads that pjlib did not create - the reconnect
@@ -85,7 +93,7 @@ public class SipEndpointManager {
         registerThread(Thread.currentThread().getName());
         try {
             // Use transportEnum() to get list of transport IDs
-            IntVector transports = endpoint.transportEnum();
+            IntVector transports = ep.transportEnum();
             boolean hasTransports = transports != null && transports.size() > 0;
             if (transports != null) {
                 transports.delete();
@@ -273,6 +281,9 @@ public class SipEndpointManager {
      * Create SIP transport (UDP or TLS).
      */
     private void createTransport(boolean useTls) throws Exception {
+        // Snapshot: also reached from the endpoint-reuse path on SipInit, not just from
+        // createEndpointInternal on main.
+        Endpoint ep = endpoint;
         TransportConfig transportConfig = new TransportConfig();
 
         if (useTls) {
@@ -287,26 +298,26 @@ public class SipEndpointManager {
             tlsConfig.setVerifyClient(false);
 
             try {
-                endpoint.transportCreate(pjsip_transport_type_e.PJSIP_TRANSPORT_TLS, transportConfig);
+                ep.transportCreate(pjsip_transport_type_e.PJSIP_TRANSPORT_TLS, transportConfig);
             } catch (Exception e) {
                 // Port 5061 may be taken (e.g. by the phone's IMS/VoLTE stack) - fall back to ephemeral port.
                 // The PBX learns our contact from REGISTER, so the local port doesn't matter.
                 Log.w(TAG, "TLS port 5061 unavailable, falling back to ephemeral port: " + e.getMessage());
                 transportConfig.setPort(0);
-                endpoint.transportCreate(pjsip_transport_type_e.PJSIP_TRANSPORT_TLS, transportConfig);
+                ep.transportCreate(pjsip_transport_type_e.PJSIP_TRANSPORT_TLS, transportConfig);
             }
             Log.d(TAG, "Created TLS transport");
         } else {
             // UDP transport
             transportConfig.setPort(5060);
             try {
-                endpoint.transportCreate(pjsip_transport_type_e.PJSIP_TRANSPORT_UDP, transportConfig);
+                ep.transportCreate(pjsip_transport_type_e.PJSIP_TRANSPORT_UDP, transportConfig);
             } catch (Exception e) {
                 // Port 5060 may be taken (e.g. by the phone's IMS/VoLTE stack) - fall back to ephemeral port.
                 // The PBX learns our contact from REGISTER, so the local port doesn't matter.
                 Log.w(TAG, "UDP port 5060 unavailable, falling back to ephemeral port: " + e.getMessage());
                 transportConfig.setPort(0);
-                endpoint.transportCreate(pjsip_transport_type_e.PJSIP_TRANSPORT_UDP, transportConfig);
+                ep.transportCreate(pjsip_transport_type_e.PJSIP_TRANSPORT_UDP, transportConfig);
             }
             Log.d(TAG, "Created UDP transport");
         }
@@ -317,10 +328,12 @@ public class SipEndpointManager {
      */
     private void disableVideoCodecs() {
         try {
-            CodecInfoVector2 videoCodecs = endpoint.videoCodecEnum2();
+            // Snapshot: one object for the enum and every setPriority below it.
+            Endpoint ep = endpoint;
+            CodecInfoVector2 videoCodecs = ep.videoCodecEnum2();
             for (int i = 0; i < videoCodecs.size(); i++) {
                 CodecInfo codec = videoCodecs.get(i);
-                endpoint.videoCodecSetPriority(codec.getCodecId(), (short) 0);
+                ep.videoCodecSetPriority(codec.getCodecId(), (short) 0);
             }
             Log.d(TAG, "Video codecs disabled");
         } catch (Exception e) {
@@ -355,7 +368,11 @@ public class SipEndpointManager {
      * @return true if registration succeeded, false otherwise
      */
     public boolean registerThread(String threadName) {
-        if (endpoint == null) {
+        // Snapshot: this runs on threads pjlib has never seen, concurrently with whoever
+        // creates or destroys the endpoint - the null check and the two calls below must all
+        // see the same object.
+        Endpoint ep = endpoint;
+        if (ep == null) {
             Log.w(TAG, "Cannot register thread '" + threadName + "', endpoint is null");
             return false;
         }
@@ -365,10 +382,10 @@ public class SipEndpointManager {
             // call, so it is safe on a thread pjlib has never seen - which is the whole
             // point of asking. Skipping the re-register also stops each pass from
             // leaking another thread descriptor into pjsua's pool.
-            if (endpoint.libIsThreadRegistered()) {
+            if (ep.libIsThreadRegistered()) {
                 return true;
             }
-            endpoint.libRegisterThread(threadName);
+            ep.libRegisterThread(threadName);
             Log.d(TAG, "Thread registered: " + threadName);
             return true;
         } catch (Exception e) {
@@ -382,7 +399,10 @@ public class SipEndpointManager {
      * Closes accounts and transports but doesn't destroy the endpoint.
      */
     public void shutdown() {
-        if (endpoint == null) {
+        // Snapshot: called from main (onDestroy) while SipInit/ConfigReload may be
+        // replacing the endpoint.
+        Endpoint ep = endpoint;
+        if (ep == null) {
             return;
         }
 
@@ -390,7 +410,7 @@ public class SipEndpointManager {
 
         try {
             // Hangup all calls
-            endpoint.hangupAllCalls();
+            ep.hangupAllCalls();
         } catch (Exception e) {
             Log.w(TAG, "Error hanging up calls: " + e.getMessage());
         }
@@ -401,14 +421,16 @@ public class SipEndpointManager {
      * Should only be called when app is terminating or TLS setting changed.
      */
     public void destroyEndpoint() {
-        if (endpoint == null) {
+        // Snapshot: the checked object must be the destroyed one.
+        Endpoint ep = endpoint;
+        if (ep == null) {
             return;
         }
 
         Log.d(TAG, "Destroying endpoint");
 
         try {
-            endpoint.libDestroy();
+            ep.libDestroy();
         } catch (Exception e) {
             Log.e(TAG, "Error destroying endpoint: " + e.getMessage());
         }

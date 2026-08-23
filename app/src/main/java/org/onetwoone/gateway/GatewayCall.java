@@ -22,7 +22,15 @@ public class GatewayCall extends Call {
      */
     private static final long DTMF_DUPLICATE_WINDOW_MS = 60;
 
-    private SipCallService service;
+    /**
+     * The service the callbacks report to, or null once {@link #dispose()} has run.
+     *
+     * {@code volatile} and always snapshotted before use: {@code dispose()} is called from
+     * main, from pjsua workers and from ConfigReload, while the callbacks below run on a
+     * pjsua worker. A bare {@code if (service != null) service.…} is a TOCTOU on a field
+     * another thread is nulling (AUDIT H6).
+     */
+    private volatile SipCallService service;
     private volatile boolean disposed = false;
     private volatile String lastDtmfDigit;
     private volatile long lastDtmfAtMs;
@@ -76,8 +84,11 @@ public class GatewayCall extends Call {
                 disposed = true;
             }
 
-            if (service != null) {
-                service.onCallState(this, state);
+            // Snapshot: dispose() nulls the field from another thread - same pattern as
+            // relayDtmf() below.
+            SipCallService svc = service;
+            if (svc != null) {
+                svc.onCallState(this, state);
             }
         } catch (Exception e) {
             Log.e(TAG, "Error in onCallState: " + e.getMessage());
@@ -94,8 +105,11 @@ public class GatewayCall extends Call {
         Log.d(TAG, "Media state changed");
 
         try {
-            if (service != null) {
-                service.onCallMediaState(this);
+            // Snapshot: dispose() nulls the field from another thread - same pattern as
+            // relayDtmf() below.
+            SipCallService svc = service;
+            if (svc != null) {
+                svc.onCallMediaState(this);
             }
         } catch (Exception e) {
             Log.e(TAG, "Error in onCallMediaState: " + e.getMessage());

@@ -2,6 +2,7 @@ package org.onetwoone.gateway.diag;
 
 import android.content.Context;
 import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 
 import org.onetwoone.gateway.GatewayAccount;
@@ -87,13 +88,29 @@ public class SipTestCallManager {
 
     private final StringBuilder report = new StringBuilder();
 
-    private GatewayCall call;
+    /**
+     * Written on main (start/stopInternal), read from pjsua workers via {@link #owns} and
+     * from main/NanoHTTPD via {@link #isActive} - hence volatile, snapshotted at every
+     * consumer (AUDIT D4).
+     */
+    private volatile GatewayCall call;
+
+    /**
+     * Written on main, read by {@link #append} which pjsua workers reach through
+     * {@link #onCallState}. {@code append} is synchronized but the write is not, so the
+     * monitor gives no happens-before here - volatile does.
+     */
+    private volatile long startedAt;
+
+    // Main-thread only - see assertMainThread(String). Deliberately NOT volatile: these are
+    // written and read solely by startInternal / wireMedia / stopInternal and the two
+    // main-looper runnables, so the invariant is asserted rather than papered over.
     private Mode mode = Mode.TONE;
-    private long startedAt;
     private boolean mediaWired;
     private volatile boolean mediaValid;
 
     // Media we created/linked, kept so teardown can unwire exactly what it wired.
+    // Main-thread only, as above.
     private AudioMedia wiredCallMedia;
     private ToneGenerator toneGen;
     private AudioMediaRecorder recorder;
@@ -173,6 +190,7 @@ public class SipTestCallManager {
     // ========== Internals (main thread only) ==========
 
     private void startInternal(String destination, Mode requestedMode, int durationSec) {
+        assertMainThread("startInternal");
         if (call != null) {
             append("test call already active - ignoring start");
             return;
@@ -224,7 +242,11 @@ public class SipTestCallManager {
     }
 
     private void wireMedia() {
-        if (call == null) {
+        assertMainThread("wireMedia");
+        // Snapshot: stopInternal() nulls the field, and onCallState() on a pjsua worker can
+        // post that teardown at any point.
+        GatewayCall current = call;
+        if (current == null) {
             return;
         }
 
@@ -269,7 +291,7 @@ public class SipTestCallManager {
                     append("wired loopback (peer hears itself)");
                     break;
                 case BRIDGE:
-                    audioBridge.startBridge(call);
+                    audioBridge.startBridge(current);
                     append("wired GSM bridge; audio streams "
                             + (audioBridge.isAudioStreaming() ? "open" : "NOT open (no live GSM call?)"));
                     break;
@@ -357,14 +379,18 @@ public class SipTestCallManager {
     }
 
     private AudioMedia findActiveAudioMedia() {
+        // Snapshot: the CallInfo and the media handle must come from the same call object.
+        // No null guard on purpose - a null here behaves exactly as before, i.e. the NPE is
+        // caught below and reported.
+        GatewayCall current = call;
         try {
-            CallInfo info = call.getInfo();
+            CallInfo info = current.getInfo();
             CallMediaInfoVector mediaVec = info.getMedia();
             for (int i = 0; i < mediaVec.size(); i++) {
                 CallMediaInfo mi = mediaVec.get(i);
                 if (mi.getType() == pjmedia_type.PJMEDIA_TYPE_AUDIO
                         && mi.getStatus() == pjsua_call_media_status.PJSUA_CALL_MEDIA_ACTIVE) {
-                    return AudioMedia.typecastFromMedia(call.getMedia(i));
+                    return AudioMedia.typecastFromMedia(current.getMedia(i));
                 }
             }
         } catch (Exception e) {
@@ -374,7 +400,11 @@ public class SipTestCallManager {
     }
 
     private void stopInternal() {
-        if (call == null) {
+        assertMainThread("stopInternal");
+        // Snapshot: the call we check is the one we hang up and dispose. owns() reads this
+        // field from pjsua workers, so it must not be re-read mid-teardown.
+        GatewayCall current = call;
+        if (current == null) {
             return;
         }
 
@@ -388,10 +418,10 @@ public class SipTestCallManager {
         unwireMedia();
 
         try {
-            if (mediaValid && call.isActive()) {
+            if (mediaValid && current.isActive()) {
                 CallOpParam prm = new CallOpParam();
                 prm.setStatusCode(pjsip_status_code.PJSIP_SC_DECLINE);
-                call.hangup(prm);
+                current.hangup(prm);
             }
         } catch (Exception e) {
             append("hangup: " + e.getMessage());
@@ -399,7 +429,7 @@ public class SipTestCallManager {
 
         // Don't delete() the Call - PJSIP owns the native lifecycle (same rule as
         // CallManager.hangupSipCall). dispose() stops further callbacks.
-        call.dispose();
+        current.dispose();
         call = null;
         mediaWired = false;
         mediaValid = false;
@@ -463,9 +493,11 @@ public class SipTestCallManager {
     }
 
     private void appendDiagnostics(String label) {
-        if (call == null) return;
+        // Snapshot: the checked call is the dumped one.
+        GatewayCall current = call;
+        if (current == null) return;
         AudioMedia localSource = localSourceForMode();
-        append(SipDiagnostics.dumpAndLog(call, localSource, label));
+        append(SipDiagnostics.dumpAndLog(current, localSource, label));
     }
 
     private AudioMedia localSourceForMode() {
@@ -483,6 +515,21 @@ public class SipTestCallManager {
         String sdp = PjsipLogWriter.get().recentMatching("m=audio");
         if (!sdp.isEmpty()) {
             append("--- SIP messages carrying SDP ---\n" + sdp);
+        }
+    }
+
+    /**
+     * {@link #mode}, {@link #mediaWired}, {@link #wiredCallMedia}, {@link #toneGen},
+     * {@link #recorder}, {@link #recordFile} and {@link #loopbackWired} are owned by the main
+     * looper - every public entry point hops onto it before touching them, which is also what
+     * makes them safe to call PJSIP from. Same shape as
+     * {@code GatewayInCallService.assertMainThread}: log loudly rather than throw, so a
+     * wrong-thread diagnostic call still completes and still reports.
+     */
+    private static void assertMainThread(String what) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            Log.e(TAG, what + " called off the main thread ("
+                    + Thread.currentThread().getName() + ") - the test call internals are main-only");
         }
     }
 

@@ -47,7 +47,13 @@ public class PjsipSipService extends Service implements SipCallService {
     private static final String CHANNEL_ID = "gateway_channel";
     private static final int NOTIFICATION_ID = 1;
 
-    private static PjsipSipService instance;
+    /**
+     * Written on main ({@link #onCreate()} / {@link #onDestroy()}), read from pjsua workers,
+     * NanoHTTPD workers ({@code WebConfigServer}), the Telecom callbacks in
+     * {@code GatewayInCallService}, {@code GsmDtmfSender} and {@code GatewayControlReceiver}
+     * - hence {@code volatile} (AUDIT H5). Every consumer already snapshots it into a local.
+     */
+    private static volatile PjsipSipService instance;
 
     // Managers
     private GatewayConfig config;
@@ -85,6 +91,14 @@ public class PjsipSipService extends Service implements SipCallService {
     private static final long MUTE_RESTORE_TIMEOUT_MS = 2000L;
 
     // State
+    /**
+     * Owned by the main looper - deliberately NOT volatile, see
+     * {@link #assertMainThread(String)}. Written by {@link #onStartCommand} and
+     * {@link #onDestroy}, read by {@link #attemptReconnect()} (posted onto the main looper by
+     * {@code ReconnectionStrategy}) and by {@link #isRunning()} (the 1 Hz UI poll). The
+     * check-then-set in {@code onStartCommand} is only atomic while all of that stays on one
+     * thread, so assert the assumption rather than paper over it with a barrier (AUDIT H5).
+     */
     private boolean isRunning = false;
     private volatile boolean stopRequested = false;
     private Handler mainHandler;
@@ -306,6 +320,7 @@ public class PjsipSipService extends Service implements SipCallService {
     }
 
     private void attemptReconnect() {
+        assertMainThread("attemptReconnect");
         if (!isRunning) return;
 
         Log.d(TAG, "Attempting reconnect...");
@@ -960,7 +975,20 @@ public class PjsipSipService extends Service implements SipCallService {
     }
 
     public boolean isRunning() {
+        assertMainThread("isRunning");
         return isRunning;
+    }
+
+    /**
+     * {@link #isRunning} is owned by the main looper. Same shape as
+     * {@code GatewayInCallService.assertMainThread}: log loudly rather than throw, because a
+     * violation here is a wrong-thread bug to fix, not a reason to kill a live gateway.
+     */
+    private static void assertMainThread(String what) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            Log.e(TAG, what + " called off the main thread ("
+                    + Thread.currentThread().getName() + ") - isRunning is main-only");
+        }
     }
 
     public boolean isSipRegistered() {

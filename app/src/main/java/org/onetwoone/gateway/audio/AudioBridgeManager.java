@@ -24,15 +24,22 @@ public class AudioBridgeManager {
     private final Context context;
     private final GatewayConfig config;
 
-    // Static to survive service restart (like Endpoint)
-    private static GsmAudioPort gsmAudioPort;
-    private boolean bridgeActive = false;
+    // Static to survive service restart (like Endpoint). Written by initialize() on SipInit,
+    // read from pjsua workers (startBridge), main (start/stopAudioStreams, the test call) and
+    // ConfigReload (stopBridge) - hence volatile, and snapshotted at every consumer.
+    private static volatile GsmAudioPort gsmAudioPort;
+
+    // startBridge() runs on pjsua workers, stopBridge() on main, on a pjsua worker
+    // (onCallsTerminated) and on ConfigReload; isBridgeActive()/getStatusString() are read
+    // from NanoHTTPD. volatile makes those reads defined - it does not serialise the
+    // start/stop pair, which is E1 and belongs to GW-12.
+    private volatile boolean bridgeActive = false;
 
     // The call media currently wired to gsmAudioPort, kept so stopBridge() can unwire
     // exactly what startBridge() wired. Leaving conference links dangling across calls
     // is how a port ends up with a stale listener count.
-    private AudioMedia wiredCallMedia;
-    private int wiredConfSlot = -1;
+    private volatile AudioMedia wiredCallMedia;
+    private volatile int wiredConfSlot = -1;
 
     public interface BridgeListener {
         void onBridgeStarted();
@@ -64,16 +71,19 @@ public class AudioBridgeManager {
         try {
             Log.d(TAG, "Initializing GSM audio port...");
 
-            // Create GsmAudioPort - it selects the SoC audio profile from config
-            gsmAudioPort = new GsmAudioPort(context, config);
+            // Create GsmAudioPort - it selects the SoC audio profile from config.
+            // Published to the field first (unchanged ordering), then driven through the
+            // local so the rest of this method cannot see a different object.
+            GsmAudioPort port = new GsmAudioPort(context, config);
+            gsmAudioPort = port;
 
             // Initialize native audio
-            if (!gsmAudioPort.initialize()) {
+            if (!port.initialize()) {
                 Log.w(TAG, "Native audio init failed, will retry on call");
             }
 
             // Create PJSIP port
-            gsmAudioPort.createPort();
+            port.createPort();
 
             Log.d(TAG, "GSM audio port initialized");
 
@@ -88,7 +98,10 @@ public class AudioBridgeManager {
      * Connects GsmAudioPort to the call's audio media.
      */
     public void startBridge(GatewayCall call) {
-        if (gsmAudioPort == null) {
+        // Snapshot: runs on pjsua workers and on main while release() may null the field.
+        // Every wiring step below must act on the one port we checked.
+        GsmAudioPort port = gsmAudioPort;
+        if (port == null) {
             Log.e(TAG, "Audio port not initialized");
             notifyError("Audio port not initialized");
             return;
@@ -112,7 +125,7 @@ public class AudioBridgeManager {
                     // silently drops every link while keeping the same slot number. An
                     // early return here is what leaves the transmit leg dead
                     // (onFrameRequested stays at 0).
-                    if (bridgeActive && SipDiagnostics.isTransmitting(gsmAudioPort, confSlot)) {
+                    if (bridgeActive && SipDiagnostics.isTransmitting(port, confSlot)) {
                         Log.d(TAG, "Bridge already wired to conf slot " + confSlot);
                         return;
                     }
@@ -131,17 +144,17 @@ public class AudioBridgeManager {
                     float rxGain = GatewayConfig.dbToLinear(config.getRxGain());  // SIP→GSM
 
                     // Adjust levels on our audio port
-                    gsmAudioPort.adjustTxLevel(txGain);  // What we send to SIP
-                    gsmAudioPort.adjustRxLevel(rxGain);  // What we receive from SIP
+                    port.adjustTxLevel(txGain);  // What we send to SIP
+                    port.adjustRxLevel(rxGain);  // What we receive from SIP
 
                     Log.d(TAG, String.format("Gain: TX=%.1fdB (%.2f), RX=%.1fdB (%.2f)",
                             config.getTxGain(), txGain, config.getRxGain(), rxGain));
 
                     // Connect: GSM -> SIP (our audio port -> call audio)
-                    gsmAudioPort.startTransmit(audioMedia);
+                    port.startTransmit(audioMedia);
 
                     // Connect: SIP -> GSM (call audio -> our audio port)
-                    audioMedia.startTransmit(gsmAudioPort);
+                    audioMedia.startTransmit(port);
 
                     wiredCallMedia = audioMedia;
                     wiredConfSlot = confSlot;
@@ -152,7 +165,7 @@ public class AudioBridgeManager {
                     // Prove the conference links actually took: a source port with no
                     // listener is never pulled by the bridge, so onFrameRequested would
                     // stay at zero and nothing would ever reach SIP.
-                    SipDiagnostics.dumpAndLog(call, gsmAudioPort, "startBridge");
+                    SipDiagnostics.dumpAndLog(call, port, "startBridge");
 
                     if (listener != null) {
                         listener.onBridgeStarted();
@@ -202,11 +215,13 @@ public class AudioBridgeManager {
      * the catches only cover ordinary pjsua2 errors.
      */
     private void unwireBridge() {
+        // Snapshot both: called from main, pjsua workers and ConfigReload.
         AudioMedia media = wiredCallMedia;
+        GsmAudioPort port = gsmAudioPort;
         wiredCallMedia = null;
         wiredConfSlot = -1;
 
-        if (media == null || gsmAudioPort == null) {
+        if (media == null || port == null) {
             return;
         }
 
@@ -214,7 +229,7 @@ public class AudioBridgeManager {
         // ids pjsua_conf_disconnect() will actually be handed, and getPortId() is a
         // plain field read that is safe on a torn-down media.
         int callSlot = media.getPortId();
-        int localSlot = gsmAudioPort.getPortId();
+        int localSlot = port.getPortId();
 
         if (!SipDiagnostics.isLiveConfPort(callSlot) || !SipDiagnostics.isLiveConfPort(localSlot)) {
             Log.d(TAG, "Conference ports already gone (call=" + callSlot
@@ -223,12 +238,12 @@ public class AudioBridgeManager {
         }
 
         try {
-            gsmAudioPort.stopTransmit(media);
+            port.stopTransmit(media);
         } catch (Exception e) {
             Log.d(TAG, "stopTransmit GSM->SIP: " + e.getMessage());
         }
         try {
-            media.stopTransmit(gsmAudioPort);
+            media.stopTransmit(port);
         } catch (Exception e) {
             Log.d(TAG, "stopTransmit SIP->GSM: " + e.getMessage());
         }
@@ -239,13 +254,15 @@ public class AudioBridgeManager {
      * Should be called when GSM call becomes active.
      */
     public void startAudioStreams() {
-        if (gsmAudioPort == null) {
+        // Snapshot: the checked port must be the started one.
+        GsmAudioPort port = gsmAudioPort;
+        if (port == null) {
             Log.w(TAG, "Audio port not initialized, cannot start streams");
             return;
         }
 
         try {
-            gsmAudioPort.startCapture();
+            port.startCapture();
             Log.d(TAG, "Audio streams started");
         } catch (Exception e) {
             Log.e(TAG, "Failed to start audio streams: " + e.getMessage());
@@ -256,12 +273,14 @@ public class AudioBridgeManager {
      * Stop the underlying audio streams.
      */
     public void stopAudioStreams() {
-        if (gsmAudioPort == null) {
+        // Snapshot: the checked port must be the stopped one.
+        GsmAudioPort port = gsmAudioPort;
+        if (port == null) {
             return;
         }
 
         try {
-            gsmAudioPort.stopCapture();
+            port.stopCapture();
             Log.d(TAG, "Audio streams stopped");
         } catch (Exception e) {
             Log.e(TAG, "Error stopping audio streams: " + e.getMessage());
@@ -275,9 +294,11 @@ public class AudioBridgeManager {
         stopBridge();
         stopAudioStreams();
 
-        if (gsmAudioPort != null) {
+        // Snapshot: the checked port must be the deleted one.
+        GsmAudioPort port = gsmAudioPort;
+        if (port != null) {
             try {
-                gsmAudioPort.delete();
+                port.delete();
             } catch (Exception e) {
                 Log.w(TAG, "Error deleting audio port: " + e.getMessage());
             }
@@ -308,7 +329,9 @@ public class AudioBridgeManager {
 
     /** True when the ALSA capture/playback devices are open (i.e. a GSM call is up). */
     public boolean isAudioStreaming() {
-        return gsmAudioPort != null && gsmAudioPort.isCapturing();
+        // Snapshot: read from main and from pjsua workers.
+        GsmAudioPort port = gsmAudioPort;
+        return port != null && port.isCapturing();
     }
 
     /**
@@ -317,16 +340,22 @@ public class AudioBridgeManager {
      * Defaults to false if the port isn't initialized yet.
      */
     public boolean handlesMicMute() {
-        return gsmAudioPort != null
-                && gsmAudioPort.getProfile() != null
-                && gsmAudioPort.getProfile().handlesMicMute();
+        // Snapshot: called from the Telecom callback on main; release() can null the field.
+        GsmAudioPort port = gsmAudioPort;
+        if (port == null) {
+            return false;
+        }
+        AudioProfile profile = port.getProfile();
+        return profile != null && profile.handlesMicMute();
     }
 
     /**
      * Get status string for debugging.
      */
     public String getStatusString() {
-        if (gsmAudioPort == null) {
+        // Snapshot: read from NanoHTTPD workers and from the 1 Hz UI poll on main.
+        GsmAudioPort port = gsmAudioPort;
+        if (port == null) {
             return "Not initialized";
         }
         return bridgeActive ? "Bridge active" : "Idle";
