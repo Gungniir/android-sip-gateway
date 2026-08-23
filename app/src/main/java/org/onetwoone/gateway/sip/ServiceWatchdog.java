@@ -21,6 +21,13 @@ public class ServiceWatchdog {
     private final Runnable checkCallback;
     private final Runnable watchdogRunnable;
 
+    /**
+     * Owned by the main looper - deliberately NOT volatile, see
+     * {@link #assertMainThread(String)}. {@link #start()} and {@link #stop()} are only ever
+     * called from {@code PjsipSipService.onStartCommand} / {@code onDestroy}, and
+     * {@link #watchdogRunnable} runs on {@link #handler}, which is the main looper. The
+     * check-then-set in {@code start()} is only atomic while that holds (AUDIT H5).
+     */
     private boolean running = false;
 
     public ServiceWatchdog(Runnable checkCallback) {
@@ -54,6 +61,7 @@ public class ServiceWatchdog {
      * Start the watchdog.
      */
     public void start() {
+        assertMainThread("start");
         if (running) {
             Log.d(TAG, "Watchdog already running");
             return;
@@ -68,6 +76,7 @@ public class ServiceWatchdog {
      * Stop the watchdog.
      */
     public void stop() {
+        assertMainThread("stop");
         if (!running) {
             return;
         }
@@ -90,6 +99,18 @@ public class ServiceWatchdog {
     public void checkNow() {
         if (checkCallback != null) {
             handler.post(checkCallback);
+        }
+    }
+
+    /**
+     * {@link #running} is owned by the main looper. Same shape as
+     * {@code GatewayInCallService.assertMainThread}: log loudly rather than throw, because a
+     * violation is a wrong-thread bug to fix, not a reason to kill a live gateway.
+     */
+    private static void assertMainThread(String what) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            Log.e(TAG, what + " called off the main thread ("
+                    + Thread.currentThread().getName() + ") - running is main-only");
         }
     }
 }

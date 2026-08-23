@@ -18,16 +18,27 @@ import java.util.concurrent.TimeUnit;
 public class RootHelper {
     private static final String TAG = "RootHelper";
 
-    private static Boolean hasRoot = null;
-    private static Process suProcess = null;
-    private static DataOutputStream suOutputStream = null;
+    // Every one of these is written and read from arbitrary threads: GsmAudioOpen and SipInit
+    // (setupAlsaPermissions), SetCharging, BatteryOptDisable, ProcessRestart, SmsHandler and
+    // main. volatile makes those reads defined; each consumer snapshots before use.
+    //
+    // NOTE for Phase 1 (GW-20): the check-then-act in startRootShell() needs mutual
+    // exclusion, not visibility - two callers can both see suProcess == null and each spawn
+    // an `su`, orphaning one. Deliberately not fixed here.
+    private static volatile Boolean hasRoot = null;
+    private static volatile Process suProcess = null;
+    private static volatile DataOutputStream suOutputStream = null;
 
     /**
      * Check if root access is available
      */
     public static boolean checkRoot() {
-        if (hasRoot != null) {
-            return hasRoot;
+        // Snapshot: another thread can publish the cached answer between the null check and
+        // the unboxing return - which would be an NPE if it published null (it never does,
+        // but the read must not depend on that).
+        Boolean cached = hasRoot;
+        if (cached != null) {
+            return cached;
         }
 
         try {
@@ -36,9 +47,10 @@ public class RootHelper {
             String line = reader.readLine();
             process.waitFor();
 
-            hasRoot = (line != null && line.contains("uid=0"));
-            Log.d(TAG, "Root check: " + (hasRoot ? "AVAILABLE" : "NOT AVAILABLE"));
-            return hasRoot;
+            boolean rooted = (line != null && line.contains("uid=0"));
+            hasRoot = rooted;
+            Log.d(TAG, "Root check: " + (rooted ? "AVAILABLE" : "NOT AVAILABLE"));
+            return rooted;
 
         } catch (Exception e) {
             Log.e(TAG, "Root check failed: " + e.getMessage());
@@ -154,15 +166,19 @@ public class RootHelper {
      * Execute command in persistent root shell
      */
     public static void execInShell(String command) {
-        if (suOutputStream == null) {
+        // Snapshot: stopRootShell() and the catch below null this from other threads. A null
+        // slipping through still behaves exactly as before - the NPE lands in the catch.
+        DataOutputStream out = suOutputStream;
+        if (out == null) {
             if (!startRootShell()) {
                 return;
             }
+            out = suOutputStream;   // published by startRootShell()
         }
 
         try {
-            suOutputStream.writeBytes(command + "\n");
-            suOutputStream.flush();
+            out.writeBytes(command + "\n");
+            out.flush();
         } catch (Exception e) {
             Log.e(TAG, "Failed to exec in shell: " + e.getMessage());
             suProcess = null;
@@ -174,19 +190,22 @@ public class RootHelper {
      * Stop persistent root shell
      */
     public static void stopRootShell() {
-        if (suOutputStream != null) {
+        // Snapshot both: the objects checked must be the ones closed/destroyed.
+        DataOutputStream out = suOutputStream;
+        if (out != null) {
             try {
-                suOutputStream.writeBytes("exit\n");
-                suOutputStream.flush();
-                suOutputStream.close();
+                out.writeBytes("exit\n");
+                out.flush();
+                out.close();
             } catch (Exception e) {
                 // ignore
             }
             suOutputStream = null;
         }
 
-        if (suProcess != null) {
-            suProcess.destroy();
+        Process proc = suProcess;
+        if (proc != null) {
+            proc.destroy();
             suProcess = null;
         }
 

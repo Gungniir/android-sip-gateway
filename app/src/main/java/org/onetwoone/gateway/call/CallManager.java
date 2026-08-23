@@ -43,11 +43,19 @@ public class CallManager {
     private final GatewayConfig config;
     private final GsmDtmfSender dtmfSender;
 
-    // Current calls
-    private GatewayCall currentSipCall;
-    private String pendingGsmDestination;
-    private int pendingGsmSimSlot = 1;
-    private long gsmCallPlacedTime = 0;
+    // Current calls.
+    //
+    // All of these are written from main (onIncomingSipCall, placeGsmCall,
+    // onGsmCallConnected/Ended, onIncomingGsmCall, the watchdog's terminateAllCalls) AND
+    // from pjsua workers (onSipCallState, and the synchronous DISCONNECTED that makeCall can
+    // deliver on the dialling thread), and read from main, pjsua workers, the watchdog and
+    // NanoHTTPD (getStatusString). volatile makes those reads *defined*; it does NOT make
+    // the read-modify-write sequences atomic - GW-11 confines the state machine to one
+    // thread and is where correctness comes from (AUDIT D1).
+    private volatile GatewayCall currentSipCall;
+    private volatile String pendingGsmDestination;
+    private volatile int pendingGsmSimSlot = 1;
+    private volatile long gsmCallPlacedTime = 0;
 
     // Call state
     public enum CallState {
@@ -59,7 +67,8 @@ public class CallManager {
         TERMINATING        // Calls being terminated
     }
 
-    private CallState state = CallState.IDLE;
+    /** See {@link #currentSipCall} for the writer/reader threads. */
+    private volatile CallState state = CallState.IDLE;
 
     public interface CallListener {
         void onCallStateChanged(CallState state);
@@ -110,8 +119,10 @@ public class CallManager {
     }
 
     public boolean isInGracePeriod() {
-        if (gsmCallPlacedTime == 0) return false;
-        return System.currentTimeMillis() - gsmCallPlacedTime < GSM_CALL_GRACE_PERIOD_MS;
+        // Snapshot: the watchdog reads this while main/a pjsua worker clears it.
+        long placedAt = gsmCallPlacedTime;
+        if (placedAt == 0) return false;
+        return System.currentTimeMillis() - placedAt < GSM_CALL_GRACE_PERIOD_MS;
     }
 
     /**
@@ -217,7 +228,10 @@ public class CallManager {
             return;
         }
 
-        if (currentSipCall != call) {
+        // Snapshot: a synchronous DISCONNECTED from inside makeCall may already have cleared
+        // the field on this very thread, or a pjsua worker on another one.
+        GatewayCall registered = currentSipCall;
+        if (registered != call) {
             Log.d(TAG, "Failed outgoing SIP call is no longer the current one, nothing to clear");
             disposeQuietly(call);
             return;
@@ -230,7 +244,9 @@ public class CallManager {
             terminateAllCalls();
         }
 
-        // Nothing was torn down (already IDLE), so unregister by hand.
+        // Nothing was torn down (already IDLE), so unregister by hand. Deliberately a FRESH
+        // read, not the snapshot above: terminateAllCalls() may have cleared the field in
+        // between, and that is exactly what this second check is asking about.
         if (currentSipCall == call) {
             currentSipCall = null;
             disposeQuietly(call);
@@ -330,9 +346,12 @@ public class CallManager {
 
             Log.d(TAG, "SIP call answered");
 
-            // Notify that GSM call is needed
-            if (listener != null && pendingGsmDestination != null) {
-                listener.onGsmCallNeeded(pendingGsmDestination, pendingGsmSimSlot);
+            // Notify that GSM call is needed. Snapshot: onGsmCallEnded /
+            // terminateAllCalls() null this from another thread, so the checked value must
+            // be the dialled one.
+            String destination = pendingGsmDestination;
+            if (listener != null && destination != null) {
+                listener.onGsmCallNeeded(destination, pendingGsmSimSlot);
             }
 
         } catch (Exception e) {
@@ -557,11 +576,14 @@ public class CallManager {
      * Hangup current SIP call.
      */
     public synchronized void hangupSipCall() {
-        if (currentSipCall == null) {
+        // One snapshot for both the guard and the teardown: the writers (onSipCallState on a
+        // pjsua worker, onOutgoingCallFailed) do not take this monitor, so re-reading the
+        // field after the null check could hand us a null - or a different call.
+        GatewayCall callToDispose = currentSipCall;
+        if (callToDispose == null) {
             return;
         }
 
-        GatewayCall callToDispose = currentSipCall;
         currentSipCall = null;  // Clear first to prevent multiple calls
 
         // Mark as disposed to prevent further callbacks

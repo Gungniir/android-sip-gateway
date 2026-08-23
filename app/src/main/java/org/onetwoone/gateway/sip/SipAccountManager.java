@@ -21,9 +21,18 @@ public class SipAccountManager {
     private final GatewayConfig config;
     private final SipEndpointManager endpointManager;
 
-    private GatewayAccount account;
-    private boolean registered = false;
-    private String lastError = null;
+    /**
+     * Written by {@code SipInit} ({@link #createAccount}) and by {@code ConfigReload} /
+     * main ({@link #deleteAccount}); read from main, {@code SipInit}, {@code ConfigReload}
+     * and NanoHTTPD workers. Snapshot before use.
+     */
+    private volatile GatewayAccount account;
+
+    /** Written on a pjsua worker ({@link #onRegState}); read from main and NanoHTTPD. */
+    private volatile boolean registered = false;
+
+    /** Written on a pjsua worker ({@link #onRegState}); read from main and NanoHTTPD. */
+    private volatile String lastError = null;
 
     public interface AccountListener {
         void onRegistrationState(boolean registered, String reason);
@@ -140,20 +149,23 @@ public class SipAccountManager {
      * Unregister and delete the account.
      */
     public void deleteAccount() {
-        if (account == null) {
+        // Snapshot: createAccount() runs on SipInit/ConfigReload and can replace the field
+        // while this runs, and every step below must act on the same account object.
+        GatewayAccount doomed = account;
+        if (doomed == null) {
             return;
         }
 
         Log.d(TAG, "Deleting account");
 
         try {
-            account.setRegistration(false);
+            doomed.setRegistration(false);
         } catch (Exception e) {
             Log.w(TAG, "Error unregistering: " + e.getMessage());
         }
 
         try {
-            account.delete();
+            doomed.delete();
         } catch (Exception e) {
             Log.w(TAG, "Error deleting account: " + e.getMessage());
         }
@@ -185,14 +197,18 @@ public class SipAccountManager {
      * Get status string for UI.
      */
     public String getStatusString() {
+        // The pjsua worker that runs onRegState can change these underneath this method.
+        // account/registered are each read once; lastError is snapshotted below so the
+        // tested value is the reported one.
         if (account == null) {
             return "Not configured";
         }
         if (registered) {
             return "Registered";
         }
-        if (lastError != null) {
-            return "Error: " + lastError;
+        String error = lastError;
+        if (error != null) {
+            return "Error: " + error;
         }
         return "Connecting...";
     }

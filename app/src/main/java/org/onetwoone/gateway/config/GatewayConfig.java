@@ -94,7 +94,15 @@ public class GatewayConfig {
     private final SharedPreferences audioPrefs;
     private final SharedPreferences mutePrefs;
 
-    private static GatewayConfig instance;
+    /**
+     * The singleton. {@code volatile} because {@link #init(Context)} is {@code synchronized}
+     * but {@link #getInstance()} is not: without it a reader on another thread may observe
+     * the reference before the constructor's writes to {@code gatewayPrefs} /
+     * {@code audioPrefs} / {@code mutePrefs} are visible, i.e. a partially constructed
+     * instance. Readers span main, the mute thread, NanoHTTPD workers and pjsua workers
+     * (AUDIT H5).
+     */
+    private static volatile GatewayConfig instance;
 
     private GatewayConfig(Context context) {
         Context appContext = context.getApplicationContext();
@@ -117,10 +125,13 @@ public class GatewayConfig {
      * @throws IllegalStateException if init() was not called
      */
     public static GatewayConfig getInstance() {
-        if (instance == null) {
+        // Snapshot: another thread's init() can publish between the null check and the
+        // return, so the checked value and the returned value must be the same read.
+        GatewayConfig current = instance;
+        if (current == null) {
             throw new IllegalStateException("GatewayConfig not initialized. Call init(context) first.");
         }
-        return instance;
+        return current;
     }
 
     // ========== SIP Configuration ==========

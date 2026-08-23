@@ -20,9 +20,17 @@ public class ReconnectionStrategy {
     private final Handler handler;
     private final Runnable reconnectAction;
 
-    private int currentDelay;
-    private boolean enabled = true;
-    private boolean pending = false;
+    // scheduleReconnect() is called from SipInit (initializeSip's failure path) and from the
+    // main looper (attemptReconnect, the posted registration callback); setEnabled() from
+    // main and from PjsipSipService.stop(). The runnable itself always fires on main.
+    // volatile makes those reads defined.
+    //
+    // NOTE for Phase 1: the `pending` check-then-set in scheduleReconnect() needs mutual
+    // exclusion, not visibility - two callers can both observe pending==false and queue two
+    // reconnects. Deliberately left alone here; GW-15 owns it.
+    private volatile int currentDelay;
+    private volatile boolean enabled = true;
+    private volatile boolean pending = false;
 
     public ReconnectionStrategy(Runnable reconnectAction) {
         this.handler = new Handler(Looper.getMainLooper());
