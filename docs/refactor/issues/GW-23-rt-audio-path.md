@@ -65,6 +65,10 @@ work. Worth confirming and simplifying.
 4. **Keep the counters cheap.** `framesRequested`/`framesReceived` (`:66-67`) are plain
    `long` incremented on the RT thread and read from `stopCapture` — make them `volatile`
    or `AtomicLong`, but do **not** put them on a contended path.
+4b. **Drop the redundant `isOpen()` pre-check (AUDIT H2b).** Since GW-01 landed,
+   `readFrame`/`writeFrame` test `is_open` under the native lock and return -1 safely, so
+   the `GsmAudioNative.isOpen()` calls at `:155` and `:196` are a third lock acquisition
+   per frame per direction for no benefit. Remove them and rely on the -1 return.
 5. **Do not add a lock the control thread can hold across I/O.** The RT callbacks must
    never wait on anything the control thread holds while shelling out to root or opening
    ALSA. GW-01's `io_acquire` is a short critical section — that is the only acceptable

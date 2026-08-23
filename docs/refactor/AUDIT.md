@@ -339,6 +339,33 @@ those is an NPE inside `onDestroy`.
 The reverse — a live GSM call with no SIP leg — is never detected, so a failed bridge can
 burn GSM minutes indefinitely.
 
+#### H2b. The Java-side `isOpen()` pre-check is now redundant overhead
+Post-GW-01, `readFrame`/`writeFrame` check `is_open` under the lock and return -1 safely.
+`GsmAudioPort.onFrameRequested` (`:155`) and `onFrameReceived` (`:196`) still call
+`GsmAudioNative.isOpen()` first, which is now a third lock acquisition per frame per
+direction for no benefit. Dropping it is a free win — fold into **GW-23**.
+
+#### H2c. `stopCapture()` worst case is now ~1.75 s, on the main thread — RAISED to P1
+After GW-01 and GW-08 landed, `GsmAudioPort.stopCapture()` can block its caller for the
+sum of three bounded waits:
+
+| Wait | Constant | Worst case |
+|---|---|---|
+| join the open worker | `OPEN_JOIN_MS` | 1000 ms |
+| join the enforce thread (held under `stateLock`) | `ENFORCE_JOIN_MS` | 500 ms |
+| native in-flight I/O drain | `IO_DRAIN_TIMEOUT_MS` | 250 ms |
+
+**= up to 1.75 s**, and it runs on the **main thread** via the `Call.Callback` →
+`onGsmCallStateChanged` → `stopAudioStreams()` path, and on a pjsua worker via
+`onCallsTerminated`. Typical cost is a few ms — all three waits only reach their bound in
+the pathological cases — but the tail is now long enough to matter on a call-teardown
+path.
+
+Neither GW-01 nor GW-08 introduced the problem (both bounds are correct and necessary);
+they made an existing main-thread blocking call measurably worse. The fix is GW-10/GW-26:
+`stopCapture` must not run on the main thread at all. Track on **GW-26**'s ANR ledger and
+re-check the number once the control thread exists.
+
 #### H9b. `handleIncomingGsmCall` leaks a ringing call when `answer()` throws
 `GatewayInCallService.handleIncomingGsmCall`, MODE_ANSWER_FIRST branch: if
 `call.answer()` throws, it cancels the incoming timeout and returns, leaving
