@@ -610,6 +610,49 @@ half-applied mute.
 > well inside the reported `dsrange 0->124`), so it cannot restore them. A reboot resets
 > the mixer to kernel defaults — verified: `DEC1-5 Volume` back to `84`.
 
+#### B1d. The mic-volume restore is **rejected by the kernel**, and the failure is discarded — P1
+Found 2026-08-23 on lavender, after B1c and the mixer-handle cache were both in place.
+The mute/restore bookkeeping is now correct — `Lease N muted 12 controls` followed by
+`Restoring 12 controls`, three cycles in a row, with true originals (`was: 84`). The
+controls still do not come back.
+
+Raw log, one cycle:
+```
+23:30:07.306 setMixerControl: 'DEC1 Volume', value=0
+23:30:07.306 Set mixer control 'DEC1 Volume' = 0                     <- mute OK (mid-call)
+23:30:14.153 setMixerControl: 'DEC1 Volume', value=84
+23:30:14.153 Failed to set mixer control 'DEC1 Volume' to 84: -1     <- restore REJECTED
+23:30:14.153 DeviceMute: Restored: DEC1 Volume                       <- logged as success
+```
+
+Two separate defects:
+
+1. **The write is refused.** `mixer_ctl_set_value(ctl, 0, 84)` returns `-1`. Writing `0`
+   to the same control succeeds. Reproduced outside the app: `tinymix -D 0 23 84` gives
+   `Error: invalid value` while `tinymix -D 0 23 1` succeeds, on a control that reports
+   `dsrange 0->124`. The mute lands *during* the call and the restore lands *after* it, so
+   the likely cause is that the Qualcomm decimator is gone by restore time and the driver
+   rejects a non-zero volume on an inactive path. **Not yet proven** — the test is to
+   restore while the call is still up and see whether the write is accepted.
+2. **The failure is invisible.** `MixerBackend.setValue`/`setEnum` return `void`, so
+   `restoreOne()` cannot tell a rejected write from a successful one and logs
+   `Restored: <control>` either way. That log is actively misleading: it is what made this
+   look like "the restore never ran" for two rounds of debugging.
+
+Note the ENUM controls **do** restore correctly (`EAR_S` back to `Switch`, `DEC1 MUX` back
+to `ADC1` on every cycle) — only the INT volumes are refused.
+
+Fix, smallest first:
+- Make the backend setters return `boolean`, check them in the restore path, and log a
+  warning naming the control and the attempted value. Cheap, and turns a silent brick into
+  a diagnosable one.
+- Then establish *when* the write is accepted. If it only works while the decimator is
+  live, the restore has to happen before the call fully tears down, or be re-applied when
+  the path next activates — which is a real design question, not a patch.
+
+Impact is limited on a dedicated gateway phone (the device owner has accepted it there),
+but on any phone also used for normal calls this is still the B1 brick.
+
 #### B4b. `BatteryWatchdog` only rescues a phone below 25% — the kill path has no real backstop
 `BatteryWatchdog.java:27` (`CRITICAL_LEVEL`). If the process is killed
 (`am force-stop`, SIGKILL, crash) `BatteryLimitService.onDestroy` never runs, so GW-05's
