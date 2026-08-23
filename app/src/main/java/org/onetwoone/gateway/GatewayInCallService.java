@@ -323,15 +323,19 @@ public class GatewayInCallService extends InCallService {
 
                 // Hangup GSM call - snapshot first, onCallRemoved may null the field
                 Call call = currentCall;
-                if (call != null && call == armedFor) {
-                    try {
-                        call.disconnect();
-                        Log.d(TAG, "GSM call disconnected due to timeout");
-                    } catch (Exception e) {
-                        Log.e(TAG, "Failed to disconnect GSM on timeout: " + e.getMessage());
-                    }
-                } else {
-                    Log.d(TAG, "Timeout fired for a call that is no longer tracked, skipping GSM hangup");
+                if (call == null || call != armedFor) {
+                    // Stale timer: the call it was armed for is gone. Hanging the SIP leg
+                    // up here would kill whatever call is current NOW, so do nothing -
+                    // orphan legs are the watchdog's job, not this timer's.
+                    Log.d(TAG, "Timeout fired for a call that is no longer tracked, ignoring");
+                    return;
+                }
+
+                try {
+                    call.disconnect();
+                    Log.d(TAG, "GSM call disconnected due to timeout");
+                } catch (Exception e) {
+                    Log.e(TAG, "Failed to disconnect GSM on timeout: " + e.getMessage());
                 }
 
                 // Hangup SIP call
