@@ -528,6 +528,54 @@ Java_org_onetwoone_gateway_GsmAudioNative_writeFrame(
  * @param value       Value to set (0 or 1 for switches)
  * @return true on success
  */
+
+/* ---- Cached control-mixer handle -----------------------------------------
+ *
+ * mixer_open() enumerates every control on the card. Measured on SDM660
+ * (Redmi Note 7) that costs a mean of 767 ms per call, max 2.0 s -- and every
+ * mixer entry point below used to pay it, once per control.
+ *
+ * Three threads do that concurrently (GsmAudioOpen running setupMixer,
+ * MuteControls running the mute preset, MixerEnforce re-asserting every 2 s),
+ * so they also contended: the fast path was 35 ms and the slow path 2 s, purely
+ * from overlap. The visible results were a ~4.9 s gap between the GSM call
+ * going ACTIVE and audio starting, a 12-control mute taking ~14 s, and mute
+ * leases being cancelled mid-write because the call ended before they finished.
+ *
+ * So the handle is opened once per card and reused. Callers hold
+ * g_ctl_mixer_lock for the whole operation, which additionally serialises the
+ * three threads and prevents concurrent mixer_open() storms. The individual
+ * ioctls are microseconds, so serialising them costs nothing worth measuring.
+ *
+ * This is deliberately separate from g_ctx->mixer, which belongs to the PCM
+ * open/close path and has a different lifetime.
+ */
+static pthread_mutex_t g_ctl_mixer_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct mixer *g_ctl_mixer = NULL;
+static int g_ctl_mixer_card = -1;
+
+/*
+ * Return the cached mixer for `card`, opening it if needed.
+ * Caller must already hold g_ctl_mixer_lock and must unlock on every path.
+ * Returns NULL if the card cannot be opened.
+ */
+static struct mixer *ctl_mixer_get_locked(int card) {
+    if (g_ctl_mixer && g_ctl_mixer_card == card) {
+        return g_ctl_mixer;
+    }
+    if (g_ctl_mixer) {
+        mixer_close(g_ctl_mixer);
+        g_ctl_mixer = NULL;
+        g_ctl_mixer_card = -1;
+    }
+    g_ctl_mixer = mixer_open(card);
+    if (g_ctl_mixer) {
+        g_ctl_mixer_card = card;
+        LOGI("Opened control mixer for card %d (cached for reuse)", card);
+    }
+    return g_ctl_mixer;
+}
+
 JNIEXPORT jboolean JNICALL
 Java_org_onetwoone_gateway_GsmAudioNative_setMixerControl(
         JNIEnv *env, jclass clazz,
@@ -541,9 +589,11 @@ Java_org_onetwoone_gateway_GsmAudioNative_setMixerControl(
 
     LOGD("setMixerControl: card=%d, control='%s', value=%d", card, name, value);
 
-    struct mixer *mix = mixer_open(card);
+    pthread_mutex_lock(&g_ctl_mixer_lock);
+    struct mixer *mix = ctl_mixer_get_locked(card);
     if (!mix) {
         LOGE("Failed to open mixer for card %d", card);
+        pthread_mutex_unlock(&g_ctl_mixer_lock);
         (*env)->ReleaseStringUTFChars(env, controlName, name);
         return JNI_FALSE;
     }
@@ -551,7 +601,7 @@ Java_org_onetwoone_gateway_GsmAudioNative_setMixerControl(
     struct mixer_ctl *ctl = mixer_get_ctl_by_name(mix, name);
     if (!ctl) {
         LOGE("Mixer control '%s' not found", name);
-        mixer_close(mix);
+        pthread_mutex_unlock(&g_ctl_mixer_lock);
         (*env)->ReleaseStringUTFChars(env, controlName, name);
         return JNI_FALSE;
     }
@@ -559,14 +609,14 @@ Java_org_onetwoone_gateway_GsmAudioNative_setMixerControl(
     int ret = mixer_ctl_set_value(ctl, 0, value);
     if (ret < 0) {
         LOGE("Failed to set mixer control '%s' to %d: %d", name, value, ret);
-        mixer_close(mix);
+        pthread_mutex_unlock(&g_ctl_mixer_lock);
         (*env)->ReleaseStringUTFChars(env, controlName, name);
         return JNI_FALSE;
     }
 
     LOGI("Set mixer control '%s' = %d", name, value);
 
-    mixer_close(mix);
+    pthread_mutex_unlock(&g_ctl_mixer_lock);
     (*env)->ReleaseStringUTFChars(env, controlName, name);
     return JNI_TRUE;
 }
@@ -588,9 +638,11 @@ Java_org_onetwoone_gateway_GsmAudioNative_getMixerControl(
         return -1;
     }
 
-    struct mixer *mix = mixer_open(card);
+    pthread_mutex_lock(&g_ctl_mixer_lock);
+    struct mixer *mix = ctl_mixer_get_locked(card);
     if (!mix) {
         LOGE("Failed to open mixer for card %d", card);
+        pthread_mutex_unlock(&g_ctl_mixer_lock);
         (*env)->ReleaseStringUTFChars(env, controlName, name);
         return -1;
     }
@@ -598,14 +650,14 @@ Java_org_onetwoone_gateway_GsmAudioNative_getMixerControl(
     struct mixer_ctl *ctl = mixer_get_ctl_by_name(mix, name);
     if (!ctl) {
         LOGE("Mixer control '%s' not found", name);
-        mixer_close(mix);
+        pthread_mutex_unlock(&g_ctl_mixer_lock);
         (*env)->ReleaseStringUTFChars(env, controlName, name);
         return -1;
     }
 
     int value = mixer_ctl_get_value(ctl, 0);
 
-    mixer_close(mix);
+    pthread_mutex_unlock(&g_ctl_mixer_lock);
     (*env)->ReleaseStringUTFChars(env, controlName, name);
     return value;
 }
@@ -635,9 +687,11 @@ Java_org_onetwoone_gateway_GsmAudioNative_getMixerControlEnum(
         return NULL;
     }
 
-    struct mixer *mix = mixer_open(card);
+    pthread_mutex_lock(&g_ctl_mixer_lock);
+    struct mixer *mix = ctl_mixer_get_locked(card);
     if (!mix) {
         LOGE("Failed to open mixer for card %d", card);
+        pthread_mutex_unlock(&g_ctl_mixer_lock);
         (*env)->ReleaseStringUTFChars(env, controlName, name);
         return NULL;
     }
@@ -645,14 +699,14 @@ Java_org_onetwoone_gateway_GsmAudioNative_getMixerControlEnum(
     struct mixer_ctl *ctl = mixer_get_ctl_by_name(mix, name);
     if (!ctl) {
         LOGE("Mixer control '%s' not found", name);
-        mixer_close(mix);
+        pthread_mutex_unlock(&g_ctl_mixer_lock);
         (*env)->ReleaseStringUTFChars(env, controlName, name);
         return NULL;
     }
 
     if (mixer_ctl_get_type(ctl) != MIXER_CTL_TYPE_ENUM) {
         LOGE("Mixer control '%s' is not an ENUM", name);
-        mixer_close(mix);
+        pthread_mutex_unlock(&g_ctl_mixer_lock);
         (*env)->ReleaseStringUTFChars(env, controlName, name);
         return NULL;
     }
@@ -661,19 +715,21 @@ Java_org_onetwoone_gateway_GsmAudioNative_getMixerControlEnum(
     int idx = mixer_ctl_get_value(ctl, 0);
     if (idx < 0 || (unsigned int) idx >= mixer_ctl_get_num_enums(ctl)) {
         LOGE("Mixer control '%s' has out-of-range enum index %d", name, idx);
-        mixer_close(mix);
+        pthread_mutex_unlock(&g_ctl_mixer_lock);
         (*env)->ReleaseStringUTFChars(env, controlName, name);
         return NULL;
     }
 
     const char *item = mixer_ctl_get_enum_string(ctl, idx);
-    /* Copy into a Java string before mixer_close() frees the mixer's own storage. */
+    /* Points into the mixer's own metadata storage - copy it out while we still hold
+     * g_ctl_mixer_lock, since ctl_mixer_get_locked() may close and re-open the handle
+     * for a different card. */
     jstring result = item ? (*env)->NewStringUTF(env, item) : NULL;
     if (!item) {
         LOGE("Mixer control '%s' enum index %d has no name", name, idx);
     }
 
-    mixer_close(mix);
+    pthread_mutex_unlock(&g_ctl_mixer_lock);
     (*env)->ReleaseStringUTFChars(env, controlName, name);
     return result;
 }
@@ -702,9 +758,11 @@ Java_org_onetwoone_gateway_GsmAudioNative_setMixerControlEnum(
 
     LOGD("setMixerControlEnum: card=%d, control='%s', value='%s'", card, name, val);
 
-    struct mixer *mix = mixer_open(card);
+    pthread_mutex_lock(&g_ctl_mixer_lock);
+    struct mixer *mix = ctl_mixer_get_locked(card);
     if (!mix) {
         LOGE("Failed to open mixer for card %d", card);
+        pthread_mutex_unlock(&g_ctl_mixer_lock);
         (*env)->ReleaseStringUTFChars(env, controlName, name);
         (*env)->ReleaseStringUTFChars(env, value, val);
         return JNI_FALSE;
@@ -713,7 +771,7 @@ Java_org_onetwoone_gateway_GsmAudioNative_setMixerControlEnum(
     struct mixer_ctl *ctl = mixer_get_ctl_by_name(mix, name);
     if (!ctl) {
         LOGE("Mixer control '%s' not found", name);
-        mixer_close(mix);
+        pthread_mutex_unlock(&g_ctl_mixer_lock);
         (*env)->ReleaseStringUTFChars(env, controlName, name);
         (*env)->ReleaseStringUTFChars(env, value, val);
         return JNI_FALSE;
@@ -722,7 +780,7 @@ Java_org_onetwoone_gateway_GsmAudioNative_setMixerControlEnum(
     int ret = mixer_ctl_set_enum_by_string(ctl, val);
     if (ret < 0) {
         LOGE("Failed to set mixer control '%s' to '%s': %d", name, val, ret);
-        mixer_close(mix);
+        pthread_mutex_unlock(&g_ctl_mixer_lock);
         (*env)->ReleaseStringUTFChars(env, controlName, name);
         (*env)->ReleaseStringUTFChars(env, value, val);
         return JNI_FALSE;
@@ -730,7 +788,7 @@ Java_org_onetwoone_gateway_GsmAudioNative_setMixerControlEnum(
 
     LOGI("Set mixer control '%s' = '%s'", name, val);
 
-    mixer_close(mix);
+    pthread_mutex_unlock(&g_ctl_mixer_lock);
     (*env)->ReleaseStringUTFChars(env, controlName, name);
     (*env)->ReleaseStringUTFChars(env, value, val);
     return JNI_TRUE;
@@ -746,9 +804,11 @@ JNIEXPORT jobjectArray JNICALL
 Java_org_onetwoone_gateway_GsmAudioNative_getMixerControls(
         JNIEnv *env, jclass clazz, jint card) {
 
-    struct mixer *mix = mixer_open(card);
+    pthread_mutex_lock(&g_ctl_mixer_lock);
+    struct mixer *mix = ctl_mixer_get_locked(card);
     if (!mix) {
         LOGE("Failed to open mixer for card %d", card);
+        pthread_mutex_unlock(&g_ctl_mixer_lock);
         return NULL;
     }
 
@@ -768,7 +828,7 @@ Java_org_onetwoone_gateway_GsmAudioNative_getMixerControls(
         }
     }
 
-    mixer_close(mix);
+    pthread_mutex_unlock(&g_ctl_mixer_lock);
     return result;
 }
 
