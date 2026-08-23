@@ -354,8 +354,9 @@ sum of three bounded waits:
 | join the open worker | `OPEN_JOIN_MS` | 1000 ms |
 | join the enforce thread (held under `stateLock`) | `ENFORCE_JOIN_MS` | 500 ms |
 | native in-flight I/O drain | `IO_DRAIN_TIMEOUT_MS` | 250 ms |
+| `teardownMixer` waiting on GW-04's `mixerLock` behind an in-flight `setupMixer` | unbounded — one `Runtime.exec("su -c tinymix …")` per configured Volume control | hundreds of ms × N controls |
 
-**= up to 1.75 s**, and it runs on the **main thread** via the `Call.Callback` →
+**= 1.75 s plus the mixer lock wait**, and it runs on the **main thread** via the `Call.Callback` →
 `onGsmCallStateChanged` → `stopAudioStreams()` path, and on a pjsua worker via
 `onCallsTerminated`. Typical cost is a few ms — all three waits only reach their bound in
 the pathological cases — but the tail is now long enough to matter on a call-teardown
@@ -365,6 +366,22 @@ Neither GW-01 nor GW-08 introduced the problem (both bounds are correct and nece
 they made an existing main-thread blocking call measurably worse. The fix is GW-10/GW-26:
 `stopCapture` must not run on the main thread at all. Track on **GW-26**'s ANR ledger and
 re-check the number once the control thread exists.
+
+#### B4b. `BatteryWatchdog` only rescues a phone below 25% — the kill path has no real backstop
+`BatteryWatchdog.java:27` (`CRITICAL_LEVEL`). If the process is killed
+(`am force-stop`, SIGKILL, crash) `BatteryLimitService.onDestroy` never runs, so GW-05's
+force-enable hatch does not fire and charging stays disabled. The only out-of-process
+backstop is this WorkManager job — but it force-enables only below 25%. **A phone
+stranded at 60% with a 60% limit is not recovered; it silently discharges through the
+entire buffer down to 25% before anything acts.**
+
+`BatteryWatchdog.forceEnableCharging()` (`:75-81`) also covers only 3 of the 7
+`CHARGING_PATHS` — it is now inconsistent with the full sweep GW-05 gave the service.
+
+Fix: force-enable whenever `isPluggedIn && !isCharging` and `BatteryLimitService` is not
+running, and share the path list. Found by the GW-05 agent; genuinely out of its scope.
+**Deserves its own issue** — it is the last gap in the "device never strands itself"
+property, and GW-05 explicitly cannot close it from inside the service.
 
 #### H9b. `handleIncomingGsmCall` leaks a ringing call when `answer()` throws
 `GatewayInCallService.handleIncomingGsmCall`, MODE_ANSWER_FIRST branch: if
