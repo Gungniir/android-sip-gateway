@@ -31,8 +31,9 @@ public class SipEndpointManager {
     //
     // Written on main (createEndpointInternal, which is forced onto main because pjlib
     // auto-registers only the thread that loaded the native library) and read from every
-    // other context that talks to PJSIP: SipInit, ConfigReload, pjsua workers, the reconnect
-    // handler and NanoHTTPD. Hence volatile; every consumer snapshots before use (AUDIT H5).
+    // other context that talks to PJSIP: since GW-10 that is mostly the GatewayControl thread
+    // (SIP init, reload and reconnect all live there now), plus pjsua workers, main itself
+    // and NanoHTTPD. Hence volatile; every consumer snapshots before use (AUDIT H5).
     private static volatile Endpoint endpoint;
     private static volatile boolean endpointUseTls = false;
 
@@ -150,11 +151,11 @@ public class SipEndpointManager {
                 Log.d(TAG, "Reusing existing endpoint");
 
                 // The endpoint outlives the service, so this branch runs on whichever
-                // thread restarted it - "SipInit", never the thread that created the
-                // endpoint. Its caller only registers with pjlib *after* createEndpoint()
-                // returns, and pjlib aborts the process the first time an unknown thread
-                // calls in, so hasTransport() below would kill us before we ever got
-                // there. Register up front.
+                // thread restarted it - the GatewayControl thread of the *new* service
+                // instance, never the thread that created the endpoint. Its caller only
+                // registers with pjlib *after* createEndpoint() returns, and pjlib aborts
+                // the process the first time an unknown thread calls in, so hasTransport()
+                // below would kill us before we ever got there. Register up front.
                 registerThread(Thread.currentThread().getName());
 
                 // CRITICAL: Check if transport exists when reusing endpoint
@@ -185,6 +186,24 @@ public class SipEndpointManager {
 
     /**
      * Create endpoint on main thread using Handler and wait for completion.
+     *
+     * <h3>Why this await cannot self-deadlock (plan §2.4)</h3>
+     * Since GW-10 the caller is the {@code GatewayControl} thread, so this is the control
+     * thread blocking on main for up to 30 s. That is allowed, and it is safe in exactly one
+     * direction:
+     * <ul>
+     *   <li><b>Control may block on main. Main must NEVER block waiting on the control
+     *       thread.</b> Every main→control hand-off in the app is a fire-and-forget
+     *       {@code post}; no main-thread code takes a latch, a {@code Future.get} or a
+     *       {@code join} on a control-thread result. The single exception is the
+     *       <em>bounded</em> {@code quitSafely} join at service destroy, which times out
+     *       instead of waiting forever.
+     *   <li>The runnable being awaited needs nothing from the control thread, so the thread
+     *       waiting for it cannot be the thread blocking it.
+     * </ul>
+     * Add a main-blocks-on-control wait anywhere and this becomes a real deadlock. Before
+     * GW-10 the caller was the {@code SipInit} bare thread and the safety here was
+     * accidental; it is now a phase-wide invariant.
      */
     private void createEndpointOnMainThread(boolean useTls) throws Exception {
         CountDownLatch latch = new CountDownLatch(1);

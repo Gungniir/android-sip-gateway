@@ -404,4 +404,93 @@ public class CallManagerTest {
         assertFalse("...and must not be disposed", other.isDisposed());
         assertTrue("The stale call is disposed", stale.isDisposed());
     }
+
+    // ========== Posted callbacks (GW-10) ==========
+    //
+    // PjsipSipService no longer runs onSipCallState inline on the pjsua worker; it does
+    // control.post(...), so the handler runs as a later task. The two tests above still drive
+    // it inline - deliberately, because PJSIP can still deliver inline *to the callback
+    // thread* - but inline is no longer the path production takes, so these model the posted
+    // one: the callback is separated in time from the event that produced it.
+
+    /**
+     * The reason the DISCONNECTED branch needed an identity guard.
+     *
+     * <p>Call A disconnects; before its handler is drained, call B takes the slot. Handling
+     * A's disconnect must not tear down B. Without the guard, {@code terminateAllCalls()}
+     * fires on A's news and kills a live, unrelated call.
+     */
+    @Test
+    public void testStaleQueuedDisconnectDoesNotTerminateTheNextCall() throws Exception {
+        GatewayCall callA = fakeCall();
+        assertTrue(callManager.placeOutgoingSipCall(callA, c -> { }));
+        forceState(CallManager.CallState.SIP_ANSWERED);
+
+        // A ends. In production GatewayCall flips `disposed` on the callback thread and only
+        // the handling is queued - so model exactly that: flag now, handler later.
+        callA.dispose();
+
+        // ...and while that handler is still queued, B takes the slot and gets going.
+        GatewayCall callB = fakeCall();
+        assertTrue("A disposed leftover must not block B", callManager.setOutgoingSipCall(callB));
+        forceState(CallManager.CallState.BRIDGED);
+
+        // Now A's queued DISCONNECTED is finally drained.
+        callManager.onSipCallState(callA, pjsip_inv_state.PJSIP_INV_STATE_DISCONNECTED);
+
+        assertSame("B must still hold the slot", callB, callManager.getCurrentSipCall());
+        assertFalse("B must not have been disposed by A's disconnect", callB.isDisposed());
+        assertEquals("B's session must still be up",
+                CallManager.CallState.BRIDGED, callManager.getState());
+    }
+
+    /** The call that does hold the slot must still tear the session down when it ends. */
+    @Test
+    public void testCurrentCallsQueuedDisconnectStillTerminatesTheSession() throws Exception {
+        GatewayCall call = fakeCall();
+        assertTrue(callManager.placeOutgoingSipCall(call, c -> { }));
+        forceState(CallManager.CallState.BRIDGED);
+
+        call.dispose();
+        callManager.onSipCallState(call, pjsip_inv_state.PJSIP_INV_STATE_DISCONNECTED);
+
+        assertNull("The slot must be freed", callManager.getCurrentSipCall());
+        assertEquals("The session must be torn down",
+                CallManager.CallState.IDLE, callManager.getState());
+    }
+
+    /**
+     * Register-before-dial still holds when the callback is separated from the dial: the
+     * queued handler must find the call already registered, or it cannot clear it.
+     */
+    @Test
+    public void testDeferredDisconnectAfterDialLeavesNoPhantom() throws Exception {
+        GatewayCall call = fakeCall();
+        forceState(CallManager.CallState.SIP_INCOMING);
+
+        // makeCall returns cleanly; the DISCONNECTED it provoked is still queued.
+        assertTrue(callManager.placeOutgoingSipCall(call, c -> c.dispose()));
+        assertSame("registered before the dial", call, callManager.getCurrentSipCall());
+
+        // The queued handler runs afterwards, on the control thread.
+        callManager.onSipCallState(call, pjsip_inv_state.PJSIP_INV_STATE_DISCONNECTED);
+
+        assertNull("A dead call must not stay registered", callManager.getCurrentSipCall());
+        assertEquals(CallManager.CallState.IDLE, callManager.getState());
+        assertFalse(callManager.hasLiveSipCall());
+    }
+
+    /** The raw timestamp the status snapshot carries instead of a frozen boolean. */
+    @Test
+    public void testGsmCallPlacedTimestampIsExposedForTheSnapshot() throws Exception {
+        assertEquals("Nothing dialled yet", 0L, callManager.getGsmCallPlacedAtWallMs());
+
+        java.lang.reflect.Field placedAt = CallManager.class.getDeclaredField("gsmCallPlacedTime");
+        placedAt.setAccessible(true);
+        long now = System.currentTimeMillis();
+        placedAt.set(callManager, now);
+
+        assertEquals(now, callManager.getGsmCallPlacedAtWallMs());
+        assertTrue(callManager.isInGracePeriod());
+    }
 }

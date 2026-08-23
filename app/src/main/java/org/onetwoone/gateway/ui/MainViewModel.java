@@ -20,6 +20,7 @@ import org.onetwoone.gateway.BatteryWatchdog;
 import org.onetwoone.gateway.DeviceMuteManager;
 import org.onetwoone.gateway.PjsipSipService;
 import org.onetwoone.gateway.config.GatewayConfig;
+import org.onetwoone.gateway.core.GatewayStatus;
 
 import java.util.List;
 import java.util.Set;
@@ -276,13 +277,22 @@ public class MainViewModel extends AndroidViewModel {
         statusHandler.removeCallbacks(statusPoller);
     }
 
+    /**
+     * The 1 Hz poll. Reads the service's immutable {@link GatewayStatus} snapshot, never the
+     * live managers - those are owned by the control thread now (GW-10).
+     *
+     * <p>The test-call report is deliberately fetched separately and is not part of the
+     * snapshot: it is a {@code StringBuilder} capped at 20 000 chars, and copying it into
+     * every publish would make publishing cost proportional to report length (plan §2.7).
+     */
     private void updateServiceState() {
         ServiceState state = new ServiceState();
 
         if (pjsipService != null) {
-            state.isRunning = pjsipService.isRunning();
-            state.isRegistered = pjsipService.isSipRegistered();
-            state.statusMessage = pjsipService.getStatus();
+            GatewayStatus snapshot = pjsipService.getStatusSnapshot();
+            state.isRunning = snapshot.isRunning();
+            state.isRegistered = snapshot.isSipRegistered();
+            state.statusMessage = snapshot.getStatusText();
         } else {
             state.isRunning = false;
             state.isRegistered = false;

@@ -20,9 +20,10 @@ public class ReconnectionStrategy {
     private final Handler handler;
     private final Runnable reconnectAction;
 
-    // scheduleReconnect() is called from SipInit (initializeSip's failure path) and from the
-    // main looper (attemptReconnect, the posted registration callback); setEnabled() from
-    // main and from PjsipSipService.stop(). The runnable itself always fires on main.
+    // scheduleReconnect() is called from the GatewayControl thread (initializeSip's failure
+    // path, attemptReconnect, the posted registration callback); setEnabled() from main and
+    // from PjsipSipService.stop(). The timer itself still fires on main and the action it
+    // runs hops back onto the control thread - main never waits for that hop (plan §2.4).
     // volatile makes those reads defined.
     //
     // NOTE for Phase 1: the `pending` check-then-set in scheduleReconnect() needs mutual

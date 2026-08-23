@@ -23,32 +23,81 @@ public class GatewayCall extends Call {
     private static final long DTMF_DUPLICATE_WINDOW_MS = 60;
 
     /**
+     * Who this call belongs to.
+     *
+     * <p>The gateway state machine and the diagnostic test call share one PJSIP account, so
+     * every callback has to be demuxed. That used to be done by asking
+     * {@code SipTestCallManager.owns(call)} - a mutable field comparison. Once the callbacks
+     * became {@code control.post(...)} that turned into a live bug: a failed diagnostic dial
+     * nulls the manager's {@code call} field in its catch block, so a <em>queued</em>
+     * {@code DISCONNECTED} for the diagnostic call would evaluate {@code owns()} as false,
+     * fall through into {@code CallManager}, and run {@code terminateAllCalls()} on a live,
+     * unrelated gateway call.
+     *
+     * <p>Ownership is fixed at construction and immutable, so evaluating it late is safe by
+     * construction. (GW-11 §4, pulled forward into GW-10 - see plan §2.6.)
+     */
+    public enum Owner {
+        /** A gateway leg: drives CallManager, the GSM dial and the audio bridge. */
+        GATEWAY,
+        /** The diagnostic SIP call: no GSM leg, must stay out of the state machine. */
+        DIAGNOSTIC
+    }
+
+    /**
      * The service the callbacks report to, or null once {@link #dispose()} has run.
      *
      * {@code volatile} and always snapshotted before use: {@code dispose()} is called from
-     * main, from pjsua workers and from ConfigReload, while the callbacks below run on a
-     * pjsua worker. A bare {@code if (service != null) service.…} is a TOCTOU on a field
+     * main, from the control thread and from pjsua workers, while the callbacks below run on
+     * a pjsua worker. A bare {@code if (service != null) service.…} is a TOCTOU on a field
      * another thread is nulling (AUDIT H6).
      */
     private volatile SipCallService service;
+
+    /**
+     * Set the instant PJSIP reports DISCONNECTED, <em>synchronously on the callback
+     * thread</em>, and by {@link #dispose()} from wherever the teardown runs.
+     *
+     * <p>The flag is never posted - only the handling that follows it is. It gates every
+     * subsequent call into pjsua2, and some of those failures are pjmedia assertions, i.e.
+     * {@code abort()} rather than a catchable exception (plan §2.6).
+     */
     private volatile boolean disposed = false;
     private volatile String lastDtmfDigit;
     private volatile long lastDtmfAtMs;
 
+    /** Immutable, so a demux done late gives the same answer as one done inline. */
+    private final Owner owner;
+
     /**
-     * Constructor for outgoing calls
+     * Constructor for outgoing gateway calls.
      */
     public GatewayCall(SipCallService service, Account account) {
-        super(account);
-        this.service = service;
+        this(service, account, Owner.GATEWAY);
     }
 
     /**
-     * Constructor for incoming calls
+     * Constructor for outgoing calls with an explicit owner (the diagnostic test call).
+     */
+    public GatewayCall(SipCallService service, Account account, Owner owner) {
+        super(account);
+        this.service = service;
+        this.owner = owner == null ? Owner.GATEWAY : owner;
+    }
+
+    /**
+     * Constructor for incoming calls. Incoming calls are always gateway calls - the
+     * diagnostic call is only ever placed outbound.
      */
     public GatewayCall(SipCallService service, Account account, int callId) {
         super(account, callId);
         this.service = service;
+        this.owner = Owner.GATEWAY;
+    }
+
+    /** Never null, never changes. See {@link Owner}. */
+    public Owner getOwner() {
+        return owner;
     }
 
     /**

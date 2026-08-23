@@ -37,7 +37,13 @@ public class CallManager {
     private static final String TAG = "CallMgr";
 
     private static final Pattern PHONE_PATTERN = Pattern.compile("^\\+?[0-9]{10,15}$");
-    private static final long GSM_CALL_GRACE_PERIOD_MS = 5000;
+
+    /**
+     * How long after a GSM dial the watchdog must not call a SIP call orphaned.
+     * Public because {@code GatewayStatus.isInGracePeriod()} derives the same deadline from
+     * the raw timestamp rather than freezing a boolean into the snapshot (plan §2.7).
+     */
+    public static final long GSM_CALL_GRACE_PERIOD_MS = 5000;
 
     private final Context context;
     private final GatewayConfig config;
@@ -45,13 +51,13 @@ public class CallManager {
 
     // Current calls.
     //
-    // All of these are written from main (onIncomingSipCall, placeGsmCall,
-    // onGsmCallConnected/Ended, onIncomingGsmCall, the watchdog's terminateAllCalls) AND
-    // from pjsua workers (onSipCallState, and the synchronous DISCONNECTED that makeCall can
-    // deliver on the dialling thread), and read from main, pjsua workers, the watchdog and
-    // NanoHTTPD (getStatusString). volatile makes those reads *defined*; it does NOT make
-    // the read-modify-write sequences atomic - GW-11 confines the state machine to one
-    // thread and is where correctness comes from (AUDIT D1).
+    // Since GW-10 every writer is the control thread: PjsipSipService routes the pjsua
+    // callbacks, the Telecom/phone-state hops, the watchdog tick and the public commands
+    // through it. Readers are still cross-thread - getStatusString() feeds the status
+    // snapshot from the control thread, but NanoHTTPD and the test suite reach the getters
+    // directly - so volatile stays (rule 7: this diff does not remove synchronisation the
+    // control thread makes redundant). GW-11 formalises the transitions and is where the
+    // remaining read-modify-write correctness comes from (AUDIT D1).
     private volatile GatewayCall currentSipCall;
     private volatile String pendingGsmDestination;
     private volatile int pendingGsmSimSlot = 1;
@@ -119,10 +125,22 @@ public class CallManager {
     }
 
     public boolean isInGracePeriod() {
-        // Snapshot: the watchdog reads this while main/a pjsua worker clears it.
+        // Snapshot: the watchdog reads this while the control thread clears it.
         long placedAt = gsmCallPlacedTime;
         if (placedAt == 0) return false;
         return System.currentTimeMillis() - placedAt < GSM_CALL_GRACE_PERIOD_MS;
+    }
+
+    /**
+     * Wall-clock instant the current GSM call was placed, or 0.
+     *
+     * <p>Exists so {@link org.onetwoone.gateway.core.GatewayStatus} can carry the raw
+     * timestamp and derive the grace period from it, instead of freezing
+     * {@link #isInGracePeriod()} into a snapshot that would then answer "yes" for as long as
+     * the snapshot lives (plan §2.7, trap 1).
+     */
+    public long getGsmCallPlacedAtWallMs() {
+        return gsmCallPlacedTime;
     }
 
     /**
@@ -154,14 +172,26 @@ public class CallManager {
      * Place an outgoing SIP call (GSM→SIP direction), registering it <em>before</em> it is
      * dialled.
      *
-     * PJSIP can deliver {@code onCallState(PJSIP_INV_STATE_DISCONNECTED)} synchronously, on
-     * this very thread, from inside {@code makeCall()} - an immediate transport failure, a
-     * 403/404 from the PBX, or a local pjsua rejection. If the call is only registered
-     * afterwards, that callback finds {@code currentSipCall == null}, skips the clear, and
-     * the assignment then stores an already-dead call as the current one. The state machine
-     * is left at {@code IDLE} with a non-null disposed {@code currentSipCall}, which blocks
-     * every later diagnostic call. Registering first makes the callback find its own call
-     * and clear it. See docs/refactor/AUDIT.md D2.
+     * PJSIP still delivers {@code onCallState(PJSIP_INV_STATE_DISCONNECTED)} synchronously,
+     * on the dialling thread, from inside {@code makeCall()} - an immediate transport
+     * failure, a 403/404 from the PBX, or a local pjsua rejection. What changed with GW-10
+     * is where that callback is <em>handled</em>: {@code PjsipSipService.onCallState} now
+     * does {@code control.post(...)}, so the handling runs as a later task rather than
+     * re-entering this method from underneath. Register-before-dial is still mandatory -
+     * only now because the queued handler must find the call already registered, rather than
+     * because it might run inside {@code makeCall()}. If the call were registered only
+     * afterwards, the handler would find {@code currentSipCall == null}, skip the clear, and
+     * the assignment would then store an already-dead call as the current one: state machine
+     * at {@code IDLE} with a non-null disposed {@code currentSipCall}, blocking every later
+     * diagnostic call. See docs/refactor/AUDIT.md D2.
+     *
+     * <p>The ordering is only airtight while the dial itself runs on the control thread, so
+     * that the queued handler is behind it in the same queue.
+     * {@code PjsipSipService.makeSipCallWithCallerId} asserts exactly that.
+     *
+     * <p>Inline delivery has not gone away and this method must keep tolerating it: PJSIP can
+     * still call straight back on the dialling thread, and the unit tests drive that path
+     * deliberately.
      *
      * @return true if the call was registered and handed to PJSIP without an immediate
      *         exception; false if it was refused or failed to start (state is clean either
@@ -219,17 +249,19 @@ public class CallManager {
      * An outgoing SIP call never got off the ground - {@code makeCall} threw.
      *
      * Compare-and-clear: the call is unregistered only if it is <em>still</em> the current
-     * one. A synchronous DISCONNECTED delivered from inside {@code makeCall} may already have
-     * cleared it and torn the state machine down, and this later failure report must not then
-     * reach in and cancel whatever took its place.
+     * one. On the posted path (GW-10) a DISCONNECTED for this call is queued on the control
+     * thread and runs after this method, so the interleaving this guards against is no longer
+     * the common one - but the guard stays, for two reasons that are still live: PJSIP can
+     * deliver inline on the dialling thread (the unit tests model exactly that), and
+     * {@code terminateAllCalls()} below clears the field from inside this very method.
      */
     public void onOutgoingCallFailed(GatewayCall call) {
         if (call == null) {
             return;
         }
 
-        // Snapshot: a synchronous DISCONNECTED from inside makeCall may already have cleared
-        // the field on this very thread, or a pjsua worker on another one.
+        // Snapshot: an inline DISCONNECTED from inside makeCall may already have cleared the
+        // field on this very thread.
         GatewayCall registered = currentSipCall;
         if (registered != call) {
             Log.d(TAG, "Failed outgoing SIP call is no longer the current one, nothing to clear");
@@ -245,8 +277,9 @@ public class CallManager {
         }
 
         // Nothing was torn down (already IDLE), so unregister by hand. Deliberately a FRESH
-        // read, not the snapshot above: terminateAllCalls() may have cleared the field in
-        // between, and that is exactly what this second check is asking about.
+        // read, not the snapshot above: terminateAllCalls() a few lines up clears the field
+        // through hangupSipCall(), and that in-method clear - not a cross-thread one - is
+        // what this second check is asking about. Still necessary after GW-10.
         if (currentSipCall == call) {
             currentSipCall = null;
             disposeQuietly(call);
@@ -390,7 +423,8 @@ public class CallManager {
             Log.d(TAG, "SIP call disconnected");
 
             // Clear reference first (may already be null if call was from somewhere else)
-            if (currentSipCall == call) {
+            boolean wasCurrent = (currentSipCall == call);
+            if (wasCurrent) {
                 currentSipCall = null;
             }
 
@@ -398,8 +432,17 @@ public class CallManager {
             // Calling delete() crashes because PJSIP may still reference it.
             // The call object will be GC'd eventually - the disposed flag prevents callback issues.
 
-            if (state != CallState.IDLE) {
+            // Identity guard (GW-10). The clear above always had one; the teardown below did
+            // not. That was survivable only while this callback ran inline on the pjsua
+            // worker. Now it arrives by control.post(...), so a DISCONNECTED queued for call
+            // A can be handled after call B has taken the slot - and an unguarded
+            // terminateAllCalls() would tear down a live, unrelated call B on A's news.
+            // Only the call that actually holds the slot may end the session.
+            if (wasCurrent && state != CallState.IDLE) {
                 terminateAllCalls();
+            } else if (!wasCurrent && state != CallState.IDLE) {
+                Log.d(TAG, "Disconnect is for a call that no longer holds the slot, "
+                        + "leaving the current session alone");
             }
         }
     }
@@ -576,9 +619,12 @@ public class CallManager {
      * Hangup current SIP call.
      */
     public synchronized void hangupSipCall() {
-        // One snapshot for both the guard and the teardown: the writers (onSipCallState on a
-        // pjsua worker, onOutgoingCallFailed) do not take this monitor, so re-reading the
-        // field after the null check could hand us a null - or a different call.
+        // One snapshot for both the guard and the teardown: the writers (onSipCallState,
+        // onOutgoingCallFailed) do not take this monitor, so re-reading the field after the
+        // null check could hand us a null - or a different call. Since GW-10 all of them run
+        // on the control thread, which makes this monitor redundant; GW-11 §1 deletes it,
+        // together with the outer one in PjsipSipService.hangupCall (plan §3c). Kept here
+        // because GW-10 does not remove synchronisation.
         GatewayCall callToDispose = currentSipCall;
         if (callToDispose == null) {
             return;
