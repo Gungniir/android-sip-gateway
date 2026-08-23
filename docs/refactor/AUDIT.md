@@ -59,6 +59,42 @@ ConfigReload thread while the pjmedia RT thread sits inside `pcm_read`.
 "stop the call before the phone handles it" case. Non-deterministic, so it presents as
 a random native crash at end-of-call.
 
+> **CORRECTION — on-device evidence, 2026-08-23. This finding was over-stated.**
+>
+> "On any hangup that lands mid-frame" is not what the hardware shows. Across **33
+> teardowns** (13 in Step 3 with the hangup deliberately placed inside the first 3 s, 20 in
+> Step 4), `drain_io_locked()` logged **zero** `close: draining N in-flight PCM I/O` lines —
+> meaning `active_io == 0` **every single time** `close()` ran. Close latency was 1–20 ms,
+> never near the 250 ms bound.
+>
+> The reason is teardown ordering. On both paths the conference port stops feeding our
+> callbacks *before* `close()` is reached:
+> - **GSM-initiated:** `terminateAllCalls` → `stopBridge` unwires the conference → then
+>   `stopCapture` → `close()`.
+> - **SIP-initiated:** pjsua removes the conference port first — and **E5** proves it
+>   *blocks* until the in-flight `pcm_read` returns. That block, ironically, guarantees the
+>   RT thread is quiescent before `close()` runs. The E5 bug is currently *protecting*
+>   against A1.
+>
+> **Crash evidence is against A1 too.** All 8 gateway tombstones on this device
+> (2026-08-01 → 2026-08-23, three of them on 08-23 alone) are the *same* crash, and it is
+> **F2**, not A1:
+> ```
+> assertion "Calling pjlib from unknown/external thread..." failed
+>   pj_mutex_lock <- pjsua_enum_transports <- Endpoint::transportEnum()
+> ```
+> Not one is a SIGSEGV in `pcm_read`. The random native end-of-call crash this project
+> actually suffered was `hasTransport()` on an unregistered thread, fixed by `2626f5d`
+> *before* Phase 0 began. Since deploying that fix: **zero new tombstones in 33 cycles.**
+>
+> **What this means for GW-01.** The refcount is still correct and worth keeping — but it
+> is *insurance against a window the current ordering already closes*, not a fix for an
+> observed crash. Its real value arrives with **GW-12** and **GW-23**, which deliberately
+> change that ordering (GW-23 removes the blocking read that E5 currently relies on, and
+> with it the accidental protection above). Re-rank A1 from "P0, happens on every mid-frame
+> hangup" to **"P1, latent — unobserved in 33 cycles, but the guard must be in place before
+> the ordering changes."** Do not cite A1 as a shipped crash fix.
+
 #### A2. `open()` writes `g_ctx` fields without the lock
 `cpp/gsm_audio_jni.c:139-202`. A `startCapture` on `GsmAudioOpen` overlapping a
 `stopCapture` on main leaves `is_open = 1` with a closed/NULL pcm, or vice versa.
