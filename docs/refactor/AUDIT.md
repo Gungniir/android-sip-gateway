@@ -422,6 +422,35 @@ network gives up. It should disconnect the leg rather than just returning.
 Found by the GW-03 agent; not in GW-03's scope. Assign to GW-25 (watchdog invariants) or
 a follow-up.
 
+#### H8b. `instance` is published before the object is usable — two places
+Both found by the GW-07 agent; both are *ordering*, not visibility, so GW-07 correctly
+left them alone.
+
+- `PjsipSipService.onCreate` assigns `instance = this` **before** `mainHandler` and the
+  managers are constructed. A NanoHTTPD worker that grabs the instance in that window and
+  calls `reloadConfig()` NPEs on `mainHandler`. → **GW-26** (adjacent to H8).
+- `SipEndpointManager.createEndpointInternal` assigns `endpoint` **before** `libInit()` /
+  `libStart()`. Another thread can observe a created-but-not-started endpoint — and pjsua
+  aborts rather than throwing when used in that state. → **GW-15**; needs a
+  build-then-publish restructure, not a keyword.
+
+#### F6b. `ReconnectionStrategy.pending` is a check-then-set race, not a visibility gap
+Two callers can both observe `pending == false` and queue two reconnects. `volatile`
+(added by GW-07) makes the reads defined but does not make the sequence atomic. → **GW-15**,
+which moves the class onto the control thread and dissolves the race.
+
+#### H1b. `RootHelper.startRootShell` check-then-act spawns duplicate `su` processes
+Two callers can each observe `suProcess == null` and each spawn a shell, orphaning one.
+→ **GW-20** (which deletes this API outright — see GW-31).
+
+#### H7b. `AudioBridgeManager.wiredConfSlot` is write-only dead state
+Assigned at three sites, never read — `unwireBridge` deliberately asks the media objects
+for their port ids instead, because that is what `pjsua_conf_disconnect` will actually be
+handed. Candidate for deletion in **GW-12**.
+
+#### H7c. `SipEndpointManager.destroyEndpoint()` is unreachable
+No caller anywhere in the tree. Either wire it up or delete it in **GW-15**.
+
 #### H10. Dead code that violates a documented hard rule
 `GatewayInCallService.setMicrophoneMute` (`:410`) uses `AudioManager.setMicrophoneMute`,
 which `CLAUDE.md` explicitly forbids ("it breaks the `Incall_Music` playback path").

@@ -61,7 +61,21 @@ status poll needs is published through an immutable snapshot object.
 Phases are ordered by risk-of-not-doing, and each phase leaves the app shippable.
 Phase 0 lands independently of everything else — do not block it behind the refactor.
 
-### Phase 0 — Stop the bleeding (no architectural change)
+### Phase 0 — Stop the bleeding (no architectural change) — ✅ CODE COMPLETE, ⏳ UNVERIFIED ON DEVICE
+
+All eight issues implemented and merged onto `refactor/phase-0`.
+**103 tests across 10 suites, 0 failures; `assembleDebug` and `lintDebug` green.**
+**Nothing has run on the phone** — see [PHASE-0-VERIFICATION.md](PHASE-0-VERIFICATION.md)
+for the ordered plan, whose first step is a stop-gate on the charging escape hatch.
+
+Four agents ran the revert-and-confirm-failure check on their own tests (GW-02, GW-04,
+GW-06, and GW-05 partially). GW-04's produced the literal brick symptom
+(`control not restored: DEC1 Volume expected:<84> but was:<0>`) and GW-02's produced
+`ENUM EAR_S left muted`. Those are evidence; the rest is reasoning plus green tests.
+
+Findings added *during* Phase 0, none of them fixed: B1b, B4b (process-kill leaves a mute
+or a charging block with nothing to restore it), D1b (bridge can wire to a stale call),
+D1c, F6b, H1b, H2b, H2c (raised to P1), H7b, H7c, H8b, H9b.
 
 Targeted fixes for the crash / brick / lost-call findings. Small diffs, each testable
 alone, each safe to ship on its own.
