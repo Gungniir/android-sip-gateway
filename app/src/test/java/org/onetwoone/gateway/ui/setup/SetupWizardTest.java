@@ -135,6 +135,17 @@ public class SetupWizardTest {
         assertNotNull(activity.findViewById(R.id.setupSipServer));
     }
 
+    /**
+     * The wizard carries its own header, so the manifest gives it the no-app-bar theme. Pinned
+     * here because losing that attribute would put a second, emptier header above the first and
+     * cost ~56dp on the screen the step body is already competing for.
+     */
+    @Test
+    public void theWizardHasNoActionBarOfItsOwn() {
+        launch();
+        assertNull("Theme.Gateway.Setup was not applied", activity.getSupportActionBar());
+    }
+
     @Test
     public void everyStepHasItsBodyInTheLayout() {
         launch();

@@ -14,6 +14,27 @@
 <resources>
 
     <!-- ==================================================================================
+         Theme
+
+         The gateway theme without the app bar, and nothing else changed.
+
+         The wizard already carries its own header - "Step 3 of 5", the step's name, and the
+         Close button that is the escape route this whole issue is about. A title bar above
+         that would be a second header saying less, and it costs ~56dp on a 5-inch bench phone
+         where the chrome (header, summary, footer, the standing "close at any time" line) is
+         already competing with the step body for the screen.
+
+         Derived from Theme.Gateway rather than from a Material NoActionBar parent, so the
+         palette, the type scale and every default widget style stay exactly what GW-40 set
+         and only the two window flags differ.
+         ================================================================================== -->
+
+    <style name="Theme.Gateway.Setup" parent="Theme.Gateway">
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+    </style>
+
+    <!-- ==================================================================================
          The wizard's own containers
          ================================================================================== -->
 
