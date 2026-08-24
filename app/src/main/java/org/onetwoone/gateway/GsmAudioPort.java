@@ -259,7 +259,9 @@ public class GsmAudioPort extends AudioMediaPort {
             ByteVector buf = frame.getBuf();
             buf.clear();
 
-            if (isCapturing.get() && GsmAudioNative.isOpen()) {
+            // No GsmAudioNative.isOpen() pre-check: readFrame() tests is_open under the
+            // native lock inside io_acquire() and returns 0 for "closed" (AUDIT H2b).
+            if (isCapturing.get()) {
                 // Read from native ALSA
                 int bytesRead = GsmAudioNative.readFrame(captureBuffer);
 
@@ -270,7 +272,12 @@ public class GsmAudioPort extends AudioMediaPort {
                     frame.setSize(frameSize);
                     frame.setType(pjmedia_frame_type.PJMEDIA_FRAME_TYPE_AUDIO);
                 } else {
-                    captureErrors.incrementAndGet();
+                    // 0 means the device closed under us - the ordinary end-of-call race,
+                    // which the old isOpen() pre-check used to swallow. Only a real ALSA
+                    // failure counts as an error, so the counter stays comparable.
+                    if (bytesRead != 0) {
+                        captureErrors.incrementAndGet();
+                    }
                     // Send silence on error
                     for (int i = 0; i < frameSize; i++) buf.add((short) 0);
                     frame.setSize(frameSize);
@@ -300,7 +307,9 @@ public class GsmAudioPort extends AudioMediaPort {
         final long received = framesReceived.incrementAndGet();
 
         try {
-            if (!isCapturing.get() || !GsmAudioNative.isOpen()) {
+            // No GsmAudioNative.isOpen() pre-check here either - writeFrame() reports a
+            // closed device as 0 and never touches a freed PCM (AUDIT H2b).
+            if (!isCapturing.get()) {
                 return;
             }
 

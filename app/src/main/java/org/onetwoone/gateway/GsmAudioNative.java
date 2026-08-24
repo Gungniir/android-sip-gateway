@@ -53,22 +53,28 @@ public class GsmAudioNative {
     /**
      * Read audio frame from capture device (GSM -> SIP direction).
      *
-     * <p>Blocks for up to one ALSA period. Returns -1 (rather than crashing) if
-     * {@link #close} has run or runs concurrently.
+     * <p>Blocks for up to one ALSA period. Safe (rather than crashing) if {@link #close}
+     * has run or runs concurrently: the open check happens under the native lock, inside
+     * the same critical section that takes the in-flight I/O reference. Callers must NOT
+     * pre-check {@link #isOpen()} - that is a third acquisition of the same mutex per
+     * frame and it decides nothing this call does not decide (AUDIT H2b).
      *
      * @param buffer Byte array to fill with PCM data
-     * @return Number of bytes read, or -1 on error / device closed
+     * @return Number of bytes read; {@code 0} if the device is closed, which is the
+     *         ordinary race at end of call and <b>not</b> an error; {@code -1} if the
+     *         ALSA read itself failed
      */
     public static native int readFrame(byte[] buffer);
 
     /**
      * Write audio frame to playback device (SIP -> GSM direction).
      *
-     * <p>Returns -1 (rather than crashing) if {@link #close} has run or runs
-     * concurrently.
+     * <p>Same contract as {@link #readFrame}: no {@link #isOpen()} pre-check, and a
+     * closed device is reported as {@code 0}, not as a failure.
      *
      * @param buffer Byte array with PCM data
-     * @return Number of bytes written, or -1 on error / device closed
+     * @return Number of bytes accepted; {@code 0} if the device is closed; {@code -1} if
+     *         the ALSA write itself failed
      */
     public static native int writeFrame(byte[] buffer);
 
@@ -127,9 +133,13 @@ public class GsmAudioNative {
     /**
      * Check if audio is open.
      *
-     * <p>Advisory only - the device may be closed the instant after this returns. It is
-     * safe to act on a stale {@code true}: {@link #readFrame} / {@link #writeFrame}
-     * re-check under the native lock and return -1 instead of touching a freed PCM.
+     * <p>Advisory only - the device may be closed the instant after this returns, so it
+     * can never make anything safe; {@link #readFrame} / {@link #writeFrame} re-check
+     * under the native lock and refuse instead of touching a freed PCM.
+     *
+     * <p><b>Do not call this on the per-frame path.</b> It takes the same native mutex
+     * {@code readFrame}/{@code writeFrame} already take, so at 50 frames/s in two
+     * directions it was 100 extra acquisitions per second buying nothing (AUDIT H2b).
      */
     public static native boolean isOpen();
 

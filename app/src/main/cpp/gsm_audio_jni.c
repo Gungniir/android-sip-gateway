@@ -453,8 +453,13 @@ Java_org_onetwoone_gateway_GsmAudioNative_close(JNIEnv *env, jclass clazz) {
  * Runs on the pjmedia RT thread, 50x/second. Allocates nothing and holds no lock across
  * the blocking pcm_read(); the io_ref keeps the PCM alive for exactly that long.
  *
+ * This is the ONLY open check the caller needs (AUDIT H2b): is_open is tested inside
+ * io_acquire() under the lock, so a Java-side isOpen() pre-check was a third acquisition
+ * of the same mutex per frame per direction, deciding nothing this call does not decide.
+ *
  * @param buffer Byte array to fill with PCM data
- * @return Number of bytes read, or -1 on error
+ * @return Number of bytes read; 0 if the device is closed (NOT an error - it is the
+ *         normal race at end of call); -1 if pcm_read() itself failed.
  */
 JNIEXPORT jint JNICALL
 Java_org_onetwoone_gateway_GsmAudioNative_readFrame(
@@ -472,7 +477,7 @@ Java_org_onetwoone_gateway_GsmAudioNative_readFrame(
     struct io_ref io;
     if (!io_acquire(1, &io)) {
         (*env)->ReleaseByteArrayElements(env, buffer, buf, JNI_ABORT);
-        return -1;
+        return 0;                        /* closed, not broken - see the contract above */
     }
 
     int ret = pcm_read(io.pcm, buf, len);
@@ -496,8 +501,11 @@ Java_org_onetwoone_gateway_GsmAudioNative_readFrame(
  * rate/channel snapshot and the preallocated upsample scratch the resampler needs, so no
  * g_ctx field is read unlocked and nothing here allocates (AUDIT H3).
  *
+ * Like readFrame(), this is the only open check the caller needs (AUDIT H2b).
+ *
  * @param buffer Byte array with PCM data
- * @return Number of bytes written, or -1 on error
+ * @return Number of bytes accepted; 0 if the device is closed (NOT an error); -1 if
+ *         pcm_write() itself failed or the frame does not fit the upsample scratch.
  */
 JNIEXPORT jint JNICALL
 Java_org_onetwoone_gateway_GsmAudioNative_writeFrame(
@@ -513,7 +521,7 @@ Java_org_onetwoone_gateway_GsmAudioNative_writeFrame(
     struct io_ref io;
     if (!io_acquire(0, &io)) {
         (*env)->ReleaseByteArrayElements(env, buffer, buf, JNI_ABORT);
-        return -1;
+        return 0;                        /* closed, not broken - see the contract above */
     }
 
     int ret;
