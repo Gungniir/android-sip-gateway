@@ -1,5 +1,6 @@
 package org.onetwoone.gateway.ui.setup;
 
+import android.annotation.SuppressLint;
 import android.app.Application;
 import android.content.ComponentName;
 import android.content.Context;
@@ -135,7 +136,19 @@ public class SetupViewModel extends AndroidViewModel {
     private final ExecutorService rootExecutor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
+    /**
+     * The bound service, or null.
+     *
+     * <p>Lint reads a {@code Service} field on a {@code ViewModel} as a leaked context, and it
+     * is right to ask. It is not one here for the same reason {@code MainViewModel}'s identical
+     * field is not - which lint accepted only because that one predates the baseline: the
+     * reference is a <em>binding</em>, it is dropped in {@link #unbindFromService()}, and
+     * {@link #onCleared()} calls that. The suppression is per-field and carries its reason,
+     * rather than a new entry in a baseline this phase is not allowed to regenerate.
+     */
+    @SuppressLint("StaticFieldLeak")
     private PjsipSipService service;
+
     private boolean serviceBound;
     private boolean polling;
 

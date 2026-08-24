@@ -177,7 +177,10 @@ public class SetupActivity extends AppCompatActivity {
         nextButton = findViewById(R.id.setupNextButton);
 
         for (SetupStep step : SetupStep.values()) {
-            bodies.put(step, findViewById(step.bodyViewId()));
+            // Explicitly typed rather than inlined: findViewById's inferred return type inside
+            // a Map.put argument is what lint's FindViewByIdCast is about.
+            View body = findViewById(step.bodyViewId());
+            bodies.put(step, body);
         }
 
         rootChip = new SetupChip(findViewById(R.id.setupRootChip));
@@ -344,19 +347,24 @@ public class SetupActivity extends AppCompatActivity {
     }
 
     private void saveSipAccount() {
-        viewModel.saveSipAccount(
-                sipServer.getText().toString(),
-                sipPort.getText().toString(),
-                sipUser.getText().toString(),
-                sipPassword.getText().toString(),
-                sipRealm.getText().toString(),
-                sipUseTls.isChecked(),
-                sim1Destination.getText().toString(),
-                sim2Destination.getText().toString());
+        String server = sipServer.getText().toString();
+        String port = sipPort.getText().toString();
+        String user = sipUser.getText().toString();
+        String password = sipPassword.getText().toString();
+        String realm = sipRealm.getText().toString();
+        boolean useTls = sipUseTls.isChecked();
+        String sim1 = sim1Destination.getText().toString();
+        String sim2 = sim2Destination.getText().toString();
 
-        // What is on screen is what is persisted now, so the guard has nothing left to hold.
+        // The guard is released BEFORE the write, not after. Saving republishes the account,
+        // and the form should come back showing what was actually persisted - which is not
+        // always what is in the boxes, because a blank box means "keep the stored value". The
+        // password is the case that matters: cleared, it saves the old password, and the box
+        // has to come back holding it rather than staying blank and implying it was wiped.
         formGuard.clean(sipServer, sipPort, sipUser, sipPassword, sipRealm, sipUseTls,
                 sim1Destination, sim2Destination);
+
+        viewModel.saveSipAccount(server, port, user, password, realm, useTls, sim1, sim2);
 
         pushOutcome(SetupStep.SIP_ACCOUNT,
                 viewModel.hasStoredSipAccount() ? StepOutcome.PASSED : StepOutcome.FAILED);
