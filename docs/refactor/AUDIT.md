@@ -909,6 +909,56 @@ is the one path where that can still be violated. The clean fix is to move `shut
 itself onto the control thread — **AUDIT G2, owned by GW-26** — after which nothing on main
 touches pjsua2 at destroy and the bound can go away.
 
+#### F4b. The diagnostic call still reads `getAccount()` on main — P2, residual F4
+Found while landing GW-14. F4 is closed for the two production users of the account —
+`sendSipMessage` and `makeSipCallWithCallerId` both run on the control thread now and
+re-check `SipAccountManager.isCurrentAccount(...)` immediately before the pjsua2 call. The
+third user was left alone: `SipTestCallManager.startInternal` (`:242`) reads
+`accountManager.getAccount()` and hands it to `new GatewayCall(...)` **on main**, and the
+class is main-thread-only by design (`assertMainThread("startInternal")`, `onMediaState`
+posts to `mainHandler`). A config reload deleting the account between that read and the
+dial is the same use-after-free F4 describes, just on the diagnostic path.
+
+It was out of GW-14's scope (moving the diagnostic manager onto the control thread is a
+threading change to a whole class, not a guard), and it is lower severity: the diagnostic
+call is operator-initiated from the UI, so it does not overlap a web-interface config POST
+in normal use. The fix is the same one F4 got — run it on the control thread — and it
+belongs with whoever revisits `SipTestCallManager`.
+
+#### H12. `SmsHandler.processedSmsIds` is a plain `HashSet` mutated from two threads — P2
+`SmsHandler.java:56` is a plain `HashSet<Long>`. `processInbox()` iterates and `add()`s to
+it, and it runs on **main** (the `ContentObserver` is constructed with the main handler,
+`:97`) *and* on the **control thread** (`handleRegistrationState` calls `processInbox()` on
+the post-registration retry). `unprocessSms`/`deleteSms` `remove()` from it. No
+synchronization on any side, so a concurrent `add` during another thread's iteration is a
+`ConcurrentModificationException` and a lost/duplicated SMS forward.
+
+Pre-existing, and GW-14 *reduced* the exposure rather than creating it: `markAsRead` and
+`unprocessSms` used to be called from main inside `sendSipMessage` and now run on the
+control thread with the rest of the send path. `processInbox()` itself still runs on both.
+The fix is to route the `ContentObserver` through the control thread (give it
+`new Handler(control.getLooper())`) so the set has one owner — cheap, but it changes when
+inbox scans happen and wants its own verification, so it is not folded into GW-14.
+
+Related: `markAsRead` falls back to `markAsReadWithRoot`, which spawns `su`. That used to
+happen on **main**; it now happens on the control thread, which is a strict improvement
+(bounded by `RootHelper`'s timeout, and off the UI thread) but is worth knowing about when
+reading control-thread latency.
+
+#### F6c. `ReconnectionStrategy.onSuccess()` clears `pending` without cancelling the timer — P2
+`onSuccess()` (`:108-113`) sets `pending = false` but does not
+`handler.removeCallbacksAndMessages(null)` the way `cancel()` (`:119`) does. The already
+scheduled runnable therefore still fires and calls `attemptReconnect()`, which — endpoint,
+transport and account all being fine by then — sends a redundant re-REGISTER.
+
+The reload path makes this easy to see: `deleteAccount()`'s un-REGISTER produces
+`onRegState(false)`, whose handling is queued on the control thread and so runs *after* the
+reload has already created the replacement account; it calls `scheduleReconnect()`, and the
+subsequent `onRegState(true)` only clears the flag. Harmless today (one extra REGISTER),
+but it makes `isPending()` and the backoff state disagree with what is actually armed. Fix
+is one line in `onSuccess()`; left out of GW-14 because it is `ReconnectionStrategy`'s bug,
+not the reload's.
+
 ---
 
 ### P2 — security posture

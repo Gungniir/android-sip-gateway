@@ -484,15 +484,25 @@ public class PjsipSipService extends Service implements SipCallService {
         Log.d(TAG, "Attempting reconnect...");
 
         try {
+            // ONE snapshot. This used to read getAccount() twice and dereference the second
+            // read - the same shape as F4, and the account can be deleted between the two
+            // (the reload does exactly that, and so does onDestroy from main).
+            GatewayAccount account = accountManager.getAccount();
+
             // Check if endpoint is properly initialized (has transport)
             // CRITICAL: Must check hasTransport() - creating account without transport causes PJSIP crash
-            if (!endpointManager.isInitialized() || !endpointManager.hasTransport() || accountManager.getAccount() == null) {
+            if (!endpointManager.isInitialized() || !endpointManager.hasTransport() || account == null) {
                 // Endpoint not ready, transport missing, or account missing - need full init
                 Log.d(TAG, "Endpoint/transport/account not ready, performing full initialization");
                 initializeSip();
+            } else if (!accountManager.isCurrentAccount(account)) {
+                // Only reachable if main's onDestroy deleted the account after the read above,
+                // i.e. the service is going away. Re-registering it would be pointless and
+                // rescheduling a reconnect would fight the teardown.
+                Log.w(TAG, "Account was replaced during reconnect, not re-registering");
             } else {
                 // Endpoint and transport ready, just re-register
-                accountManager.getAccount().setRegistration(true);
+                account.setRegistration(true);
             }
         } catch (Exception e) {
             Log.e(TAG, "Reconnect failed: " + e.getMessage());
@@ -853,9 +863,17 @@ public class PjsipSipService extends Service implements SipCallService {
 
     private void initSmsHandler() {
         smsHandler = new SmsHandler(this, new SmsHandler.SmsCallback() {
+            /**
+             * Reaches us on two different threads today: main, from {@code SmsHandler}'s
+             * {@code ContentObserver} (constructed with the main handler), and the control
+             * thread, from the {@code processInbox()} retry that {@code handleRegistrationState}
+             * fires after a successful REGISTER. {@code runOrPost} collapses both onto the
+             * control thread - inline for the retry, so {@code processInbox}'s
+             * add-to-processed-then-call-back loop keeps its current synchronous shape.
+             */
             @Override
             public void onIncomingSms(String from, String body, long smsId, int simSlot) {
-                handleIncomingGsmSms(from, body, smsId, simSlot);
+                control.runOrPost(() -> handleIncomingGsmSms(from, body, smsId, simSlot));
             }
 
             @Override
@@ -866,7 +884,9 @@ public class PjsipSipService extends Service implements SipCallService {
         smsHandler.start();
     }
 
+    @ControlThread
     private void handleIncomingGsmSms(String from, String body, long smsId, int simSlot) {
+        control.assertOnControlThread("handleIncomingGsmSms");
         Log.d(TAG, "handleIncomingGsmSms: smsId=" + smsId + " from=" + from + " SIM" + simSlot + " registered=" + accountManager.isRegistered());
 
         if (!accountManager.isRegistered()) {
@@ -888,7 +908,25 @@ public class PjsipSipService extends Service implements SipCallService {
         sendSipMessage(destination, from, body, smsId, simSlot);
     }
 
+    /**
+     * Forward one GSM SMS to the PBX as a SIP MESSAGE.
+     *
+     * <p><b>AUDIT F4 lives here.</b> This method captures {@code accountManager.getAccount()}
+     * and hands it to {@code buddy.create(account, ...)} - a native call on the account's
+     * native peer. It used to run on main while {@code doReloadConfig}, on another thread,
+     * could {@code delete()} that peer and null the field in between: a use-after-free on a
+     * pjsua2 object, whose failure mode is an abort, not an exception.
+     *
+     * <p>Closed in two layers. The one that actually closes it: this now runs on the control
+     * thread, which is the only thread that deletes an account outside {@code onDestroy}, so
+     * the read and the use cannot be separated by a delete. The second layer is the
+     * {@code isCurrentAccount} re-check below, which covers the one remaining writer - main's
+     * {@code shutdownSip()} during {@code onDestroy}. That is already ordered behind
+     * {@code control.quitSafely(...)}, so it only matters if that bounded join times out.
+     */
+    @ControlThread
     private void sendSipMessage(String toExt, String gsmSender, String body, long smsId, int simSlot) {
+        control.assertOnControlThread("sendSipMessage");
         Log.d(TAG, "sendSipMessage START: smsId=" + smsId + " to=" + toExt + " from=" + gsmSender);
         Buddy buddy = null;
         try {
@@ -910,6 +948,14 @@ public class PjsipSipService extends Service implements SipCallService {
             buddyConfig.setUri(toUri);
 
             buddy = new Buddy();
+            // Last look before the native call: on this thread nothing can have moved the
+            // account since the read above, but main's onDestroy path can still delete it if
+            // the quitSafely() join timed out. Re-check rather than hand pjsua2 a freed peer.
+            if (!accountManager.isCurrentAccount(account)) {
+                Log.w(TAG, "sendSipMessage: account was replaced mid-send, aborting smsId=" + smsId);
+                smsHandler.unprocessSms(smsId);
+                return;
+            }
             buddy.create(account, buddyConfig);
 
             SendInstantMessageParam prm = new SendInstantMessageParam();
@@ -1032,6 +1078,13 @@ public class PjsipSipService extends Service implements SipCallService {
 
             // Build SIP URI (with TLS transport if enabled)
             String uri = SipUriBuilder.build(destination, server, useTls);
+
+            // Same F4 re-check as sendSipMessage: `new GatewayCall(this, account)` is a native
+            // call on the account's peer, and main's onDestroy can still delete it.
+            if (!accountManager.isCurrentAccount(account)) {
+                Log.w(TAG, "SIP account was replaced before the dial, aborting");
+                return;
+            }
 
             GatewayCall call = new GatewayCall(this, account);
 
@@ -1156,32 +1209,95 @@ public class PjsipSipService extends Service implements SipCallService {
      * Reload configuration and re-register SIP account.
      * Use this instead of full service restart when only config changed.
      * Thread-safe, can be called from any thread.
+     *
+     * <p>Callable from anywhere, but the reload itself is one task on one queue. Two POSTs
+     * 50 ms apart therefore produce two <em>sequential</em> reloads: the second is still
+     * sitting in the control queue while the first runs, and the queue will not start it
+     * until the first has returned. Nothing interleaves, and nothing is dropped.
      */
     public void reloadConfig() {
         control.runOrPost(this::doReloadConfig);
     }
 
-    private volatile boolean reloadInProgress = false;
+    /**
+     * Re-entrancy guard, not a cross-thread flag. It was {@code volatile} because it was set
+     * on main and cleared on the {@code ConfigReload} worker; both are gone, this is written
+     * and read only by {@link #doReloadConfig}, and the control thread is the only thread that
+     * runs it. Serialising two reloads is the queue's job, not this field's - see
+     * {@link #reloadConfig()}. What is left for this flag to catch is a reload triggered from
+     * <em>inside</em> a reload, which {@code runOrPost} would run inline.
+     */
+    private boolean reloadInProgress = false;
 
     /**
-     * Was a main-thread hop that spawned a {@code ConfigReload} bare thread. Both are gone:
-     * the whole sequence is one control-thread task, so it is serialised against every call
-     * and registration event instead of racing them.
+     * Counts reload attempts. Owned by the control thread and published in the snapshot; it
+     * is what tells the UI to re-read its config now that the reload no longer relaunches
+     * {@code MainActivity}. See {@link GatewayStatus#getConfigGeneration()} and
+     * {@code MainViewModel.updateServiceState}.
+     */
+    private long configGeneration = 0L;
+
+    /**
+     * The reload, as one ordered sequence on the thread that owns every manager it touches.
      *
-     * <p>The {@code Thread.sleep}s below are left exactly as they were - they are AUDIT F5,
-     * owned by GW-14, which replaces this ad-hoc sequencing with a real pipeline. Blocking
-     * the control thread for ~600 ms during a reload is what the control thread is for.
+     * <p>Was a main-thread hop that spawned a {@code ConfigReload} bare thread which then
+     * synchronised with main by sleeping (AUDIT F5). Both sleeps are gone:
+     *
+     * <ul>
+     *   <li>The 100 ms after {@code terminateAllCalls()} stood in for "the {@code
+     *       mainHandler.post} that ran it has finished". There is no post any more - the call
+     *       is a plain method call on this thread, and a method call has completed when it
+     *       returns. Sequencing by construction.
+     *   <li>The 500 ms "small delay for cleanup" after {@code deleteAccount()} is removed, and
+     *       <b>nothing replaces it</b>, because none of the three conditions it could have
+     *       been guessing at is one it was able to establish:
+     *       <ol>
+     *         <li><i>"pjsua has finished tearing the account down."</i> Already true before
+     *             the sleep started. {@code Account.delete()} is the SWIG destructor;
+     *             {@code Account::shutdown()} calls {@code pjsua_acc_del()}, which invalidates
+     *             and frees the account slot synchronously under the pjsua lock. When
+     *             {@code deleteAccount()} returns there is nothing left for
+     *             {@code pjsua_acc_add()} to collide with.
+     *         <li><i>"the un-REGISTER got out on the wire."</i> The sleep sat <b>after</b>
+     *             {@code delete()}, and {@code delete()} destroys the registration client.
+     *             Whatever the un-REGISTER was going to do had to happen before
+     *             {@code deleteAccount()} returned; waiting afterwards is provably too late to
+     *             affect it. A wait for this would have to sit between
+     *             {@code setRegistration(false)} and {@code delete()}, and be a condition (the
+     *             un-REGISTER's final response), not a duration.
+     *         <li><i>"the old account's {@code onRegState(false)} has been handled."</i> That
+     *             handling is {@code control.post(...)} - it lands on <b>this thread's own
+     *             queue</b>, and this method is that thread. Sleeping inside a control-thread
+     *             task cannot drain the control queue. The handler ran after the whole reload
+     *             either way, with or without the sleep.
+     *       </ol>
+     *       What the reload actually needs is that no other thread observes the half-torn-down
+     *       state between {@code deleteAccount()} and {@code createAccount()}. That is what
+     *       being consecutive statements on the one thread that owns the account gives it -
+     *       and it is stronger than any sleep, because it holds however long each step takes.
+     * </ul>
+     *
+     * <p>The {@code MainActivity} relaunch that used to end this method is gone too: a config
+     * save from the web interface must not yank the foreground activity out from under
+     * whoever is holding the phone. {@link #configGeneration} replaces it - the UI's 1 Hz
+     * snapshot poll sees the counter advance and re-reads its config LiveData in place.
      */
     @ControlThread
     private void doReloadConfig() {
         control.assertOnControlThread("doReloadConfig");
         if (reloadInProgress) {
-            Log.w(TAG, "Reload already in progress");
+            Log.w(TAG, "Reload re-entered from inside a reload - ignoring");
             return;
         }
         reloadInProgress = true;
 
-        Log.i(TAG, "Reloading configuration...");
+        // Bumped here rather than on success: the caller (WebConfigServer) has already written
+        // the new values to SharedPreferences by the time it calls in, so the UI must re-read
+        // them even if the re-registration below fails - that is exactly when the operator
+        // needs to see what was actually saved.
+        configGeneration++;
+
+        Log.i(TAG, "Reloading configuration (generation " + configGeneration + ")...");
         updateNotification("Reloading...");
 
         try {
@@ -1198,26 +1314,27 @@ public class PjsipSipService extends Service implements SipCallService {
             // 1. Make sure this thread is known to PJSIP (idempotent, one-shot)
             if (!control.registerWithPjlib()) {
                 Log.e(TAG, "Failed to register thread, aborting reload");
-                mainHandler.post(() -> updateNotification("Reload failed: thread registration"));
+                updateNotification("Reload failed: thread registration");
                 return;
             }
 
             // 2. Stop any active calls. Was a mainHandler.post + sleep because this ran on a
-            //    foreign thread; it is now simply in order, on the owning thread.
+            //    foreign thread; it is now simply in order, on the owning thread. Idempotent
+            //    since GW-11 - a no-op that fires no listener when nothing is up - so step 3
+            //    stays unconditional rather than relying on it to tear the bridge down.
             callManager.terminateAllCalls();
-            Thread.sleep(100);
 
-            // 3. Stop audio streams (but keep port alive)
+            // 3. Unwire whatever is wired and stop the streams, whether or not step 2 did
+            //    anything. ANY_GENERATION because this is a blanket teardown: the reload does
+            //    not know, and must not care, which call's wiring is up.
             audioBridge.stopBridge(AudioBridgeManager.ANY_GENERATION);
             audioBridge.stopAudioStreams();
 
-            // 4. Delete old account
+            // 4. Delete old account. Everything that dereferences the account runs on this
+            //    thread (F4), so no in-flight Buddy or Call can be holding it across this.
             accountManager.deleteAccount();
 
-            // 5. Small delay for cleanup
-            Thread.sleep(500);
-
-            // 6. Check if endpoint needs recreation (TLS changed)
+            // 5. Check if endpoint needs recreation (TLS changed)
             if (endpointManager.needsRecreation()) {
                 // TLS change requires killing the entire process because:
                 // 1. PJSIP endpoint cannot be safely destroyed/recreated at runtime
@@ -1228,30 +1345,15 @@ public class PjsipSipService extends Service implements SipCallService {
                 return;
             }
 
-            // 7. Create new account with new settings
+            // 6. Create new account with new settings
             accountManager.createAccount(PjsipSipService.this);
 
             Log.i(TAG, "Configuration reloaded successfully");
-            mainHandler.post(() -> updateNotification("SIP Registered"));
+            updateNotification("SIP Registered");
 
-            // 8. Restart MainActivity to refresh UI
-            mainHandler.post(() -> {
-                try {
-                    android.content.Intent intent = new android.content.Intent(PjsipSipService.this, MainActivity.class);
-                    intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK |
-                                   android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK);
-                    startActivity(intent);
-                } catch (Exception e) {
-                    Log.e(TAG, "Failed to restart activity: " + e.getMessage());
-                }
-            });
-
-        } catch (InterruptedException e) {
-            Log.w(TAG, "Reload interrupted");
-            Thread.currentThread().interrupt();
         } catch (Exception e) {
             Log.e(TAG, "Reload failed: " + e.getMessage(), e);
-            mainHandler.post(() -> updateNotification("Reload error: " + e.getMessage()));
+            updateNotification("Reload error: " + e.getMessage());
         } finally {
             reloadInProgress = false;
             publishStatus();
@@ -1272,6 +1374,14 @@ public class PjsipSipService extends Service implements SipCallService {
      * Restart the entire process by killing it and launching MainActivity via root.
      * This is needed when TLS setting changes because PJSIP endpoint cannot be safely
      * destroyed/recreated at runtime.
+     *
+     * <p><b>Stays its own bare thread, deliberately</b> (plan §2.1). It is called from
+     * {@link #doReloadConfig}, i.e. from the control thread, and it ends by killing the
+     * process: it must not run <em>on</em> the looper it is about to destroy, and it must not
+     * hold that looper busy while it waits for {@code am start} and then kills everything.
+     * The {@code Thread.sleep} inside it is not reload sequencing - it is a bare thread giving
+     * the relaunched activity a moment before the process dies, on a thread nothing else is
+     * waiting on. It is out of GW-14's scope on purpose.
      */
     private void restartProcess() {
         new Thread(() -> {
@@ -1343,7 +1453,8 @@ public class PjsipSipService extends Service implements SipCallService {
     @ControlThread
     private void publishStatus() {
         control.assertOnControlThread("publishStatus");
-        status = GatewayStatus.capture(isRunning, accountManager, callManager, audioBridge);
+        status = GatewayStatus.capture(isRunning, accountManager, callManager, audioBridge,
+                configGeneration);
     }
 
     /** The composite the UI shows. Reads the snapshot, never the live managers. */

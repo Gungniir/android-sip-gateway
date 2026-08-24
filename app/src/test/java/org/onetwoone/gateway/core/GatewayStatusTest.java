@@ -63,7 +63,7 @@ public class GatewayStatusTest {
 
     @Test
     public void captureReadsTheLiveManagersOnce() {
-        GatewayStatus status = GatewayStatus.capture(true, accountManager, callManager, audioBridge);
+        GatewayStatus status = GatewayStatus.capture(true, accountManager, callManager, audioBridge, 0L);
 
         assertTrue(status.isRunning());
         assertFalse("no account has been created", status.isSipRegistered());
@@ -75,7 +75,7 @@ public class GatewayStatusTest {
 
     @Test
     public void statusTextIsTheThreeLineCompositeTheUiAlwaysShowed() {
-        GatewayStatus status = GatewayStatus.capture(false, accountManager, callManager, audioBridge);
+        GatewayStatus status = GatewayStatus.capture(false, accountManager, callManager, audioBridge, 0L);
 
         assertEquals("SIP: Not configured\nCall: Idle\nAudio: Not initialized",
                 status.getStatusText());
@@ -102,14 +102,14 @@ public class GatewayStatusTest {
     /** A snapshot is a value: later manager changes must not leak into one already taken. */
     @Test
     public void aTakenSnapshotDoesNotTrackLaterManagerChanges() throws Exception {
-        GatewayStatus before = GatewayStatus.capture(true, accountManager, callManager, audioBridge);
+        GatewayStatus before = GatewayStatus.capture(true, accountManager, callManager, audioBridge, 0L);
 
         pretendGsmCallPlaced(CallManager.GSM_CALL_GRACE_PERIOD_MS);
 
         assertEquals("the old snapshot must not change", "Idle", before.getCallStatus());
         assertEquals("IDLE", before.getCallState());
         assertEquals("GSM connecting...",
-                GatewayStatus.capture(true, accountManager, callManager, audioBridge)
+                GatewayStatus.capture(true, accountManager, callManager, audioBridge, 0L)
                         .getCallStatus());
     }
 
@@ -127,7 +127,7 @@ public class GatewayStatusTest {
     public void gracePeriodIsDerivedFromTheClockNotFrozen() throws Exception {
         pretendGsmCallPlaced(GRACE_REMAINING_MS);
 
-        GatewayStatus status = GatewayStatus.capture(true, accountManager, callManager, audioBridge);
+        GatewayStatus status = GatewayStatus.capture(true, accountManager, callManager, audioBridge, 0L);
         assertTrue("the grace period has not run out yet", status.isInGracePeriod());
 
         Thread.sleep(GRACE_REMAINING_MS + 100);
@@ -139,14 +139,14 @@ public class GatewayStatusTest {
 
     @Test
     public void noGsmDialMeansNoGracePeriod() {
-        GatewayStatus status = GatewayStatus.capture(true, accountManager, callManager, audioBridge);
+        GatewayStatus status = GatewayStatus.capture(true, accountManager, callManager, audioBridge, 0L);
         assertFalse(status.isInGracePeriod());
     }
 
     /** The snapshot's second consumer is GET_STATUS, so it has to flatten. */
     @Test
     public void flattensIntoABundle() {
-        GatewayStatus status = GatewayStatus.capture(true, accountManager, callManager, audioBridge);
+        GatewayStatus status = GatewayStatus.capture(true, accountManager, callManager, audioBridge, 0L);
         Bundle bundle = status.toBundle();
 
         assertTrue(bundle.getBoolean("running"));
@@ -156,7 +156,29 @@ public class GatewayStatusTest {
         assertEquals("Not initialized", bundle.getString("audio_status"));
         assertEquals("IDLE", bundle.getString("call_state"));
         assertFalse(bundle.getBoolean("in_grace_period"));
+        assertEquals(0L, bundle.getLong("config_generation"));
         assertEquals(status.getCapturedAtWallMs(), bundle.getLong("captured_at_wall_ms"));
+    }
+
+    /**
+     * GW-14. The reload counter is what replaced the {@code MainActivity} relaunch, so it has
+     * to survive capture and flatten with everything else - {@code GET_STATUS} is the other
+     * consumer, and "has the config changed since I last looked" is exactly the question a
+     * broadcast caller polling for status wants answered.
+     */
+    @Test
+    public void configGenerationIsCarriedThroughCaptureAndTheBundle() {
+        GatewayStatus status =
+                GatewayStatus.capture(true, accountManager, callManager, audioBridge, 7L);
+
+        assertEquals(7L, status.getConfigGeneration());
+        assertEquals(7L, status.toBundle().getLong("config_generation"));
+    }
+
+    /** Nothing has been reloaded before the service has published anything. */
+    @Test
+    public void unavailableReportsNoConfigGeneration() {
+        assertEquals(0L, GatewayStatus.UNAVAILABLE.getConfigGeneration());
     }
 
     /** Before the service has published anything the UI still needs something to read. */
@@ -174,7 +196,7 @@ public class GatewayStatusTest {
      */
     @Test
     public void captureToleratesMissingManagers() {
-        GatewayStatus status = GatewayStatus.capture(false, null, null, null);
+        GatewayStatus status = GatewayStatus.capture(false, null, null, null, 0L);
 
         assertFalse(status.isRunning());
         assertFalse(status.isSipRegistered());
