@@ -318,7 +318,7 @@ the ALSA capture open for that whole window. The fix, if it is worth one, is to 
 `stopAudioStreams()` log only when it actually stopped a session — which is an
 `AudioBridgeManager`/`GsmAudioPort` change, out of GW-13's scope.
 
-#### D6. Nothing acts on a GSM source discrepancy — NEW, for GW-25
+#### D6. Nothing acts on a GSM source discrepancy — ✅ FIXED (GW-25)
 GW-13 kept `PhoneStateListener` as a cross-check: it logs
 `GSM source cross-check: modem is IDLE but GSM leg N is still tracked` when the modem says
 the call is over and the Telecom path never reported the end. That line describes precisely
@@ -331,6 +331,18 @@ returns early unless `callManager.hasActiveCall()`, and the leg in question has 
 the state machine. GW-25 should give the watchdog a GSM-liveness check that runs regardless
 of `CallManager` state and stops the audio streams when Telecom has no live leg. Until then
 the discrepancy is observable in `logcat -s GatewaySvc` and nothing more.
+
+**Fixed by GW-25.** The tick's rule 2 runs before any `CallManager`-state check and fires on
+`currentGsmCallId != NO_GSM_CALL && !hasLiveGsmCall()`, i.e. "we adopted this leg on Telecom
+`STATE_ACTIVE` and Telecom no longer has it". The repair is `handleGsmCallEnded`, which stops
+the audio streams unconditionally and releases the mute lease — so the state this finding
+describes (streams up, `MixerEnforce` re-asserting the mic mute every 2 s, no call) is
+repaired within one 3 s tick instead of persisting until reboot.
+
+**The trigger is deliberately Telecom-based, never the modem.** Reading `lastPhoneState` here
+would re-create the second source of truth GW-13 deleted; the `PhoneStateListener` stays
+observational and its cross-check log stays exactly what it was. What changed is that
+something now acts on the same condition, from the source GW-13 kept.
 
 ---
 
@@ -854,10 +866,79 @@ GW-26 wraps every teardown step in its own `teardownStep(name, step)`, which cat
 path. Covered by `PjsipSipServiceLifecycleTest`, which fault-injects an `UnsatisfiedLinkError`
 from the step immediately before it.
 
-#### H9. Watchdog only detects one orphan direction
+#### H9. Watchdog only detects one orphan direction — ✅ FIXED (GW-25), false-positive run outstanding
 `checkOrphanedCalls` (`PjsipSipService.java:630`) terminates a SIP call with no GSM leg.
 The reverse — a live GSM call with no SIP leg — is never detected, so a failed bridge can
 burn GSM minutes indefinitely.
+
+**Fixed by GW-25.** The tick now carries five rules, and the interesting part of each is the
+predicate that keeps it off a healthy call:
+
+| Rule | Predicate | Remedy |
+|---|---|---|
+| Max call duration (2 h) | `anyCallUp && now - callUpSinceWallMs >= 2 h` | terminate |
+| **D6** | `currentGsmCallId != NO_GSM_CALL && !hasLiveGsmCall()` | terminate |
+| **H9 reverse orphan** | `currentGsmCallId != NO_GSM_CALL && hasLiveGsmCall() && !hasLiveSipCall() && !isInGracePeriod()`, sustained 45 s | terminate |
+| §2b | `state == IDLE && hasLiveSipCall()` | `hangupSipCall()` |
+| H9 original | `state != IDLE && !isInGracePeriod() && !hasLiveGsmCall() && currentSipCall != null` | terminate |
+
+**"The GSM leg reached ACTIVE" is spelled `currentGsmCallId != NO_GSM_CALL`, not
+`hasLiveGsmCall()`.** The latter is also true for RINGING, DIALING, CONNECTING and HOLDING;
+`currentGsmCallId` is set only by `handleGsmCallConnected`, i.e. only on Telecom
+`STATE_ACTIVE`, and is control-thread-confined. Both directions read the same two signals —
+treating RINGING as "live GSM" in one rule and "no GSM" in another is how a watchdog produces
+contradictory terminations.
+
+**The 45 s dwell is the entire safety argument for the inbound direction**, and it is not
+optional. `isInGracePeriod()` is permanently `false` for the whole GSM→SIP direction —
+`gsmCallPlacedTime` is assigned in exactly one place, `placeGsmCall()`, the SIP→GSM dial. On
+`MODE_ANSWER_FIRST` the GSM leg is answered *first*, so it goes ACTIVE and is adopted while
+`makeSipCallWithRetry` still has up to `40 × 500 ms ≈ 20 s` of retries ahead of it — and going
+ACTIVE has already cancelled the 30 s `INCOMING_TIMEOUT_MS`. During that window a healthy
+inbound call presents every signal a naive reverse-orphan rule looks for. 45 s is past both
+mechanisms that are supposed to act first, so the watchdog only fires once both have failed.
+
+**Remedy, not `terminateAllCalls()`.** That method returns early from `IDLE` and does not stop
+the audio streams for a leg that never left it (PHASE-1-PLAN §3d) — which is the shape most of
+these rules fire on. `watchdogTerminate` goes through `handleGsmCallEnded`, which stops the
+streams unconditionally and releases the mute lease, and then disconnects at Telecom directly
+for the one case neither reaches (a live Telecom leg while the machine never left `IDLE`).
+
+**A transient `InCallService` unbind is no longer an orphan.** `getInstance() == null` reads as
+"no GSM leg" by design, so an unbind used to be indistinguishable from a real orphan. The
+orphan rules are skipped for that tick; the max-duration fail-safe still runs, which is what
+stops a *permanently* unbound service from parking a call forever. The instance is resolved
+**once** per tick and held in a local — resolving it twice would put an unbind between the two
+reads, which is exactly the false positive the guard exists to prevent. `isGsmLegLive()` was
+removed for the same reason: it folded "unbound" into "no leg".
+
+**Only two of the brief's four hard deadlines were missing.** The mute lease
+(`DeviceMuteManager.MUTE_MAX_HOLD_MS`, 4 h, GW-02) and charging-disabled
+(`BatteryLimitService.MAX_DISABLE_MS`, 12 h, GW-05) already existed with error logs and were
+not rebuilt. Max call duration is new and needed a new anchor — there was no call-start
+timestamp anywhere, `gsmCallPlacedTime` being SIP→GSM-only and cleared on end. **TERMINATING
+dwell ships as a log and nothing more, deliberately:** `terminateAllCalls()` walks in and out
+of that state synchronously with no suspension point, `transition()` is private, and there is
+no API to force `TERMINATING → IDLE`. A tick can only observe that state if the control thread
+is wedged inside `terminateAllCalls()` — in which case the tick is not running either.
+
+**Silent bridge is detection only** (`BRIDGED && isAudioStreaming() && getFramesRequested()`
+unchanged for 10 s), per the brief: confirm it never false-positives over a week of real calls
+before deciding whether to act on it. GW-23a's counter accessors exist and are safely
+published (`AtomicLong`, one RT writer), so GW-25 reads them and does **not** touch
+`GsmAudioPort`. The `SipDiagnostics.dumpAndLog` is **latched to once per episode** — ~20
+logcat lines and ~8 owned SWIG objects per dump, which at a 3 s tick would be ~1200 an hour.
+
+**Findings are in the snapshot**, not only in logcat: `GatewayStatus.WatchdogFindings` carries
+the termination count (the acceptance number for the 30-call run), the silent-bridge episode
+count, and the last finding, and all of it flattens into `GET_STATUS`'s bundle. Nothing
+time-derived is frozen — the raw `callUpSinceWallMs` is carried and `getCallDurationMs()`
+re-reads the clock, per plan §2.7 trap 1.
+
+**Outstanding, needs hardware:** the 30-call false-positive run (§Verification 4), and the
+deliberately-broken-bridge check that makes the silent-bridge dump actually fire. Neither is
+reachable from the JVM. Covered by `WatchdogInvariantsTest` (20 tests), whose three
+false-positive cases were confirmed to fail against a naive implementation.
 
 #### H2b. The Java-side `isOpen()` pre-check is now redundant overhead — ✅ FIXED (GW-23a)
 Post-GW-01, `readFrame`/`writeFrame` check `is_open` under the lock and refuse safely.
@@ -1162,13 +1243,25 @@ This changes B4b's priority: it is not a corner case behind a rare kill, it is t
 **normal** shutdown path. Fix alongside B1b/B4b, and additionally make `stopGateway` and
 `MainViewModel.stopService` symmetric with the start path.
 
-#### H9b. `handleIncomingGsmCall` leaks a ringing call when `answer()` throws
+#### H9b. `handleIncomingGsmCall` leaks a ringing call when `answer()` throws — ✅ FIXED (GW-25)
 `GatewayInCallService.handleIncomingGsmCall`, MODE_ANSWER_FIRST branch: if
 `call.answer()` throws, it cancels the incoming timeout and returns, leaving
 `currentCall` set with no SIP leg **and no timeout**. The GSM call then rings until the
 network gives up. It should disconnect the leg rather than just returning.
 Found by the GW-03 agent; not in GW-03's scope. Assign to GW-25 (watchdog invariants) or
 a follow-up.
+
+**Fixed by GW-25.** The branch now disconnects the leg before returning. It acts on the `Call`
+the callback was handed rather than on the `currentCall` field, so a racing `onCallRemoved`
+cannot make it disconnect a different leg, and it is state-guarded the way `disconnectCall()`
+is.
+
+**This could not be left to the watchdog**, which is worth recording because the assignment
+suggested otherwise: every watchdog rule keys off `currentGsmCallId`, and that is set only by
+`handleGsmCallConnected`, i.e. only on Telecom `STATE_ACTIVE`. A leg whose `answer()` threw
+never reaches ACTIVE, so it is invisible to the tick — pinned by
+`WatchdogInvariantsTest.aLegThatNeverReachedActiveIsInvisibleToTheWatchdog`. Needs hardware to
+observe the leg actually stop ringing; `answer()` throwing is not reproducible on the JVM.
 
 #### H8b. `instance` is published before the object is usable — two places
 Both found by the GW-07 agent; both are *ordering*, not visibility, so GW-07 correctly

@@ -188,12 +188,63 @@ Expect 8 rows `read=0`, plus `_id=1` `read=1` (spent during triage).
 **If a tombstone appears:** revert only the `bury(...)` call sites, keep `CallGraveyard`
 and the counters. The recipe is in the class javadoc and the commit body.
 
-## Wave 3 — `phase-2-wave-3` (GW-21, GW-25) — *pending*
+## Wave 3 — `phase-2-wave-3` (GW-21, GW-25)
 
-- **GW-25 false-positive check, before merge**: 30 normal calls of varying length, both
-  directions, **zero** watchdog terminations. A watchdog that kills healthy calls is worse
-  than no watchdog.
-- Specifically exercise **inbound** calls: the grace period does not exist on that direction
-  (`gsmCallPlacedTime` is only set by `placeGsmCall`), and the inbound flow spends up to ~20 s
-  ringing with `CallManager` at `IDLE`.
-- **GW-21**: 20 SMS in a burst, all forwarded exactly once, no `Skipped … frames`.
+### GW-25 — the false-positive run is the acceptance test, not the orphan test
+
+A watchdog that kills healthy calls is worse than no watchdog, so run this **before** trying
+to provoke any of the rules.
+
+**Score it from the snapshot, not from logcat.** GW-25 put the counter in the bundle for
+exactly this:
+
+```
+adb shell am broadcast -p org.onetwoone.gateway -a org.onetwoone.gateway.GET_STATUS
+# watchdog_terminations must be 0; silent_bridge_episodes may be non-zero (detection only)
+```
+
+1. **30 normal calls of varying length, both directions, zero terminations.** Vary the
+   length deliberately — 5 s, 30 s, several minutes — because the max-duration anchor is
+   re-armed per call and a leaked anchor would only show on a long one.
+2. **Weight it towards inbound, and set `MODE_ANSWER_FIRST` for at least ten of them.** That
+   is the dangerous shape: the GSM leg is answered first, so it goes ACTIVE and is adopted
+   while the SIP retry chain still has up to 20 s to run, going ACTIVE has already cancelled
+   the 30 s incoming timeout, and `isInGracePeriod()` is false because
+   `gsmCallPlacedTime` is only ever set by `placeGsmCall()`. Every signal says "orphan"; the
+   45 s dwell is the only thing that says otherwise.
+3. **Toggle the default dialler off and on during an idle period.** Expect
+   `No InCallService bound - skipping the orphan rules this tick` and **no** termination.
+   Do it again with a call up if you can bear the risk — that is the transient-unbind false
+   positive, and the log line is the evidence the guard ran.
+4. **Run a BRIDGE-mode diagnostic test call** (in-app test call, mode `bridge`). It sets
+   `Wiring.active` with `CallManager` at `IDLE` and no GSM leg at all. It must survive; it
+   satisfies no rule's predicate and never calls `startAudioStreams()`.
+
+Only then provoke the rules:
+
+5. **Reverse orphan (H9):** answer an inbound GSM call, then kill the SIP leg from the PBX.
+   The GSM leg must be hung up within **45 s + one tick ≈ 48 s** — not the ~8 s the brief
+   originally guessed, because that number predates the dwell. Confirm with the carrier call
+   log that the call actually ended, and confirm `watchdog_terminations` incremented by 1.
+6. **D6:** the hard case to stage. Look for
+   `INVARIANT (AUDIT D6): GSM leg N is tracked but Telecom no longer has it`. If the
+   pre-existing `GSM source cross-check: modem is IDLE but GSM leg N is still tracked` line
+   appears and is *not* followed by the D6 line within a tick, that is a finding — it means
+   Telecom still reports the leg live while the modem says otherwise.
+7. **Silent bridge:** point the audio profile at a wrong PCM device via config and place a
+   call. Within ~13 s expect one `INVARIANT: bridged and streaming, but pjmedia has requested
+   no frame for …` **and exactly one** conference-wiring dump showing
+   `local->call(TX to SIP)=false`. **If you see the dump repeating every 3 s the latch is
+   broken** — that is the regression this check is really for. `watchdog_terminations` must
+   stay 0: this is detection only.
+8. **Deadlines:** temporarily shorten `MAX_CALL_DURATION_MS` to seconds, confirm it fires
+   exactly once with its error log, then restore it. `TERMINATING_DWELL_MAX_MS` is not
+   reachable and should not be chased — see the javadoc.
+
+**H9b** needs `call.answer()` to throw, which is not reproducible on demand. If it ever does,
+the leg must stop ringing and the log must carry
+`GSM leg disconnected after answer() failed (AUDIT H9b)`.
+
+### GW-21
+
+- 20 SMS in a burst, all forwarded exactly once, no `Skipped … frames`.
