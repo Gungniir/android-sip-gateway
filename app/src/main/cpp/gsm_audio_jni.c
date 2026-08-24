@@ -65,6 +65,13 @@ struct gsm_audio_ctx {
     int is_open;
     int active_io;              /* readers + writers currently inside pcm_read/pcm_write */
 
+    /* Upsample scratch for writeFrame()'s resample branch (AUDIT H3). Allocated once per
+     * open() and freed in close() AFTER the I/O drain, so a writer holding an io_ref can
+     * never be using it while it is freed - exactly the discipline the PCM handles get.
+     * Sized for the largest 20 ms frame the playback device can take. */
+    short *resample_buf;
+    unsigned int resample_samples;   /* capacity of resample_buf, in samples */
+
     pthread_mutex_t lock;
     pthread_cond_t io_drained;  /* broadcast when active_io falls to 0 */
 };
@@ -109,6 +116,8 @@ struct io_ref {
     unsigned int capture_channels;
     unsigned int playback_rate;
     unsigned int playback_channels;
+    short       *resample_buf;      /* borrowed for as long as the reference is held */
+    unsigned int resample_samples;
 };
 
 /*
@@ -132,6 +141,8 @@ static int io_acquire(int capture, struct io_ref *out) {
     out->capture_channels  = g_ctx->capture_channels;
     out->playback_rate     = g_ctx->playback_rate;
     out->playback_channels = g_ctx->playback_channels;
+    out->resample_buf      = g_ctx->resample_buf;
+    out->resample_samples  = g_ctx->resample_samples;
     g_ctx->active_io++;
 
     pthread_mutex_unlock(&g_ctx->lock);
@@ -333,6 +344,29 @@ Java_org_onetwoone_gateway_GsmAudioNative_open(
     }
     LOGI("Capture PCM opened: %d:%d", card, captureDevice);
 
+    /* Upsample scratch (AUDIT H3). writeFrame() used to malloc()/free() this on every
+     * frame, 50x/second, on the pjmedia RT thread. A 20 ms frame can never produce more
+     * than playback_rate/50 samples per channel, and the PJSIP port format is fixed for
+     * the life of the port, so one allocation here covers every frame.
+     * Only the MediaTek profile (capture 8 kHz, playback 48 kHz) ever reads it; Qualcomm
+     * has capture_rate == playback_rate and takes the no-copy fast path. */
+    g_ctx->resample_samples = (unsigned int)(playbackRate / 50) * (unsigned int)playbackChannels;
+    if (g_ctx->resample_samples > 0) {
+        g_ctx->resample_buf = (short *)malloc((size_t)g_ctx->resample_samples * sizeof(short));
+        if (!g_ctx->resample_buf) {
+            LOGE("Failed to allocate %u-sample upsample scratch", g_ctx->resample_samples);
+            g_ctx->resample_samples = 0;
+            pcm_close(g_ctx->capture_pcm);
+            g_ctx->capture_pcm = NULL;
+            pcm_close(g_ctx->playback_pcm);
+            g_ctx->playback_pcm = NULL;
+            pthread_mutex_unlock(&g_ctx->lock);
+            return JNI_FALSE;
+        }
+        LOGI("Upsample scratch: %u samples (%u bytes)", g_ctx->resample_samples,
+             g_ctx->resample_samples * (unsigned int)sizeof(short));
+    }
+
     /* Open mixer */
     g_ctx->mixer = mixer_open(card);
     if (!g_ctx->mixer) {
@@ -401,6 +435,14 @@ Java_org_onetwoone_gateway_GsmAudioNative_close(JNIEnv *env, jclass clazz) {
         g_ctx->mixer = NULL;
     }
 
+    /* Freed here, after the drain, for the same reason the PCM handles are: a writer that
+     * took an io_ref borrowed this pointer and may still be interpolating into it. */
+    if (g_ctx->resample_buf) {
+        free(g_ctx->resample_buf);
+        g_ctx->resample_buf = NULL;
+    }
+    g_ctx->resample_samples = 0;
+
     pthread_mutex_unlock(&g_ctx->lock);
     LOGI("Audio closed");
 }
@@ -451,7 +493,8 @@ Java_org_onetwoone_gateway_GsmAudioNative_readFrame(
  *
  * Runs on the pjmedia RT thread, 50x/second. Holds no lock across the blocking
  * pcm_write(); the io_ref keeps the PCM alive for exactly that long and carries the
- * rate/channel snapshot the resampler needs, so no g_ctx field is read unlocked.
+ * rate/channel snapshot and the preallocated upsample scratch the resampler needs, so no
+ * g_ctx field is read unlocked and nothing here allocates (AUDIT H3).
  *
  * @param buffer Byte array with PCM data
  * @return Number of bytes written, or -1 on error
@@ -482,15 +525,17 @@ Java_org_onetwoone_gateway_GsmAudioNative_writeFrame(
         /* Upsample mono captureRate -> mono playbackRate via linear interpolation.
          * (MediaTek: PJSIP delivers 8 kHz mono; the modem playback memif needs
          * 48 kHz.)
-         * NOTE: the per-frame malloc below is a known RT-path defect, tracked as GW-23. */
+         * The scratch buffer is preallocated in open() and borrowed through the io_ref -
+         * nothing on this path allocates (AUDIT H3). */
         const short *in = (const short *)buf;
         int in_n = len / 2;
         long out_n = (long)in_n * io.playback_rate / io.capture_rate;
-        short *out = (short *)malloc((size_t)out_n * 2);
-        if (!out) {
+        short *out = io.resample_buf;
+        if (!out || out_n <= 0 || out_n > (long)io.resample_samples) {
             io_release();
             (*env)->ReleaseByteArrayElements(env, buffer, buf, JNI_ABORT);
-            LOGE("writeFrame: malloc failed for %ld out samples", out_n);
+            LOGE("writeFrame: %ld out samples exceed the %u-sample scratch (in=%d bytes)",
+                 out_n, io.resample_samples, len);
             return -1;
         }
         double step = (double)io.capture_rate / (double)io.playback_rate;
@@ -502,7 +547,6 @@ Java_org_onetwoone_gateway_GsmAudioNative_writeFrame(
             out[j] = (short)(in[i0] * (1.0 - frac) + in[i1] * frac);
         }
         ret = pcm_write(io.pcm, out, (unsigned int)(out_n * 2));
-        free(out);
     } else {
         /* Unsupported channel conversion - write as-is (should not happen). */
         ret = pcm_write(io.pcm, buf, len);
