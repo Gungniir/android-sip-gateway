@@ -260,6 +260,58 @@ spent three phases removing them.
 do not regress them). New coverage: snapshot published verbatim; `UNAVAILABLE` on unbind;
 duration advances between two reads of the same snapshot; the generation poll still fires.
 
+### GW-41 — hazards found in the existing wiring
+
+`MainActivity` has 40 `findViewById` calls and 11 observers. Three of them are traps, and all
+three are invisible unless you read the observer bodies:
+
+**H-a. Hardcoded colours in Java, where the design system cannot reach them.**
+
+```java
+statusText.setTextColor(state.isRegistered ? 0xFF228B22 : 0xFFCC0000);
+```
+
+Forest green / brick red as literal ints in `setupObservers()`. GW-40 owns `res/values/**`
+and cannot fix this; GW-41 must replace both with palette tokens. These are also the app's
+*only* existing state colours — whatever GW-40 defines for registered/fault has to be at
+least as legible as these were, in both themes.
+
+**H-b. Only one text field is guarded against clobbering the user's typing.**
+
+```java
+viewModel.getManualMuteControls().observe(this, controls -> {
+    if (controls != null && !manualMuteControlsEdit.hasFocus()) {   // <-- the guard
+        manualMuteControlsEdit.setText(controls);
+    }
+});
+```
+
+The `getSipConfig()` observer sets **eight** fields — server, port, user, password, realm,
+both SIM destinations — with no such guard. That observer fires whenever the config
+generation changes, which now includes *a save from the web interface while someone is typing
+on the phone*. GW-14 removed the activity relaunch precisely so the phone-holder's work
+survives a remote save; this observer throws it away anyway, one field at a time.
+
+GW-41 must apply the `hasFocus()` discipline (or a better one — a proper two-way binding that
+does not write over a dirty field) to every rebindable input, not just this one.
+
+**H-c. `getToastMessage()` is an event stream published through `LiveData`.**
+
+```java
+private final MutableLiveData<String> toastMessage = new MutableLiveData<>();
+```
+
+`LiveData` replays its last value to every new observer. On a configuration change — rotation,
+theme switch, night-mode toggle, which GW-40 is about to make reachable — the last toast fires
+again. It is latent today because nothing re-observes much; a restructured screen with
+fragments or a night-mode toggle will surface it immediately. GW-41 needs a consume-once
+event holder, not a `MutableLiveData<String>`.
+
+**H-d. Mirrored selection state.** `MainActivity` keeps `selectedCard`,
+`selectedCaptureDevice`, `selectedPlaybackDevice`, `selectedMixerRoute` as fields, seeded from
+the `getAudioConfig()` observer and written back by four spinner listeners. Any decomposition
+has to decide who owns that — it is view state today and belongs in the ViewModel.
+
 ---
 
 ## 5. Standing rules for every Phase 4 agent
