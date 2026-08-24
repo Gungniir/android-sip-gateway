@@ -81,6 +81,12 @@ public class SipAccountManager {
     /**
      * Create and register the SIP account.
      *
+     * <p><b>Control thread only.</b> Not asserted here directly - the
+     * {@code endpointManager.hasTransport()} guard below asserts it, and every statement after
+     * that guard is a pjsua2 call, which aborts the process outright from a thread pjlib has
+     * never seen. Its two callers, {@code PjsipSipService.initializeSip} and
+     * {@code doReloadConfig}, both assert the control thread as their first statement.
+     *
      * @param callbackService Service to receive callbacks (for GatewayAccount)
      * @throws Exception if registration fails
      */
@@ -155,8 +161,9 @@ public class SipAccountManager {
      * Unregister and delete the account.
      */
     public void deleteAccount() {
-        // Snapshot: createAccount() runs on SipInit/ConfigReload and can replace the field
-        // while this runs, and every step below must act on the same account object.
+        // Snapshot: createAccount() runs on the control thread (SIP init / reload) and can
+        // replace the field while this runs from main's shutdown path, and every step below
+        // must act on the same account object.
         GatewayAccount doomed = account;
         if (doomed == null) {
             return;

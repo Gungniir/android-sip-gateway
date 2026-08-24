@@ -391,19 +391,34 @@ the worst case at one watchdog interval instead of 51 s.
 
 ### P1 — SIP endpoint & account lifecycle
 
-#### F1. Endpoint creation is check-then-act on a static
+#### F1. Endpoint creation is check-then-act on a static — P1 — ✅ FIXED (GW-15)
 `SipEndpointManager.java:31` (`endpoint`, `endpointUseTls`, static, non-volatile),
 `createEndpoint:132`. `SipInit` and a reconnect (or ConfigReload) can both observe
 `endpoint == null` and both call `new Endpoint().libCreate()` → the second `libCreate`
 on an already-created pjsua library aborts natively.
 
-#### F2. `hasTransport()` permanently registers whatever thread calls it
+GW-07 made both fields `volatile`, which made the reads defined but left the race. GW-15
+closed it by serialisation: `createEndpoint()` asserts the control thread, so the two threads
+that could both observe `null` no longer exist. The main-thread hop for `new Endpoint()`
+itself is preserved — pjsua auto-registers only the thread that loaded the native library.
+
+#### F2. `hasTransport()` permanently registers whatever thread calls it — P1 — ✅ FIXED (GW-15)
 `SipEndpointManager.java:85` calls `registerThread(Thread.currentThread().getName())`
 from inside a *query*. Callers include NanoHTTPD workers, `ConfigReload`, the reconnect
 runnable — all short-lived. pjlib allocates a thread descriptor from the pjsua pool and
 **never frees it**; when the thread dies the descriptor dangles. Pool grows monotonically.
 
-#### F3. `initializeSip()` runs on the main thread on the reconnect path
+GW-15 removed the registration from the query and from `createEndpoint`'s endpoint-reuse
+path; both assert the control thread instead. The transitive caller set was enumerated and
+each proved control-thread first — `createEndpoint`'s reuse branch (only caller
+`initializeSip`), `attemptReconnect`, and `SipAccountManager.createAccount` (only callers
+`initializeSip` and `doReloadConfig`). `registerThread` stays public for its one legitimate
+caller, `GatewayControlThread`, and the `libIsThreadRegistered()` short-circuit stays.
+
+Outstanding: the "pool capacity is flat across ~200 reconnects" measurement is on-device work
+and has not been run.
+
+#### F3. `initializeSip()` runs on the main thread on the reconnect path — P1 — ✅ FIXED (GW-10)
 `attemptReconnect` (`PjsipSipService.java:275`) executes on the main handler and calls
 `initializeSip()` (`:283-286`) when the endpoint isn't ready. That runs
 `audioBridge.initialize()` (root shell-out + full mixer enumeration) and
@@ -420,11 +435,25 @@ and calls `buddy.create(account, …)` at `:565` — potentially on a deleted na
 tears the bridge down and deletes the account, then sleeps 500 ms. If main is busy the
 hangup has not happened when the account is deleted.
 
-#### F6. `ReconnectionStrategy` flags are non-volatile and set from three threads
+#### F6. `ReconnectionStrategy` flags are non-volatile and set from three threads — P1 — ✅ FIXED (GW-15)
 `ReconnectionStrategy.java:24-25`. `scheduleReconnect()` is called from `initializeSip`
 on `SipInit` (`PjsipSipService.java:253`) and from `attemptReconnect` on main (`:293`);
 `setEnabled` from main and from the broadcast receiver. `pending` races → duplicate or
 dropped reconnects.
+
+GW-15 moved both `ReconnectionStrategy` and `ServiceWatchdog` onto the control thread's
+looper — handler, timer body and state — and asserts the thread on every mutator. The
+check-then-set is atomic by confinement, so the `volatile` GW-07 added could come back off.
+`ServiceWatchdog.running` is confined the same way; its old `assertMainThread` helper became a
+control-thread assertion.
+
+Note both classes own their `Handler` rather than posting through `GatewayControlThread`, so
+that `cancel()`/`stop()` cannot remove other components' messages. That bypasses
+`GatewayControlThread.dispatch()` and with it the lazy pjlib registration, so both timer
+bodies invoke their callback through `runOrPost` — which dispatches inline and registers. Not
+theoretical: a SIP init that constructs the `Endpoint` and then fails before
+`registerWithPjlib()` leaves a non-null endpoint and an unregistered control thread, and the
+reconnect it schedules calls `hasTransport()` on exactly that.
 
 ---
 
@@ -794,6 +823,14 @@ manager assigns `call` before `makeCall`. → **GW-11**, alongside the D4 start-
 likewise — `MainViewModel` reads `GatewayStatus.getStatusText()` now. Both kept in GW-10
 because that diff does not delete code. Add to the GW-31 sweep alongside the getters already
 listed in PHASE-1-PLAN §3b.
+
+#### H7e. Five more timer getters have no production caller — for GW-31
+Found while moving the two timers onto the control thread in GW-15.
+`ServiceWatchdog.checkNow()`, `ReconnectionStrategy.resetDelay()`, `isEnabled()`,
+`isPending()` and `getCurrentDelay()` are called only from their unit tests. Kept in GW-15
+because that diff does not delete code, and `checkNow()` in particular is the natural entry
+point for the `GET_STATUS` broadcast when that stub is implemented. Add to the GW-31 sweep
+alongside H7d and the getters in PHASE-1-PLAN §3b.
 
 #### H2d. The mute-lease release is now one control-thread hop from the Telecom event — P2
 GW-10 moved `PjsipSipService.onGsmCallStateChanged`'s body onto the control thread, so the
