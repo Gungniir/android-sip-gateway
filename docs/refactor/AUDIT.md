@@ -1711,6 +1711,35 @@ Fixed by catching `Throwable` there and wrapping a non-`Exception` into an `Exce
 rethrowing — wrapped rather than rethrown so `initializeSip`'s handler treats it as a failed
 init and schedules a reconnect, instead of an `Error` killing the control thread.
 
+#### H16. SoC auto-detection uses a locale-sensitive `toLowerCase()` — NEW, P2
+
+`AudioProfileFactory.select:34` lowercases `/proc/asound/cards` with the default locale
+before sniffing for the SoC:
+
+```java
+String cards = readSoundCards().toLowerCase();
+boolean isMediaTek = cards.contains("mt6768") || cards.contains("mt6358")
+        || cards.contains("mediatek") || cards.contains("mtk");
+```
+
+On a device whose default locale is Turkish or Azerbaijani, `String.toLowerCase()` maps
+`I` to the dotless `\u0131`, so a card list containing `MEDIATEK` lowercases to `med\u0131atek`
+and `contains("mediatek")` is false. The gateway then loads `QualcommAudioProfile` on a
+MediaTek phone and drives the wrong ALSA mixer controls entirely — the audio bridge is the
+whole product, and this is a silent misdetection of which one to build.
+
+`mt6768`, `mt6358` and `mtk` happen to survive the mapping (no `I`), so whether the bug
+bites depends on which of the four markers the specific kernel prints. That is worse than a
+deterministic failure, not better.
+
+Fix: `toLowerCase(Locale.ROOT)`. This is ASCII protocol text being matched against ASCII
+literals, which is exactly the case `Locale.ROOT` exists for. The identical argument applies
+to the `equalsIgnoreCase` calls just above it, though those are safe today because both
+sides are ASCII literals.
+
+Found by lint (`DefaultLocale`) while landing GW-40, which does not touch this file. Not
+folded into that change.
+
 ### P2 — security posture
 
 #### S1. Exported control receiver with no permission
