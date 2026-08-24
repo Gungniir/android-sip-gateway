@@ -211,8 +211,12 @@ public class PjsipSipService extends Service implements SipCallService {
 
         accountManager = new SipAccountManager(config, endpointManager);
 
-        // Call management
-        callManager = new CallManager(this, config);
+        // Call management. The control thread goes in through the constructor: since GW-11
+        // every CallManager method asserts it, so the manager cannot exist without knowing
+        // which thread owns it.
+        callManager = new CallManager(this, config, control);
+        // Construction-time wiring, on main, before the control thread has any work queued -
+        // the one CallManager method that does not assert the control thread. See its javadoc.
         callManager.setListener(callListener);
 
         // Audio bridge
@@ -1019,11 +1023,15 @@ public class PjsipSipService extends Service implements SipCallService {
     /**
      * Tear down whatever is up. Called from the Telecom timeout on main and from NanoHTTPD.
      *
-     * <p>The {@code synchronized} is now redundant - every writer of the state it protects is
-     * the control thread - but GW-10 does not remove synchronisation; plan §3c hands both this
-     * monitor and {@code CallManager.hangupSipCall}'s to GW-11 §1, to be deleted together.
+     * <p>No longer {@code synchronized} (GW-11 §4, plan §3c). This monitor and
+     * {@code CallManager.hangupSipCall}'s nested inside it were held across a pjsua2 BYE, a
+     * Telecom {@code disconnectCall()} and {@code GsmAudioPort.stopCapture()} - ~1.75 s of
+     * join plus a ~250 ms native drain - while being entered from main and from pjsua
+     * workers. They protected nothing even then: {@code terminateAllCalls()}, the actual
+     * caller, never took either. What serialises the teardown now is the control thread, and
+     * dropping the monitors removes a deadlock surface rather than a guarantee.
      */
-    public synchronized void hangupCall() {
+    public void hangupCall() {
         control.runOrPost(() -> {
             control.assertOnControlThread("hangupCall");
             callManager.terminateAllCalls();
@@ -1052,6 +1060,10 @@ public class PjsipSipService extends Service implements SipCallService {
             // Ask for a *live* call, not just a non-null reference: a disposed leftover is
             // not a call in progress, and refusing on one is what made the audio bridge
             // undiagnosable after a failed outgoing call (AUDIT D2).
+            //
+            // GW-11 §5: this gate and the start it guards are inside one control-thread task,
+            // so an incoming gateway call - which reaches CallManager only through this same
+            // queue - cannot land between them.
             if (callManager.hasLiveSipCall()) {
                 Log.w(TAG, "Refusing test call: a gateway SIP call is in progress");
                 return;

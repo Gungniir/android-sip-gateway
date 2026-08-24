@@ -6,6 +6,7 @@ import static org.junit.Assert.assertTrue;
 
 import android.app.Application;
 import android.os.Bundle;
+import android.os.Looper;
 
 import org.junit.Before;
 import org.junit.Test;
@@ -51,7 +52,10 @@ public class GatewayStatusTest {
         GatewayConfig.init(app);
 
         GatewayConfig config = GatewayConfig.getInstance();
-        callManager = new CallManager(app, config);
+        // capture() is control-thread code and CallManager now asserts it, so run the control
+        // thread on Robolectric's main looper - the established pattern in this suite.
+        callManager = new CallManager(app, config,
+                new GatewayControlThread(Looper.getMainLooper(), null));
         accountManager = new SipAccountManager(config, new SipEndpointManager(config));
         audioBridge = new AudioBridgeManager(app, config);
     }

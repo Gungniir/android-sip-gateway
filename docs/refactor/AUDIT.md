@@ -183,7 +183,7 @@ independent chains; if SIP never registers the chain runs for the life of the pr
 
 ### P1 — call state machine races
 
-#### D1. `CallManager` state is unguarded and driven from three threads
+#### D1. `CallManager` state is unguarded and driven from three threads — ✅ fixed by GW-11
 `CallManager.java:47-50` and `:62` (`state`, `currentSipCall`, `pendingGsmDestination`,
 `pendingGsmSimSlot`, `gsmCallPlacedTime`) — all plain fields. Only `hangupSipCall()`
 (`:439`) is `synchronized`; `terminateAllCalls()` (`:468`) is not.
@@ -195,6 +195,20 @@ ConfigReload (indirectly).
 **Failure:** two concurrent `terminateAllCalls()` → two `onCallsTerminated()` →
 two concurrent `audioBridge.stopBridge()` (see E1); state flips
 `TERMINATING → IDLE → TERMINATING` and the watchdog reads a torn value.
+
+**GW-11** closed all three halves. Every public method now opens with
+`control.assertOnControlThread(...)`, so there is one writer and one reader thread; `state`
+is assigned only by `transition(from, to, reason)`, which rejects — logs loudly, no-ops,
+never throws — anything outside an explicit eight-row table; and `terminateAllCalls()`
+returns immediately when the machine is already `TERMINATING` or `IDLE`, so the second
+concurrent teardown cannot fire `onCallsTerminated()` again. The `synchronized` on
+`hangupSipCall()` and the outer one on `PjsipSipService.hangupCall()` are gone with it
+(plan §3c) — they protected nothing and were held across a pjsua2 BYE, a Telecom
+`disconnectCall()` and a ~250 ms native drain.
+
+The overloaded `SIP_INCOMING` is also gone: the GSM→SIP direction now runs
+`IDLE → GSM_INCOMING → SIP_DIALING → BRIDGED` and `getStatusString()` stops telling the UI
+an inbound GSM call is an incoming SIP one.
 
 #### D1b. `onSipCallState(CONFIRMED)` does not check the call is the current one
 `CallManager.onSipCallState` fires `listener.onSipCallConnected(call)` on CONFIRMED
@@ -248,7 +262,30 @@ than on `owns()`. Ownership is immutable, so it can no longer go stale — which
 callbacks made mandatory, not merely tidy. The **start-gate race is still open**: the
 `hasLiveSipCall()` check and `testCall.start()` now both run on the control thread, so
 nothing can land between them there, but `start()` then hops to main where the diagnostic
-internals live, and an incoming gateway call can still arrive in *that* gap. → GW-11.
+internals live, and an incoming gateway call can still arrive in *that* gap.
+
+**GW-11 §5** confirmed the control-thread half: the gate and `testCall.start()` are one
+task on the control thread, and every route into `CallManager` goes through that same
+queue, so nothing can land *between* them. What is still open is below.
+
+#### D4c. The diagnostic-call admission gate asks the wrong question — NEW, for GW-13/GW-31
+`PjsipSipService.startTestCall` admits a diagnostic call when
+`callManager.hasLiveSipCall()` is false. That predicate is about the SIP *call object*, not
+about the gateway being busy, and the two are not the same thing:
+
+- in `GSM_INCOMING` a GSM call is ringing and no SIP call object exists yet, so the gate
+  reads "free";
+- in `SIP_INCOMING` / `SIP_ANSWERED` / `GSM_DIALING` the registered call may already be
+  disposed while the GSM leg is very much up.
+
+In each case a diagnostic call is admitted on top of a live gateway session and the two
+fight over the single static `gsmAudioPort` — the same collision D4 describes, reached by
+predicate rather than by race. The obvious repair, gating on `hasActiveCall()`, would
+re-open **D2**: refusing on a disposed leftover is exactly what used to make the audio
+bridge undiagnosable after a failed outgoing call. The gate that is both correct and
+D2-safe is `getState() == IDLE`, which only became expressible once GW-11 split the states —
+but changing admission behaviour is not a threading move, so it is filed rather than folded
+into GW-11's diff.
 
 ---
 
