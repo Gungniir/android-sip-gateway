@@ -61,13 +61,40 @@
 
 ## Acceptance criteria
 
-- [ ] No `StringBuilder` is read while another thread may append to it.
-- [ ] A join timeout yields a failed result, never partial output.
-- [ ] All root command execution is serialised through one executor.
-- [ ] Every `Process.waitFor()` has a timeout and destroys on expiry.
-- [ ] Exactly one mechanism per mixer read type (native preferred).
-- [ ] `setenforce` runs once per process; `chmod` still runs per open.
-- [ ] Dead persistent-shell API deleted.
+> **Status after the GW-20 change.** Read PHASE-2-PLAN §2.1 first — it overrides this brief,
+> and it is where the two headline items below come from. AUDIT **H1** and **B1e** carry the
+> full record.
+
+- [x] No `StringBuilder` is read while another thread may append to it. — each reader owns
+      its builder and publishes a finished `String` through a `FutureTask`.
+- [x] A join timeout yields a failed result, never partial output. — `EXIT_NO_OUTPUT` /
+      `EXIT_TIMED_OUT`, both negative, both with empty output.
+- [x] **`execRoot`'s return contract** (not in this brief; PHASE-2-PLAN §2.1 added it, and it
+      is the systemic bug). `RootResult` carries exit code + stdout + stderr + `success()`;
+      a non-zero exit can no longer be reported as success. Closes the `execRoot` half of
+      **H13**. **GW-27 consumes this API.**
+- [x] **B1e** (not in this brief either, and the highest-value item):
+      `QualcommAudioProfile.TinymixControls` migrated to `GsmAudioNative.getMixerControl` /
+      `getMixerControlEnum`, and a control whose original cannot be read is no longer muted
+      with a fabricated one.
+- [x] Every `Process.waitFor()` has a timeout and is killed on expiry, in every file GW-20
+      owns. `destroy()` not `destroyForcibly()` — the latter is API 26 against minSdk 23.
+- [x] Exactly one mechanism per mixer read type: `MixerControls.NATIVE` for both.
+- [x] `setenforce` runs once per process; `chmod` still runs per open — implemented **inside
+      `RootHelper.setupAlsaPermissions`**, not at `GsmAudioPort`'s call sites (GW-23a owns
+      that file).
+- [ ] ~~All root command execution is serialised through one executor.~~ **Deliberately not
+      done** — PHASE-2-PLAN §2.1. `PowerController`'s ~30 s burst would stall per-call
+      `setupAlsaPermissions` at service-start time, and `SmsHandler.markAsReadWithRoot` still
+      runs on main, so serialising would let main block behind another thread's `su`. The
+      reasoning is in `RootHelper`'s class javadoc so it is not silently re-litigated.
+- [ ] ~~Dead persistent-shell API deleted.~~ **GW-31's** sweep, per ROADMAP rule 8. Eight
+      dead methods are listed in AUDIT **H1c** and marked `@Deprecated` in the meantime.
+      `execRootCode`'s pipe deadlock was fixed rather than left, by delegating to `run()`.
+- [ ] **On-device: the B1e value-by-value check** (this brief's own Risk section).
+      `TinymixManager.verifyNativeReads()` runs it at the end of `detectControls()`; tap
+      "Detect mixer controls" and grep logcat for `B1e native-vs-tinymix`. Must read
+      **0 mismatched, 0 unreadable** on each SoC. Not yet run on hardware.
 
 ## Verification
 

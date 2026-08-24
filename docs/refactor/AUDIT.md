@@ -557,13 +557,67 @@ handler (`:97`) and does a `ContentResolver.query` inline, then calls back into
 
 ### P2 — resource, correctness and hygiene
 
-#### H1. `RootHelper` static state is unsynchronized; output capture is not thread-safe
+#### H1. `RootHelper` static state is unsynchronized; output capture is not thread-safe — P2 — ✅ FIXED (GW-20)
 `RootHelper.java:21-23` (`hasRoot`, `suProcess`, `suOutputStream`, all static, plain).
 `execRoot` (`:61`) builds output in a `StringBuilder` written by a reader thread and read
 by the caller after `join(1000)`; if the join **times out**, `:111` reads a
 `StringBuilder` that is still being appended → `StringIndexOutOfBoundsException` or torn
 output. `execInShell`/`startRootShell` (`:137-171`) can spawn two `su` processes or NPE.
 Each `execRoot` spawns 3 threads; `setupAlsaPermissions` runs on every capture open.
+
+**Fixed by GW-20.** What landed, and what deliberately did not:
+
+- **The return contract, which was the systemic bug and is not in this finding's original
+  text.** `execRoot` logged a non-zero exit and then returned `output.toString().trim()`
+  anyway — an empty string, never `null` — so every caller testing `execRoot(...) != null`
+  was blind to a failed command. That is the shared root cause of **H13** and half of
+  **B1e**. There is now a `RootResult` carrying exit code + stdout + stderr + `success()`,
+  where `success()` is `exitCode == 0` and every failure path uses a negative sentinel, so
+  a non-zero exit cannot be reported as success. `RootHelper.run(String[,int])` is the new
+  entry point; **GW-27 consumes it**. `execRoot` is kept source-compatible but returns
+  `null` for any failure, which corrects `SmsHandler`'s and `BatteryLimitService`'s
+  existing null checks without touching either file.
+- **The handoff race.** Each stream is drained by its own daemon thread into a
+  thread-confined `StringBuilder` and published as a finished `String` through a
+  `FutureTask`. A reader that does not complete in time yields a **failed result**, never
+  partial output.
+- **The timeout ordering.** The process timeout is checked and the process killed *before*
+  the readers are reaped. The old code joined both readers (1 s each) first, so a hung `su`
+  cost the caller `timeoutMs + 2000 ms`.
+- **Both pipes are always drained**, so a chatty command cannot deadlock. `execRootCode`
+  was the concrete instance (bare `waitFor()` on an undrained process) and now delegates to
+  `run()`.
+- **`setenforce` once per process**, behind a CAS flag reset on failure; `chmod 666
+  /dev/snd/*` still runs on every call, because the HAL recreates those nodes. Implemented
+  inside `setupAlsaPermissions` rather than at `GsmAudioPort`'s two call sites, which GW-23a
+  owns — see PHASE-2-PLAN §2.1.
+- **Every remaining unbounded `Process.waitFor()` is bounded and drained**:
+  `QualcommAudioProfile` ×2 (deleted with `TinymixControls`, see B1e), `TinymixManager`,
+  `PermissionManager` ×3, `BootReceiver`. `BootReceiver`'s fallback now also fires when
+  `am start` runs and fails, not only when it throws.
+- **`destroy()` rather than `destroyForcibly()`** — the latter is API 26 against
+  `minSdkVersion` 23 and was only passing lint via a baseline entry. On Android `destroy()`
+  is already SIGKILL.
+- **NOT done: the single-thread root executor** the brief's §2 asks for. Serialising is a
+  net loss until two other things move: `PowerController.disableBatteryOptimizations` is
+  6 × `execRoot` at 5 s each on its own thread, and putting the per-call
+  `setupAlsaPermissions` behind that burst stalls call setup at service-start time; and
+  `SmsHandler.markAsReadWithRoot` still runs on **main**, so serialising lets main block
+  behind another thread's `su` — a stall the current design does not have. The reasoning is
+  recorded in `RootHelper`'s class javadoc so it is not silently re-litigated.
+- **NOT done: deleting the dead surface.** Per ROADMAP rule 8 that is **GW-31**'s sweep.
+  See H1c below for the list; everything in it is now marked `@Deprecated` with a pointer.
+
+#### H1c. `RootHelper`'s live surface is three methods; eight more have no callers — for GW-31
+The only production entry points are `execRoot(String)`, `execRoot(String,int)` (both now
+`run(...)` wrappers) and `setupAlsaPermissions()`. Zero callers anywhere in the tree:
+`startRootShell`, `execInShell`, `stopRootShell`, `checkRoot`, `execRootCode`,
+`copyFileAsRoot`, `extractAsset`, `grantAllPermissions` (`ui/PermissionManager` has its own
+duplicate). GW-20 left them correct rather than deleting them: `execRootCode`'s pipe
+deadlock is fixed by delegation, `checkRoot`'s unbounded `waitFor` is gone, and all eight
+carry `@Deprecated` naming GW-31. **H1b** (the `startRootShell` double-spawn) is deliberately
+*not* fixed — the API it lives in is scheduled for deletion, and the javadoc says so.
+Add to the GW-31 sweep alongside H7d/H7e and dead `deleteSms` / `setSoundCard`.
 
 #### H2. Per-frame JNI churn on the RT thread
 `GsmAudioPort.onFrameRequested:160-168` and `onFrameReceived:205-207` copy 160 samples
@@ -734,7 +788,7 @@ half-applied mute.
 > well inside the reported `dsrange 0->124`), so it cannot restore them. A reboot resets
 > the mixer to kernel defaults — verified: `DEC1-5 Volume` back to `84`.
 
-#### B1e. B1c's twin survives in `QualcommAudioProfile`, which fabricates every saved original — NEW, P1
+#### B1e. B1c's twin survives in `QualcommAudioProfile`, which fabricates every saved original — P1 — ✅ FIXED (GW-20), on-device check outstanding
 **Verified on device 2026-08-24, lavender.** `bf22992` migrated `DeviceMuteManager` to the
 native mixer API and closed B1c — but the *same* broken read pattern lives on untouched in
 `QualcommAudioProfile.TinymixControls`, and it is the component that saves the originals
@@ -779,6 +833,42 @@ a binary that is not present, whose failure the caller cannot distinguish from s
 is `RootHelper.execRoot`'s return contract (H13 defect 3) in the shared case, and bare
 `Runtime.exec` + `readLine() == null` here. → **GW-20** owns the mechanism; H13/**GW-27**
 owns the SMS instance.
+
+**Fixed by GW-20.** `TinymixControls` is gone — deleted rather than left for GW-31's sweep,
+because it is not incidental dead code, it *is* the defect. Both reads now go through
+`GsmAudioNative.getMixerControl` / `getMixerControlEnum`, which have been in production use
+in `DeviceMuteManager` since `bf22992`. `MixerControls.NATIVE.getEnum` was a hardcoded
+`return ""` carrying a javadoc that claimed no native ENUM getter existed; it now delegates,
+mapping native `null` to `""` exactly as `DeviceMuteManager.NATIVE` does.
+
+`VOLUME_READ_FALLBACK = 84` is replaced by `VALUE_UNREADABLE = -1`, and **a control whose
+original cannot be read is now left alone rather than muted with an invented original** —
+the policy `DeviceMuteManager` already applies (`muteInt`/`muteEnum` with `requireRead=true`
+at every call site). `enforceMixer` is deliberately unchanged: by the `AudioProfile` contract
+it reads only its static control lists, and that is sound here because the native getter
+fails exactly when the mixer cannot be opened or the control does not exist, in which case
+the corresponding native *write* fails too — so enforce's re-assert is a logged no-op, not
+an unrestorable mute.
+
+Regression tests: `QualcommMixerReadTest` (8) — an unreadable control is neither muted nor
+fabricated, `84` is never written again, `0` round-trips as a real reading, the production
+backend is asserted to be `MixerControls.NATIVE`, and `NATIVE.getEnum` is asserted to reach
+JNI rather than return a constant.
+
+> **⚠️ Still outstanding — the on-device value-by-value check.** GW-20's Risk section is
+> explicit that a native getter returning a different representation than `tinymix` would
+> silently corrupt the saved originals and break restore, and that this must be verified
+> before the write path is trusted. It agrees *by construction* — `tinymix` prints INT
+> controls from `mixer_ctl_get_value(ctl, i)` and ENUM controls from
+> `mixer_ctl_get_enum_string()`, the same tinyalsa primitives the JNI getters call, both at
+> value index 0 — but that is an argument, not a measurement.
+>
+> `TinymixManager.verifyNativeReads()` performs the comparison and runs automatically at the
+> end of `detectControls()`. **Procedure:** tap "Detect mixer controls" (or GET
+> `/api/mixer-controls`), then `logcat | grep 'B1e native-vs-tinymix'`. It must read
+> **0 mismatched, 0 unreadable** on each SoC before the saved originals are trusted. It has
+> not been run on hardware. It lives on the UI path, not the call path, because that is the
+> component that already extracts a `tinymix` binary to compare against.
 
 #### B1d. The mic-volume restore is **rejected by the kernel**, and the failure is discarded — P1
 Found 2026-08-23 on lavender, after B1c and the mixer-handle cache were both in place.
@@ -899,7 +989,10 @@ which moves the class onto the control thread and dissolves the race.
 
 #### H1b. `RootHelper.startRootShell` check-then-act spawns duplicate `su` processes
 Two callers can each observe `suProcess == null` and each spawn a shell, orphaning one.
-→ **GW-20** (which deletes this API outright — see GW-31).
+→ **GW-31**. Reassigned: GW-20 considered and declined to fix it, because the whole
+persistent-shell API has zero callers and is scheduled for deletion — fixing a race in code
+that is about to be removed is churn. It is unreachable in the meantime, and both the
+javadoc and H1c say so.
 
 #### H7b. `AudioBridgeManager.wiredConfSlot` is write-only dead state
 Assigned at three sites, never read — `unwireBridge` deliberately asks the media objects
@@ -1069,6 +1162,12 @@ inbox to the PBX every time the process restarts.**
    `markAsReadWithRoot`'s `if (result != null)` is therefore always true, so it logs
    `Marked SMS id=N as read (root sqlite3)` for a command that did nothing. The false success
    is why this went unnoticed: the logs claim the inbox is being drained.
+   **✅ FIXED (GW-20).** `execRoot` now returns `null` for any failure, including a non-zero
+   exit, so `markAsReadWithRoot`'s existing `if (result != null)` became correct without
+   `SmsHandler` being touched — the log will now say the root fallback failed. That is
+   defect 3 only: defects 1 and 2 and the persisted suppression set are still **GW-27**'s,
+   and it should move off `execRoot` onto `RootHelper.run(...)`/`RootResult.success()` and
+   onto `/system/bin/content`. See H1 for the new API.
 
 The read flag is consequently never written. The **only** thing preventing re-delivery is
 `SmsHandler.processedSmsIds`, an in-memory `HashSet` (see H12) that starts empty on every
