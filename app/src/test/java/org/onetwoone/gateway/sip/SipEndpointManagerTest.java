@@ -8,6 +8,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.onetwoone.gateway.BuildConfig;
 import org.onetwoone.gateway.config.GatewayConfig;
+import org.onetwoone.gateway.core.LifecycleCancellation;
 import org.onetwoone.gateway.core.GatewayControlThread;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
@@ -21,6 +22,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 /**
  * GW-15 — {@link SipEndpointManager}'s thread ownership.
@@ -119,5 +121,93 @@ public class SipEndpointManagerTest {
 
         assertTrue(done.await(TIMEOUT_S, TimeUnit.SECONDS));
         assertNull(thrown.get());
+    }
+
+    // ========== GW-26: the endpoint hop must be cancellable ==========
+
+    /**
+     * The 30 s latch in {@code createEndpointOnMainThread} is the whole reason destroy needed
+     * cancellation rather than a longer join, and this is that wait in isolation.
+     * {@code awaitCancellably} is package-visible for exactly this: everything around it is
+     * pjsua2 and therefore unreachable from the JVM.
+     */
+    @Test
+    public void aCancellableWaitReturnsWhenTheLatchFires() throws Exception {
+        CountDownLatch latch = new CountDownLatch(1);
+        latch.countDown();
+
+        SipEndpointManager.awaitCancellably(latch, LifecycleCancellation.NEVER, 5000,
+                "endpoint creation");
+    }
+
+    @Test
+    public void aCancellableWaitGivesUpAtItsDeadline() throws Exception {
+        CountDownLatch never = new CountDownLatch(1);
+
+        try {
+            SipEndpointManager.awaitCancellably(never, LifecycleCancellation.NEVER, 120,
+                    "endpoint creation");
+            fail("the 30 s backstop must still exist");
+        } catch (LifecycleCancellation.CancelledException e) {
+            fail("nothing cancelled this; it timed out");
+        } catch (Exception e) {
+            assertTrue(e.getMessage().contains("Timeout waiting for endpoint creation"));
+        }
+    }
+
+    /**
+     * The one that matters. On device the runnable this latch waits for is queued <em>behind
+     * {@code onDestroy}</em> on main, so it cannot fire while the service is being destroyed;
+     * before GW-26 the control thread therefore sat here for the full 30 s and then walked on
+     * to create a SIP account for a service that was already gone (AUDIT H8c). It must now give
+     * up within a poll interval of the cancel.
+     */
+    @Test
+    public void aCancellableWaitAbortsPromptlyWhenTeardownCancelsIt() throws Exception {
+        LifecycleCancellation cancellation = new LifecycleCancellation();
+        LifecycleCancellation.Token token = cancellation.begin();
+        CountDownLatch never = new CountDownLatch(1);
+        CountDownLatch waiting = new CountDownLatch(1);
+        AtomicReference<Throwable> outcome = new AtomicReference<>();
+
+        Thread waiter = new Thread(() -> {
+            waiting.countDown();
+            try {
+                SipEndpointManager.awaitCancellably(never, token,
+                        SipEndpointManager.ENDPOINT_CREATE_TIMEOUT_MS, "endpoint creation");
+                outcome.set(new AssertionError("the wait must not have completed"));
+            } catch (Throwable t) {
+                outcome.set(t);
+            }
+        }, "endpoint-waiter");
+        waiter.start();
+
+        assertTrue(waiting.await(TIMEOUT_S, TimeUnit.SECONDS));
+        cancellation.cancel();
+
+        // Generous relative to CANCEL_POLL_MS (50 ms) and tiny relative to the 30 s bound the
+        // wait would otherwise run to: this asserts "cancelled", not "timed out".
+        waiter.join(TIMEOUT_S * 1000);
+        assertFalse("the wait must abandon the latch, not run to its deadline", waiter.isAlive());
+        assertTrue("a cancelled hop is not a failed one: " + outcome.get(),
+                outcome.get() instanceof LifecycleCancellation.CancelledException);
+    }
+
+    /** Destroy can land before the task ever reaches the wait. That must abort too. */
+    @Test
+    public void aCancellableWaitDoesNotStartIfAlreadyCancelled() {
+        LifecycleCancellation cancellation = new LifecycleCancellation();
+        LifecycleCancellation.Token token = cancellation.begin();
+        cancellation.cancel();
+
+        try {
+            SipEndpointManager.awaitCancellably(new CountDownLatch(1), token,
+                    SipEndpointManager.ENDPOINT_CREATE_TIMEOUT_MS, "endpoint creation");
+            fail("an already-cancelled token must not enter the wait");
+        } catch (LifecycleCancellation.CancelledException expected) {
+            // exactly this
+        } catch (Exception e) {
+            fail("expected cancellation, got " + e);
+        }
     }
 }
