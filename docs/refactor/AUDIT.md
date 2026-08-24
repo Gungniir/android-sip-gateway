@@ -630,6 +630,8 @@ deadlock is fixed by delegation, `checkRoot`'s unbounded `waitFor` is gone, and 
 carry `@Deprecated` naming GW-31. **H1b** (the `startRootShell` double-spawn) is deliberately
 *not* fixed — the API it lives in is scheduled for deletion, and the javadoc says so.
 Add to the GW-31 sweep alongside H7d/H7e and dead `deleteSms` / `setSoundCard`.
+(`SmsHandler.deleteSms` now carries the same `@Deprecated`-naming-GW-31 marker, added by
+GW-27, which had to touch it and confirmed again that it has no callers anywhere.)
 
 #### H2. Per-frame JNI churn on the RT thread — ✅ FIXED (GW-23a)
 `GsmAudioPort.onFrameRequested:160-168` and `onFrameReceived:205-207` copied the frame
@@ -1335,6 +1337,20 @@ happen on **main**; it now happens on the control thread, which is a strict impr
 (bounded by `RootHelper`'s timeout, and off the UI thread) but is worth knowing about when
 reading control-thread latency.
 
+**Partially mitigated by GW-27, not closed.** GW-27 had to grow this state (a persisted
+confirmed-id map, an in-flight set, attempt counts, retry deadlines) and did not want to
+leave a `HashSet` being iterated on one thread and `add`ed on another, so the collections are
+now `ConcurrentHashMap`-backed and the persisted record's read-modify-write is behind a lock
+that is **never held across the callback** — main must not end up blocked behind the control
+thread's blocking SIP send. The `ConcurrentModificationException` is therefore gone.
+
+What is *not* fixed is the finding itself: `processInbox()` still runs on two threads, so the
+check-then-act between "is this id suppressed?" and "add it to in-flight" is still not atomic,
+and two concurrent scans can still both forward the same message. **GW-21 closes it** by
+giving the `ContentObserver` the control looper. When it does, the concurrent collections and
+the lock should go back to plain `HashMap`s with an `assertOnControlThread` — `SmsHandler`'s
+class javadoc says so, and nothing in GW-27 depends on the concurrency.
+
 #### F6c. `ReconnectionStrategy.onSuccess()` clears `pending` without cancelling the timer — P2 — ✅ FIXED (GW-26)
 `onSuccess()` (`:108-113`) sets `pending = false` but does not
 `handler.removeCallbacksAndMessages(null)` the way `cancel()` (`:119`) does. The already
@@ -1410,6 +1426,42 @@ without any process restart at all.
 → New issue **GW-27**. Related: **H12** (same set, threading), **H1** / **GW-20**
 (`execRoot`'s return contract is the root cause of defect 3, and it is not SMS-specific —
 *every* caller that tests `execRoot(...) != null` for success is equally blind).
+
+**✅ FIXED (GW-27)** — defect 3 was GW-20's; defects 1 and 2 and the missing persistence are
+closed here. What landed:
+
+- **A mechanism that exists.** `markAsReadWithRoot` runs
+  `content update --uri content://sms/<id> --bind read:i:1` through `RootHelper.run(...)` and
+  tests `RootResult.success()`. No `sqlite3` invocation remains in the tree.
+- **Verified, not assumed.** Both write paths re-read the row afterwards. Exit 0 is treated
+  as necessary but not sufficient — `content update` reports success for a URI it matched but
+  a row it did not change — and "could not re-read" is kept distinct from "verified still
+  unread". A write that did nothing logs an error naming the id.
+- **The flag is no longer load-bearing.** The suppression set is persisted through
+  `GatewayConfig.getProcessedSmsRecord()` / `setProcessedSmsRecord()` (`commit()`, not
+  `apply()` — the failure being guarded against is the process going away) and reloaded in
+  `SmsHandler`'s constructor. `SmsDuplicateSuppressionTest` fault-injects the flag write off
+  and requires **zero** duplicates across a restart anyway; that is the test that proves the
+  record, not the flag, carries correctness.
+- **Bounded.** TTL 30 days plus a 1000-id cap, pruned oldest-first and written back.
+  **The TTL is keyed on when the forward was confirmed, not on the SMS's own `date` as the
+  brief asked.** Keying it on the SMS date silently re-opens the bug for exactly the messages
+  that provoked it: the merlinx fixture is a pile of long-unread SMS, and every one of them
+  would have been pruned the instant it was recorded.
+- **Persisted after the forward, never before**, so a crash mid-send retries rather than
+  drops. `inFlightIds` (not persisted) covers the window between the callback and the send.
+- **Bounded retry.** `unprocessSms` counts attempts and backs off exponentially, giving up
+  after 5 with an error and marking the message read. The **first** retry is deliberately not
+  delayed: the commonest caller is "not registered yet" and the event that brings the message
+  back is the successful REGISTER seconds later, which a backoff covering attempt 1 would
+  swallow. It cannot spin — nothing on the failure path mutates the provider, so it does not
+  re-trigger the observer; re-delivery is event-driven, not a loop, and the original brief
+  overstated this.
+- **The flag write is given up on** after 3 consecutive failures for the life of the process
+  (issue §5), so a device that can never write it does not spawn a doomed `su` per message.
+
+Still owed: on-device verification against the merlinx fixture (PHASE-2-PLAN §5). Everything
+above is covered by JVM tests only.
 
 #### H2e. A short SIP frame replays the tail of the previous one to the modem — NEW, P2 — ✅ FIXED (GW-23a)
 Found during GW-23a recon, in neither brief. `GsmAudioPort.onFrameReceived` admitted any
