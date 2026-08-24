@@ -6,6 +6,8 @@ import android.util.Log;
 import androidx.work.Configuration;
 import androidx.work.WorkManager;
 
+import org.onetwoone.gateway.config.GatewayConfig;
+
 import java.io.File;
 
 /**
@@ -26,6 +28,16 @@ public class GatewayApplication extends Application implements Configuration.Pro
         ensureNoBackupDirectory();
 
         super.onCreate();
+
+        // Config before anything else in the process. GatewayConfig.init() is where the
+        // preference migration runs (AUDIT H4), so it has to precede every reader - and
+        // before GW-24 it was called from three components only (PjsipSipService,
+        // GatewayInCallService, MainViewModel), while BootReceiver, GatewayControlReceiver,
+        // WebConfigServer, DeviceMuteManager and BatteryLimitService all read the same
+        // preferences by raw name and could run first. Those raw reads are gone; this makes
+        // the ordering structural rather than a property of which component happened to
+        // start the process.
+        GatewayConfig.init(this);
 
         // Manually initialize WorkManager with error handling
         initWorkManager();

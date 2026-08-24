@@ -9,7 +9,6 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.content.SharedPreferences;
 import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Handler;
@@ -19,6 +18,8 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
 import android.widget.Toast;
+
+import org.onetwoone.gateway.config.GatewayConfig;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -205,11 +206,10 @@ public class BatteryLimitService extends Service {
 
         // Load saved limit (fast, do before slow operations)
         try {
-            SharedPreferences prefs = getSharedPreferences("gateway_prefs", MODE_PRIVATE);
-            chargeLimit = prefs.getInt("battery_limit", 60);
+            chargeLimit = GatewayConfig.from(this).getBatteryLimit();
         } catch (Exception e) {
             Log.e(TAG, "Failed to load prefs: " + e.getMessage());
-            chargeLimit = 60;
+            chargeLimit = GatewayConfig.DEFAULT_BATTERY_LIMIT;
         }
 
         // Slow initialization (root probing) runs on the control thread, so it is ordered ahead of
@@ -459,11 +459,9 @@ public class BatteryLimitService extends Service {
 
         // Update limit if provided
         if (intent != null && intent.hasExtra("limit")) {
-            chargeLimit = intent.getIntExtra("limit", 60);
+            chargeLimit = intent.getIntExtra("limit", GatewayConfig.DEFAULT_BATTERY_LIMIT);
             try {
-                getSharedPreferences("gateway_prefs", MODE_PRIVATE).edit()
-                    .putInt("battery_limit", chargeLimit)
-                    .apply();
+                GatewayConfig.from(this).setBatteryLimit(chargeLimit);
             } catch (Exception e) {
                 Log.e(TAG, "Failed to save limit: " + e.getMessage());
             }

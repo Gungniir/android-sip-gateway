@@ -3,9 +3,10 @@ package org.onetwoone.gateway;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
-import android.content.SharedPreferences;
 import android.os.Build;
 import android.util.Log;
+
+import org.onetwoone.gateway.config.GatewayConfig;
 
 /**
  * API для управления шлюзом из других приложений через Broadcast Intents
@@ -114,8 +115,7 @@ public class GatewayControlReceiver extends BroadcastReceiver {
         }
 
         // Start BatteryLimitService with saved limit
-        SharedPreferences prefs = context.getSharedPreferences("gateway_prefs", Context.MODE_PRIVATE);
-        int batteryLimit = prefs.getInt("battery_limit", 60);
+        int batteryLimit = GatewayConfig.from(context).getBatteryLimit();
         if (batteryLimit < 100) {
             Log.i(TAG, "Starting battery limit service (limit: " + batteryLimit + "%)");
             Intent batteryIntent = new Intent(context, BatteryLimitService.class);
@@ -173,103 +173,100 @@ public class GatewayControlReceiver extends BroadcastReceiver {
 
         boolean changed = false;
 
-        // Сохраняем SIP конфигурацию в SharedPreferences
-        SharedPreferences prefs = context.getSharedPreferences("gateway_prefs", Context.MODE_PRIVATE);
-        SharedPreferences.Editor editor = prefs.edit();
+        // One batch across all three preference files, applied once at the end - and only if
+        // something was actually set. The mute preset used to be written and applied on its
+        // own, ahead of and regardless of the `changed` guard the other two editors obeyed
+        // (AUDIT H4).
+        GatewayConfig.Editor edit = GatewayConfig.from(context).edit();
 
         if (intent.hasExtra("sip_server")) {
             String server = intent.getStringExtra("sip_server");
-            editor.putString("sip_server", server);
+            edit.setSipServer(server);
             Log.i(TAG, "Set sip_server: " + server);
             changed = true;
         }
 
         if (intent.hasExtra("sip_port")) {
-            int port = intent.getIntExtra("sip_port", 5060);
-            editor.putInt("sip_port", port);
+            int port = intent.getIntExtra("sip_port", GatewayConfig.DEFAULT_SIP_PORT);
+            edit.setSipPort(port);
             Log.i(TAG, "Set sip_port: " + port);
             changed = true;
         }
 
         if (intent.hasExtra("sip_user")) {
             String user = intent.getStringExtra("sip_user");
-            editor.putString("sip_user", user);
+            edit.setSipUser(user);
             Log.i(TAG, "Set sip_user: " + user);
             changed = true;
         }
 
         if (intent.hasExtra("sip_password")) {
             String password = intent.getStringExtra("sip_password");
-            editor.putString("sip_password", password);
+            edit.setSipPassword(password);
             Log.i(TAG, "Set sip_password: ***");
             changed = true;
         }
 
         if (intent.hasExtra("use_tls")) {
             boolean useTls = intent.getBooleanExtra("use_tls", false);
-            editor.putBoolean("use_tls", useTls);
+            edit.setUseTls(useTls);
             Log.i(TAG, "Set use_tls: " + useTls);
             changed = true;
         }
 
         if (intent.hasExtra("sip_realm")) {
             String realm = intent.getStringExtra("sip_realm");
-            editor.putString("sip_realm", realm);
+            edit.setSipRealm(realm);
             Log.i(TAG, "Set sip_realm: " + (realm.isEmpty() ? "*" : realm));
             changed = true;
         }
 
         if (intent.hasExtra("sim1_destination")) {
             String dest = intent.getStringExtra("sim1_destination");
-            editor.putString("sim1_destination", dest);
+            edit.setSim1Destination(dest);
             Log.i(TAG, "Set sim1_destination: " + dest);
             changed = true;
         }
 
         if (intent.hasExtra("sim2_destination")) {
             String dest = intent.getStringExtra("sim2_destination");
-            editor.putString("sim2_destination", dest);
+            edit.setSim2Destination(dest);
             Log.i(TAG, "Set sim2_destination: " + dest);
             changed = true;
         }
 
         if (intent.hasExtra("incoming_mode")) {
             int mode = intent.getIntExtra("incoming_mode", GatewayInCallService.MODE_SIP_FIRST);
-            editor.putInt("incoming_call_mode", mode);
+            edit.setIncomingCallMode(mode);
             Log.i(TAG, "Set incoming_mode: " + mode);
             changed = true;
         }
 
         // Audio settings (stored in gsm_audio_config)
-        SharedPreferences audioPrefs = context.getSharedPreferences("gsm_audio_config", Context.MODE_PRIVATE);
-        SharedPreferences.Editor audioEditor = audioPrefs.edit();
-
         if (intent.hasExtra("audio_card")) {
             int card = intent.getIntExtra("audio_card", 0);
-            audioEditor.putInt("card", card);
+            edit.setAudioCard(card);
             Log.i(TAG, "Set audio_card: " + card);
             changed = true;
         }
 
         if (intent.hasExtra("audio_route")) {
             String route = intent.getStringExtra("audio_route");
-            audioEditor.putString("multimedia_route", route);
+            edit.setMultimediaRoute(route);
             Log.i(TAG, "Set audio_route: " + route);
             changed = true;
         }
 
-        // Device mute preset
+        // Device mute preset (stored in device_mute_prefs)
         if (intent.hasExtra("mute_preset")) {
             String preset = intent.getStringExtra("mute_preset");
-            SharedPreferences mutePrefs = context.getSharedPreferences("device_mute_prefs", Context.MODE_PRIVATE);
-            mutePrefs.edit().putString("mute_preset", preset).apply();
+            edit.setMutePreset(preset);
             Log.i(TAG, "Set mute_preset: " + preset);
             changed = true;
         }
 
         if (changed) {
-            editor.apply();
-            audioEditor.apply();
+            edit.apply();
             Log.i(TAG, "Configuration saved");
         }
 
@@ -285,23 +282,27 @@ public class GatewayControlReceiver extends BroadcastReceiver {
     }
 
     private void showConfig(Context context) {
-        SharedPreferences prefs = context.getSharedPreferences("gateway_prefs", Context.MODE_PRIVATE);
-        SharedPreferences audioPrefs = context.getSharedPreferences("gsm_audio_config", Context.MODE_PRIVATE);
-        SharedPreferences mutePrefs = context.getSharedPreferences("device_mute_prefs", Context.MODE_PRIVATE);
+        GatewayConfig config = GatewayConfig.from(context);
 
         Log.i(TAG, "=== Current Configuration ===");
-        Log.i(TAG, "sip_server: " + prefs.getString("sip_server", "(not set)"));
-        Log.i(TAG, "sip_port: " + prefs.getInt("sip_port", 5060));
-        Log.i(TAG, "sip_user: " + prefs.getString("sip_user", "(not set)"));
-        Log.i(TAG, "sip_password: " + (prefs.contains("sip_password") ? "****" : "(not set)"));
-        Log.i(TAG, "use_tls: " + prefs.getBoolean("use_tls", false));
-        String realm = prefs.getString("sip_realm", "");
-        Log.i(TAG, "sip_realm: " + (realm.isEmpty() ? "* (any)" : realm));
-        Log.i(TAG, "sim1_destination: " + prefs.getString("sim1_destination", "(not set)"));
-        Log.i(TAG, "sim2_destination: " + prefs.getString("sim2_destination", "(not set)"));
-        Log.i(TAG, "audio_card: " + audioPrefs.getInt("card", 0));
-        Log.i(TAG, "audio_route: " + audioPrefs.getString("multimedia_route", "MultiMedia1"));
-        Log.i(TAG, "mute_preset: " + mutePrefs.getString("mute_preset", "redmi_note_7"));
+        Log.i(TAG, "sip_server: " + orNotSet(config.getSipServer()));
+        Log.i(TAG, "sip_port: " + config.getSipPort());
+        Log.i(TAG, "sip_user: " + orNotSet(config.getSipUser()));
+        Log.i(TAG, "sip_password: " + (config.hasSipPassword() ? "****" : "(not set)"));
+        Log.i(TAG, "use_tls: " + config.isUseTls());
+        String realm = config.getSipRealm();
+        Log.i(TAG, "sip_realm: " + (realm.isEmpty() || "*".equals(realm) ? "* (any)" : realm));
+        Log.i(TAG, "sim1_destination: " + orNotSet(config.getSim1Destination()));
+        Log.i(TAG, "sim2_destination: " + orNotSet(config.getSim2Destination()));
+        Log.i(TAG, "audio_card: " + config.getAudioCard());
+        Log.i(TAG, "audio_route: " + config.getMultimediaRoute());
+        Log.i(TAG, "mute_preset: " + config.getMutePreset());
+        Log.i(TAG, "mute_controls: " + orNotSet(String.join(",", config.getAllMuteControls())));
         Log.i(TAG, "=============================");
+    }
+
+    /** An unset string setting reads back as empty; say so rather than logging nothing. */
+    private static String orNotSet(String value) {
+        return value == null || value.isEmpty() ? "(not set)" : value;
     }
 }

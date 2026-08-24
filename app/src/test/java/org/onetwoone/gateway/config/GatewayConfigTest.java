@@ -150,6 +150,83 @@ public class GatewayConfigTest {
         assertEquals("Default multimedia route should be MultiMedia1", "MultiMedia1", config.getMultimediaRoute());
     }
 
+    // ========== Batched writes (AUDIT H4) ==========
+
+    /**
+     * The property a reader cares about: nothing a batch writes is visible until
+     * {@link GatewayConfig.Editor#apply()}, so it can never observe half of a config save.
+     *
+     * <p>{@code WebConfigServer.postConfig} used to call {@code apply()} up to five times
+     * across three editors while the SIP service and the mute thread were free to read
+     * between any two of them.
+     */
+    @Test
+    public void editorPublishesNothingBeforeApply() {
+        config.updateSipConfig("old.example.com", 5060, "olduser", "p", "*", false);
+        config.setAudioCard(0);
+        config.setMutePreset("redmi_note_7");
+
+        GatewayConfig.Editor edit = config.edit()
+                .setSipServer("new.example.com")
+                .setSipUser("newuser")
+                .setAudioCard(3)
+                .setMutePreset("custom");
+
+        assertEquals("SIP server changed before apply()", "old.example.com", config.getSipServer());
+        assertEquals("SIP user changed before apply()", "olduser", config.getSipUser());
+        assertEquals("audio card changed before apply()", 0, config.getAudioCard());
+        assertEquals("mute preset changed before apply()", "redmi_note_7", config.getMutePreset());
+
+        edit.apply();
+
+        assertEquals("new.example.com", config.getSipServer());
+        assertEquals("newuser", config.getSipUser());
+        assertEquals(3, config.getAudioCard());
+        assertEquals("custom", config.getMutePreset());
+    }
+
+    /** One batch reaches all three preference files. */
+    @Test
+    public void editorSpansAllThreePreferenceFiles() {
+        config.edit()
+                .setSipServer("pbx.example.com")   // gateway_prefs
+                .setMultimediaRoute("MultiMedia2") // gsm_audio_config
+                .setMutePreset("generic")          // device_mute_prefs
+                .apply();
+
+        assertEquals("pbx.example.com", config.getSipServer());
+        assertEquals("MultiMedia2", config.getMultimediaRoute());
+        assertEquals("generic", config.getMutePreset());
+    }
+
+    /** A batch nobody wrote to is a no-op, not a write of defaults over stored values. */
+    @Test
+    public void emptyEditorWritesNothing() {
+        config.setSipServer("pbx.example.com");
+        config.edit().apply();
+        assertEquals("pbx.example.com", config.getSipServer());
+    }
+
+    /**
+     * The defaults the web interface renders now come from here. It used to hardcode its
+     * own — 192.168.5.95 / gateway / gateway123 / 101, and an empty realm where this class
+     * uses "*" — so an unconfigured gateway showed values the app would never have used.
+     */
+    @Test
+    public void defaultsAreDefinedOnlyHere() {
+        assertEquals("", config.getSipServer());
+        assertEquals("", config.getSipUser());
+        assertEquals("", config.getSipPassword());
+        assertEquals("*", config.getSipRealm());
+        assertEquals("", config.getSim1Destination());
+        assertEquals("", config.getSim2Destination());
+        assertEquals("auto", config.getAudioProfile());
+        assertEquals("redmi_note_7", config.getMutePreset());
+        assertEquals(0.0f, config.getTxGain(), 0.0001f);
+        assertEquals(0.0f, config.getRxGain(), 0.0001f);
+        assertFalse("no password stored on a fresh install", config.hasSipPassword());
+    }
+
     @Test
     public void testConstants() {
         // Verify constants are sensible
