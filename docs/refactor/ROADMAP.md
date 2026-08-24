@@ -134,6 +134,30 @@ assertion armed.
 
 ---
 
+### Phase 4 — UI: from debug harness to appliance console
+
+Presentation only. Shares no files with Phases 1–3, so it can run in parallel or after.
+Full plan and constraints: [PHASE-4-UI-PLAN.md](PHASE-4-UI-PLAN.md).
+
+| Issue | Fixes |
+|---|---|
+| GW-40 | Design system foundation — Material Components, palette, `values-night`, typography, extract 43 hardcoded strings |
+| GW-41 | Status-first main screen; decompose `MainActivity` (580 lines) and `MainViewModel` (616 lines) |
+| GW-42 | First-run commissioning wizard: root → permissions → dialer role → SIP account → verification call |
+| GW-43 | Web interface redesign — **coordinate with GW-30**, it is still unauthenticated |
+| GW-44 | Adaptive icon, density buckets, notification icon, app label |
+
+**The theme is not merely unstyled — it is empty.** `Theme.AppCompat.Light.DarkActionBar`
+with no body, a `colors.xml` holding only launcher-icon colours, one 565-line layout, and
+no Material Components dependency at all. See the plan's §1 table.
+
+**Hard constraint carried from §4.1:** `targetSdkVersion` stays 27. `compileSdkVersion` is
+36, so Material Components compiles and AppCompat handles dark mode regardless — no UI
+feature justifies raising it. Material 3 *dynamic colour* needs API 31 at runtime and is
+therefore out of scope.
+
+---
+
 ## 3. Sequencing and parallelism
 
 ```
