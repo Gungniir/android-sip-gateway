@@ -84,6 +84,47 @@ public class GsmAudioNative {
      */
     public static native int writeFrame(byte[] buffer, int length);
 
+    // ============ pjsua2 ByteVector bulk access (AUDIT H2) ============
+    //
+    // These three move a whole audio frame between a byte[] and a pjsua2 ByteVector with
+    // one memcpy instead of ~320 SWIG per-element calls and ~160 Short allocations. They
+    // are the reason GsmAudioPort's RT callbacks no longer loop.
+    //
+    // The `handle` is a raw C++ address obtained from
+    // org.pjsip.pjsua2.PjByteVectorAccess — read that class and the matching block in
+    // gsm_audio_jni.c before touching any of this. It is an ABI dependency on libc++'s
+    // std::vector layout, deliberately taken, verified against the vendored
+    // libpjsua2.so, and re-checked at runtime by GsmAudioPort's constructor.
+    //
+    // Passing a handle that is not a live pj::ByteVector is undefined behaviour. Never
+    // cache one across callbacks: pjmedia's MediaFrame is stack-allocated per frame.
+
+    /**
+     * Elements currently held by the vector at {@code handle}, or -1 if it does not look
+     * like a live {@code std::vector<unsigned char>}.
+     */
+    static native int pjBufSize(long handle);
+
+    /**
+     * Bulk-copy {@code length} bytes out of the vector at {@code handle} into {@code dst}.
+     *
+     * @return {@code length} on success, -1 if the vector is shorter than {@code length},
+     *         the array is too small, or the handle is not usable
+     */
+    static native int pjBufRead(long handle, byte[] dst, int length);
+
+    /**
+     * Bulk-copy {@code length} bytes from {@code src} into the vector at {@code handle},
+     * in place.
+     *
+     * <p>The vector must already be exactly {@code length} elements long: this fills
+     * existing storage and never grows it, which is what keeps the vector's control block
+     * (and therefore its allocator) out of native hands.
+     *
+     * @return {@code length} on success, -1 on any size mismatch or unusable handle
+     */
+    static native int pjBufWrite(long handle, byte[] src, int length);
+
     /**
      * Set mixer control value.
      *

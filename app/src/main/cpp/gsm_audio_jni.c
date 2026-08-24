@@ -30,6 +30,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <pthread.h>
 #include <errno.h>
 #include <time.h>
@@ -582,6 +584,128 @@ Java_org_onetwoone_gateway_GsmAudioNative_writeFrame(
     (*env)->ReleaseByteArrayElements(env, buffer, buf, JNI_ABORT);
 
     return (ret != 0) ? -1 : (jint)len;
+}
+
+/* ---- pjsua2 ByteVector bulk access (AUDIT H2) -----------------------------
+ *
+ * *** ABI DEPENDENCY - READ THIS BEFORE REBUILDING PJSIP ***
+ *
+ * pjsua2 hands audio to the app as pj::ByteVector, which types.hpp defines as
+ * std::vector<unsigned char>. Moving a 320-byte frame through the SWIG per-element
+ * accessors costs ~320 JNI transitions and ~160 java.lang.Short allocations, per frame,
+ * per direction, on the pjmedia RT thread. These three functions do the same job as one
+ * memcpy each.
+ *
+ * That requires reaching into the vector, so this code assumes:
+ *
+ *   struct { unsigned char *__begin_; unsigned char *__end_; unsigned char *__end_cap_; }
+ *
+ * i.e. libc++'s std::vector layout, data pointer first, element size 1.
+ *
+ * Not assumed - VERIFIED against the vendored libpjsua2.so:
+ *   Java_org_pjsip_pjsua2_pjsua2JNI_ByteVector_1doSize
+ *       ldp x8, x9, [x2]        ; load the words at +0 and +8
+ *       sub x8, x9, x8          ; size = __end_ - __begin_
+ * and the library links libc++_shared.so, the same STL this build uses
+ * (ANDROID_STL=c++_shared in app/build.gradle).
+ *
+ * Constraints that keep a layout mismatch from becoming heap corruption:
+ *   - nothing here ever WRITES a vector's control block or resizes it; sizing stays with
+ *     pjsua2 (ByteVector(count,value) / MediaFrame::buf assignment), so no assumption is
+ *     made about which allocator owns the storage;
+ *   - every entry point re-derives the size from the pointers and refuses implausible
+ *     values;
+ *   - GsmAudioPort's constructor cross-checks BOTH directions against pjsua2's own
+ *     generated per-element accessors and falls back to the old loops on any mismatch.
+ *
+ * If you rebuild PJSIP, run the app once and check logcat for
+ * "bulk frame copy unavailable".
+ */
+
+/* Largest vector we will believe in. A 20 ms audio frame is 320-1920 bytes; anything in
+ * the megabytes means we are not looking at a vector at all. */
+#define PJ_VECTOR_SANITY_MAX (1 << 20)
+
+struct pj_byte_vector {
+    unsigned char *begin;
+    unsigned char *end;
+    unsigned char *end_cap;
+};
+
+/* Elements currently in the vector, or -1 if it does not look like one. */
+static long pj_vector_size(jlong handle) {
+    if (handle == 0) {
+        return -1;
+    }
+    const struct pj_byte_vector *v = (const struct pj_byte_vector *)(intptr_t)handle;
+    if (v->begin == NULL && v->end == NULL) {
+        return 0;                        /* legitimately empty */
+    }
+    if (v->begin == NULL || v->end == NULL || v->end < v->begin) {
+        return -1;
+    }
+    ptrdiff_t n = v->end - v->begin;
+    if (n > PJ_VECTOR_SANITY_MAX) {
+        return -1;
+    }
+    return (long)n;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_onetwoone_gateway_GsmAudioNative_pjBufSize(
+        JNIEnv *env, jclass clazz, jlong handle) {
+    (void)env;
+    (void)clazz;
+    return (jint)pj_vector_size(handle);
+}
+
+/* Vector -> Java array. Reads only; the vector is pjmedia's and must not be disturbed. */
+JNIEXPORT jint JNICALL
+Java_org_onetwoone_gateway_GsmAudioNative_pjBufRead(
+        JNIEnv *env, jclass clazz, jlong handle, jbyteArray dst, jint length) {
+    (void)clazz;
+
+    if (!dst || length < 0) {
+        return -1;
+    }
+    long have = pj_vector_size(handle);
+    if (have < (long)length) {
+        return -1;
+    }
+    if ((*env)->GetArrayLength(env, dst) < length) {
+        return -1;
+    }
+
+    const struct pj_byte_vector *v = (const struct pj_byte_vector *)(intptr_t)handle;
+    (*env)->SetByteArrayRegion(env, dst, 0, length, (const jbyte *)v->begin);
+    return length;
+}
+
+/*
+ * Java array -> vector, in place.
+ *
+ * The vector must ALREADY be exactly `length` elements long: this fills existing storage
+ * and never grows it, which is what keeps the control block untouched. The caller owns
+ * that vector and pre-sized it once at open time.
+ */
+JNIEXPORT jint JNICALL
+Java_org_onetwoone_gateway_GsmAudioNative_pjBufWrite(
+        JNIEnv *env, jclass clazz, jlong handle, jbyteArray src, jint length) {
+    (void)clazz;
+
+    if (!src || length < 0) {
+        return -1;
+    }
+    if (pj_vector_size(handle) != (long)length) {
+        return -1;                       /* wrong size => not ours, or resized behind us */
+    }
+    if ((*env)->GetArrayLength(env, src) < length) {
+        return -1;
+    }
+
+    struct pj_byte_vector *v = (struct pj_byte_vector *)(intptr_t)handle;
+    (*env)->GetByteArrayRegion(env, src, 0, length, (jbyte *)v->begin);
+    return length;
 }
 
 /*
