@@ -5,6 +5,7 @@ import android.os.Looper;
 import android.util.Log;
 
 import org.onetwoone.gateway.config.GatewayConfig;
+import org.onetwoone.gateway.core.LifecycleCancellation;
 import org.onetwoone.gateway.core.ControlThread;
 import org.onetwoone.gateway.core.GatewayControlThread;
 import org.onetwoone.gateway.diag.PjsipLogWriter;
@@ -214,6 +215,25 @@ public class SipEndpointManager {
      */
     @ControlThread
     public void createEndpoint() throws Exception {
+        createEndpoint(LifecycleCancellation.NEVER);
+    }
+
+    /**
+     * As {@link #createEndpoint()}, but abandons the main-thread hop early if {@code token} is
+     * cancelled (GW-26).
+     *
+     * <p>This is the plumbing that makes non-blocking service destroy possible. Without it the
+     * only bound on the hop is the 30 s latch, and a control thread parked in that latch when
+     * {@code onDestroy} gives up on its join goes on to create a SIP account for a service that
+     * no longer exists — see {@link LifecycleCancellation}.
+     *
+     * @param token issued by the caller's {@link LifecycleCancellation}; use
+     *              {@link LifecycleCancellation#NEVER} when there is no lifecycle to cancel
+     *              against
+     * @throws LifecycleCancellation.CancelledException if the token is cancelled while waiting
+     */
+    @ControlThread
+    public void createEndpoint(LifecycleCancellation.Token token) throws Exception {
         assertOnControlThread("createEndpoint");
         boolean useTls = config.isUseTls();
 
@@ -262,7 +282,7 @@ public class SipEndpointManager {
         // that's auto-registered with PJSIP.
         if (Looper.myLooper() != Looper.getMainLooper()) {
             Log.d(TAG, "Not on main thread, delegating endpoint creation");
-            createEndpointOnMainThread(useTls);
+            createEndpointOnMainThread(useTls, token);
             return;
         }
 
@@ -297,31 +317,84 @@ public class SipEndpointManager {
      * itself: it exists because pjsua auto-registers only the thread that loaded the native
      * library, and constructing the {@code Endpoint} anywhere else fails a
      * {@code pj_thread_this} assertion, i.e. aborts.
+     *
+     * <h3>Cancellation (GW-26)</h3>
+     * The 30 s bound is a backstop, not a shutdown mechanism: a control thread parked here when
+     * the service is destroyed must give up <em>at destroy</em>, not 30 s later, because by then
+     * the service it is initialising is gone and the account it would go on to create has
+     * nothing left to tear it down. So the wait polls {@code token} rather than blocking on the
+     * latch in one shot — see {@link #awaitCancellably}.
      */
-    private void createEndpointOnMainThread(boolean useTls) throws Exception {
+    private void createEndpointOnMainThread(boolean useTls, LifecycleCancellation.Token token)
+            throws Exception {
         CountDownLatch latch = new CountDownLatch(1);
-        AtomicReference<Exception> errorRef = new AtomicReference<>();
+        AtomicReference<Throwable> errorRef = new AtomicReference<>();
 
         Handler mainHandler = new Handler(Looper.getMainLooper());
         mainHandler.post(() -> {
+            // Throwable, not Exception: with libpjsua2 missing (the static loader in
+            // PjsipSipService catches UnsatisfiedLinkError and lets the service run without it)
+            // every pjsua2 call in createEndpointInternal throws an Error. Catching only
+            // Exception let that Error escape onto the main looper and kill the process, while
+            // the finally below still counted the latch down - so the control thread carried on
+            // as if the endpoint had been created.
             try {
                 createEndpointInternal(useTls);
-            } catch (Exception e) {
-                errorRef.set(e);
+            } catch (Throwable t) {
+                errorRef.set(t);
             } finally {
                 latch.countDown();
             }
         });
 
-        // Wait for completion (max 30 seconds)
-        if (!latch.await(30, TimeUnit.SECONDS)) {
-            throw new Exception("Timeout waiting for endpoint creation");
-        }
+        awaitCancellably(latch, token, ENDPOINT_CREATE_TIMEOUT_MS, "endpoint creation");
 
-        // Re-throw any exception from main thread
-        Exception error = errorRef.get();
+        // Re-throw whatever main hit. An Error is wrapped rather than rethrown: the caller
+        // (PjsipSipService.initializeSip) handles a failed init by scheduling a reconnect, and
+        // an Error thrown out of a control-thread task would instead kill the control thread.
+        Throwable error = errorRef.get();
+        if (error instanceof Exception) {
+            throw (Exception) error;
+        }
         if (error != null) {
-            throw error;
+            throw new Exception("Endpoint creation failed: " + error, error);
+        }
+    }
+
+    /** How long {@link #createEndpointOnMainThread} waits for main before giving up. */
+    static final long ENDPOINT_CREATE_TIMEOUT_MS = 30_000L;
+
+    /**
+     * How often the wait wakes to re-check cancellation. Small enough that destroy is not
+     * perceptibly delayed, large enough that a 30 s wait costs at most a few hundred wake-ups.
+     */
+    static final long CANCEL_POLL_MS = 50L;
+
+    /**
+     * Wait for {@code latch}, giving up early if {@code token} is cancelled.
+     *
+     * <p>Package-visible and static so the cancellation semantics can be unit-tested without a
+     * pjsua2 endpoint: this is the whole of GW-26's "destroy cancels in-flight init rather than
+     * waiting for it" on the SIP side.
+     *
+     * @throws LifecycleCancellation.CancelledException if cancelled before the latch fires
+     * @throws Exception if {@code timeoutMs} elapses first
+     */
+    static void awaitCancellably(CountDownLatch latch, LifecycleCancellation.Token token,
+                                 long timeoutMs, String what) throws Exception {
+        final long deadlineNanos = System.nanoTime() + timeoutMs * 1_000_000L;
+        while (true) {
+            // Checked before the first wait as well as between waits: destroy may already have
+            // happened while this task sat in the control queue.
+            token.throwIfCancelled(what);
+
+            long remainingMs = (deadlineNanos - System.nanoTime()) / 1_000_000L;
+            if (remainingMs <= 0) {
+                throw new Exception("Timeout waiting for " + what);
+            }
+            if (latch.await(Math.min(CANCEL_POLL_MS, remainingMs), TimeUnit.MILLISECONDS)) {
+                return;
+            }
         }
     }
 

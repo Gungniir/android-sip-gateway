@@ -547,9 +547,21 @@ handler (`:97`) and does a `ContentResolver.query` inline, then calls back into
 `PjsipSipService.handleIncomingGsmSms → sendSipMessage` (`:543`) which performs
 `buddy.sendInstantMessage` — network I/O — still on main.
 
-#### G2. `shutdownSip()` blocks main
+#### G2. `shutdownSip()` blocks main — ✅ FIXED (GW-26)
 `PjsipSipService.onDestroy:196` → `shutdownSip:257` → `hangupAllCalls()` +
 `deleteAccount()` (un-REGISTER, network) on the main thread.
+
+GW-12 had already moved `stopBridge`/`stopAudioStreams`/`teardownMixer` onto the control
+thread, leaving `deleteAccount()` + `endpointManager.shutdown()` as the residue. GW-26 moves
+those too: `onDestroy` now posts one `teardownOnControlThread()` task carrying the timer
+disarm, the bridge unwire **and** `shutdownSip()`, and waits only on the bounded
+`quitSafely` join. `shutdownSip()` asserts the control thread. Nothing on main touches pjsua2
+at destroy any more, which is also what closes **H11**.
+
+The join bound went 1500 → 3000 ms while main's worst case went *down*, from "1.5 s plus
+however long the PBX takes to answer an un-REGISTER" to a hard
+`CONTROL_QUIT_TIMEOUT_MS + MUTE_RESTORE_TIMEOUT_MS` = 5 s. `onDestroy` logs its own
+main-thread duration.
 
 #### G3. `unmuteAll()` on main — see B1.
 
@@ -693,11 +705,29 @@ No `Call.delete()` (deliberate, `CallManager.java:258-260`), no `delete()` on th
 Each call leaks a SWIG director plus several C++ shadow objects. Over days of unattended
 operation this is unbounded.
 
-#### H8. `onDestroy` has no null-guards for a partially constructed service
+#### H8. `onDestroy` has no null-guards for a partially constructed service — ✅ FIXED (GW-26)
 `PjsipSipService.onDestroy:177` calls `watchdog.stop()`, `reconnection.setEnabled(false)`,
 `audioBridge.stopBridge()`, `powerController.release()` unconditionally. If `onCreate`
 threw after `instance = this` (e.g. `GatewayConfig.init` failure at `:107`), every one of
 those is an NPE inside `onDestroy`.
+
+**The stated premise is weak; the conclusion was right for a different reason.** An exception
+out of `Service.onCreate` crashes the process before `onDestroy` runs, so "onCreate threw
+partway" is barely reachable. Two paths that *are*:
+
+1. **onCreate ran, `onStartCommand` never did** — a bind-only service. `smsHandler` and
+   `webServer` are null.
+2. **`libpjsua2` is missing.** The static initialiser catches `UnsatisfiedLinkError` and lets
+   the service run without it. Every pjsua2 call then throws an `Error`, and
+   `SipAccountManager.deleteAccount()` catches only `Exception` — so that `Error` escaped
+   `shutdownSip()` on main and **skipped `powerController.release()`, the telephony unlisten,
+   the mute restore and `stopForeground`**, leaking `Gateway::CpuWakeLock`. A null check would
+   not have helped; catching `Exception` would not either.
+
+GW-26 wraps every teardown step in its own `teardownStep(name, step)`, which catches
+**`Throwable`**, and null-guards each manager. `powerController.release()` now runs on every
+path. Covered by `PjsipSipServiceLifecycleTest`, which fault-injects an `UnsatisfiedLinkError`
+from the step immediately before it.
 
 #### H9. Watchdog only detects one orphan direction
 `checkOrphanedCalls` (`PjsipSipService.java:630`) terminates a SIP call with no GSM leg.
@@ -1040,9 +1070,58 @@ handed. Candidate for deletion in **GW-12**.
 #### H7c. `SipEndpointManager.destroyEndpoint()` is unreachable
 No caller anywhere in the tree. Either wire it up or delete it in **GW-15**.
 
-#### H8c. Service destroy can collide with an in-flight SIP init — P2, bounded
+#### H8c. Service destroy can collide with an in-flight SIP init — ~~P2, bounded~~ **P1** — ✅ FIXED (GW-26)
 Found by the GW-10 agent while installing the control thread; a consequence of the fold, not
 of a mistake in it.
+
+> **AMENDED by GW-26. Step 4 below is wrong, and the severity with it.** The original text
+> says the abandoned control thread "waits out the full 30 s … and schedules a reconnect for a
+> service that no longer exists". Verified against the code, neither half holds:
+>
+> - **It does not burn 30 s.** The runnable the latch waits for is queued behind `onDestroy`
+>   on main, so it runs *the instant `onDestroy` returns* — the latch resolves in
+>   milliseconds, not seconds.
+> - **The leaked reconnect timer is a non-event.** `scheduleReconnect()` posts to the control
+>   looper, which `quitSafely` has already quit; the post fails harmlessly and Android logs
+>   "sending message to a Handler on a dead thread". Nothing is armed.
+> - **The real damage is a leaked SIP account,** and the original never mentions it.
+>   `initializeSip` had **no cancellation check anywhere**, so once the latch resolved the
+>   abandoned thread walked straight on through `audioBridge.initialize()` to
+>   `accountManager.createAccount(this)` — `this` being the destroyed service — registering a
+>   fresh SIP account against the `static` Endpoint that main had only run `hangupAllCalls()`
+>   on. Its callbacks post to the quit looper and are dropped, so **nothing ever tears it
+>   down**: the PBX sees a registered gateway that answers nothing, until the process dies.
+>
+> That is a live registration outliving its service, not a wasted thread — P1, not P2.
+
+**The fix (GW-26): cancellation, not a longer join.** `quitSafely` cannot be the mechanism —
+it still drains messages that are already due, so anything `onDestroy` posts *will* run on the
+abandoned thread. "Post it and quit" is not cancellation.
+
+- `core/LifecycleCancellation` — a unit of work takes a `Token` at entry and checks it before
+  each blocking step; the `Token` indirection hands `SipEndpointManager` the right to *ask*
+  without the right to cancel.
+- **Terminal, not the "cancellation generation" PHASE-2-PLAN §2.7 asks for.** A generation
+  would let a later unit of work be live again after a `cancel()`, and that is precisely the
+  hole here: the doomed init is often still *queued*, so it calls `begin()` only when the
+  control thread dequeues it — **after** destroy — and would snapshot the new generation, find
+  itself live, and create the very account this exists to prevent. The object belongs to one
+  service instance, that instance is destroyed once, and after `cancel()` nothing it hands out
+  is ever live again.
+- `PjsipSipService.onDestroy` calls `cancel()` **first**, before anything is torn down.
+- `initializeSip` checks the token before each blocking step and returns silently on
+  cancellation — no reconnect, no notification, no status publish.
+- `SipEndpointManager.createEndpoint(Token)` threads it into `createEndpointOnMainThread`,
+  whose 30 s latch is now polled at `CANCEL_POLL_MS` (50 ms) instead of awaited in one shot,
+  so the parked thread gives up **at destroy** rather than when main happens to drain.
+
+Cancellation is advisory, and the residue is closed by ordering rather than by the check: if
+teardown lands between the last check and `createAccount`, the account is created and then
+deleted by `teardownOnControlThread`, which is queued behind the init on the same thread.
+
+Covered by `PjsipSipServiceLifecycleTest` (the real control thread genuinely parked in the
+hop, destroyed, then asserted dead and cancelled rather than abandoned) and by
+`SipEndpointManagerTest`'s `awaitCancellably` cases.
 
 `PjsipSipService.onDestroy` calls `control.quitSafely(1500)` — the **only** place main waits
 on the control thread anywhere in the app, and deliberately bounded (plan §2.4). The
@@ -1109,7 +1188,7 @@ a brick. It disappears when **GW-14** removes the sleeps from the reload pipelin
 which `CLAUDE.md` explicitly forbids ("it breaks the `Incall_Music` playback path").
 Currently unreferenced — a trap for the next contributor.
 
-#### H11. `onDestroy` can still overlap main with an abandoned control thread — P2
+#### H11. `onDestroy` can still overlap main with an abandoned control thread — P2 — ✅ FIXED (GW-26)
 Found while landing GW-12. `PjsipSipService.onDestroy` queues the audio-bridge teardown,
 then calls `control.quitSafely(1500 ms)`, then runs `shutdownSip()` on main. `quitSafely`'s
 join is deliberately bounded and, when it expires, the control thread is *abandoned*
@@ -1130,6 +1209,13 @@ argument is that liveness-check and `stopTransmit` are adjacent *on one thread*,
 is the one path where that can still be violated. The clean fix is to move `shutdownSip()`
 itself onto the control thread — **AUDIT G2, owned by GW-26** — after which nothing on main
 touches pjsua2 at destroy and the bound can go away.
+
+**Fixed exactly that way.** `shutdownSip()` is now the last step of
+`teardownOnControlThread()`, immediately after `stopAudioBridge()`, on the one thread that owns
+both — so `deleteAccount()` and `unwireBridge()`'s liveness check are adjacent statements
+rather than two threads, and the abandoned-thread window has nothing left in it to race. The
+bound stays (it is still the only main-blocks-on-control wait) but what it bounds is now a
+queue drain, not a collision hazard.
 
 #### F4b. The diagnostic call still reads `getAccount()` on main — P2, residual F4
 Found while landing GW-14. F4 is closed for the two production users of the account —
@@ -1167,7 +1253,7 @@ happen on **main**; it now happens on the control thread, which is a strict impr
 (bounded by `RootHelper`'s timeout, and off the UI thread) but is worth knowing about when
 reading control-thread latency.
 
-#### F6c. `ReconnectionStrategy.onSuccess()` clears `pending` without cancelling the timer — P2
+#### F6c. `ReconnectionStrategy.onSuccess()` clears `pending` without cancelling the timer — P2 — ✅ FIXED (GW-26)
 `onSuccess()` (`:108-113`) sets `pending = false` but does not
 `handler.removeCallbacksAndMessages(null)` the way `cancel()` (`:119`) does. The already
 scheduled runnable therefore still fires and calls `attemptReconnect()`, which — endpoint,
@@ -1180,6 +1266,10 @@ subsequent `onRegState(true)` only clears the flag. Harmless today (one extra RE
 but it makes `isPending()` and the backoff state disagree with what is actually armed. Fix
 is one line in `onSuccess()`; left out of GW-14 because it is `ReconnectionStrategy`'s bug,
 not the reload's.
+
+Taken by GW-26 per PHASE-2-PLAN §6, and it stayed the promised one line:
+`handler.removeCallbacksAndMessages(null)` alongside the `pending = false`, matching what
+`cancel()` already did. Same-thread confinement means no new race.
 
 ---
 
@@ -1257,6 +1347,40 @@ Fixed by making the length explicit: `writeFrame(byte[] buffer, int length)` on 
 of the JNI boundary, with the length taken from the frame and range-checked natively. The
 selection rule is now the pure, tested `GsmAudioPort.usableFrameBytes(reportedSize,
 capacity)`. Dropping (not clamping) an oversized frame is preserved deliberately.
+
+#### H14. The reload's give-up branch stops the gateway for good — NEW, P2
+Found while landing GW-26. `PjsipSipService.doReloadConfig` step 0: if the endpoint is not
+initialised it posts `stop()` to main, with the comment *"Service will be restarted by system
+due to START_STICKY"*. **It will not be.** `START_STICKY` only restarts a service the *system*
+killed; one that ends via `stopSelf()` stays stopped. So a reload that arrives while the
+endpoint is down — which is exactly when the endpoint most needs recreating — takes the
+gateway down and leaves it down until something starts it again.
+
+Not introduced by GW-26 and not fixed by it. GW-26 only made the branch call `stop(false)` so
+it does not additionally latch the persisted user-stop flag (§5), and replaced the false
+comment with a pointer here. The real fix is to re-initialise rather than stop — the endpoint
+is `static` and survives, so `initializeSip()` on the control thread is the natural remedy —
+or, if a process restart really is wanted, to call `restartProcess()`, which is honest about
+what it does. → New issue **GW-28**.
+
+#### H15. An `Error` from endpoint creation escaped onto the main looper — NEW, P2 — ✅ FIXED (GW-26)
+Found while adding the cancellation plumbing, and reproduced immediately in the new
+`PjsipSipServiceLifecycleTest` (a JVM has no `libpjsua2`, which is the same state as a device
+whose native library failed to load — see **H8**).
+
+`SipEndpointManager.createEndpointOnMainThread`'s posted runnable caught only `Exception`
+while its `finally` counted the latch down. `createEndpointInternal` calls `new Endpoint()`,
+which throws `UnsatisfiedLinkError` / `NoClassDefFoundError` when the library is absent — an
+`Error`. Two consequences at once:
+
+1. the `Error` propagated out of a main-looper runnable, killing the process;
+2. `errorRef` stayed null and the latch still fired, so the control thread **continued as if
+   the endpoint had been created**. It only failed later, and for the wrong stated reason
+   ("Failed to register the control thread with pjlib").
+
+Fixed by catching `Throwable` there and wrapping a non-`Exception` into an `Exception` before
+rethrowing — wrapped rather than rethrown so `initializeSip`'s handler treats it as a failed
+init and schedules a reconnect, instead of an `Error` killing the control thread.
 
 ### P2 — security posture
 

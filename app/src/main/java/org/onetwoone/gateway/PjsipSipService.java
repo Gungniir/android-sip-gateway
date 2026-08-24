@@ -7,11 +7,13 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.os.Binder;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.telephony.PhoneStateListener;
 import android.telephony.TelephonyManager;
 import android.util.Log;
@@ -19,6 +21,7 @@ import android.util.Log;
 import org.onetwoone.gateway.audio.AudioBridgeManager;
 import org.onetwoone.gateway.call.CallManager;
 import org.onetwoone.gateway.config.GatewayConfig;
+import org.onetwoone.gateway.core.LifecycleCancellation;
 import org.onetwoone.gateway.core.ControlThread;
 import org.onetwoone.gateway.core.GatewayControlThread;
 import org.onetwoone.gateway.core.GatewayStatus;
@@ -85,7 +88,15 @@ public class PjsipSipService extends Service implements SipCallService {
     private ReconnectionStrategy reconnection;
     private ServiceWatchdog watchdog;
     private SmsHandler smsHandler;
-    private WebConfigServer webServer;
+
+    /**
+     * Written on main ({@link #startWebServer()} / {@link #stopWebServer()}, both reachable from
+     * the UI and from {@code GatewayControlReceiver}) and read from the control thread's config
+     * reload and from {@link #isWebServerRunning()} - hence {@code volatile} (GW-26 §6). The
+     * NanoHTTPD shutdown ordering the brief also asks for is already correct: {@code stop()} is
+     * called before the reference is dropped. {@code WebConfigServer} itself belongs to GW-24.
+     */
+    private volatile WebConfigServer webServer;
     private SipTestCallManager testCall;
 
     /**
@@ -146,8 +157,52 @@ public class PjsipSipService extends Service implements SipCallService {
      * How long {@link #onDestroy()} waits for the control thread's queue to drain. Bounded
      * on purpose - see {@link GatewayControlThread#quitSafely(long)}, which explains why this
      * is the only place main may wait on the control thread.
+     *
+     * <p>GW-26 raised this from 1500 ms while making main's total teardown cost <em>smaller</em>:
+     * the queue this now drains carries {@link #shutdownSip()} as well, which used to run inline
+     * on main afterwards with no bound at all (an un-REGISTER is network I/O). One bounded wait
+     * of 3 s replaces a 1.5 s wait plus an unbounded one, so the worst case for
+     * {@code onDestroy} goes from "however long the PBX takes to answer" to
+     * {@code CONTROL_QUIT_TIMEOUT_MS + MUTE_RESTORE_TIMEOUT_MS} = 5 s, well inside the ANR
+     * budget. It is still the only place main waits on the control thread (AUDIT G2, H11).
      */
-    private static final long CONTROL_QUIT_TIMEOUT_MS = 1500L;
+    private static final long CONTROL_QUIT_TIMEOUT_MS = 3000L;
+
+    /**
+     * Cancels in-flight SIP init at destroy. Final and initialised at construction, so it is
+     * usable even if {@code onCreate} never completed.
+     *
+     * <p>The bounded join above cannot be the whole of shutdown: when it expires the control
+     * thread is <em>abandoned</em>, and an abandoned thread parked in
+     * {@code createEndpointOnMainThread}'s latch resumes the instant {@code onDestroy} returns
+     * and creates a SIP account for this dead service. See {@link LifecycleCancellation} for
+     * the full argument, and {@link #initializeSip()} for the checks.
+     *
+     * <p>Cancellation here is terminal, and per service instance: a new service gets a new one
+     * of these. That is what stops an init still sitting in the control queue at destroy from
+     * being handed a live token when the thread finally dequeues it.
+     */
+    private final LifecycleCancellation sipInitCancellation = new LifecycleCancellation();
+
+    /**
+     * Lifecycle state that must outlive the process, kept in its own preferences file so it
+     * cannot collide with the three config files ({@code gateway_prefs}, {@code gsm_audio_config},
+     * {@code device_mute_prefs}) that GW-24 is about to reorganise. It is not configuration:
+     * nothing in the UI edits it and nothing but {@link #stop()} and {@link #onStartCommand}
+     * writes it.
+     */
+    private static final String PREFS_LIFECYCLE = "gateway_lifecycle";
+
+    /**
+     * True while the gateway is down because a human asked for it - the {@code STOP} broadcast,
+     * or the UI's stop button. Persisted because the in-memory {@link #stopRequested} is reset
+     * by {@code onCreate}, so a system restart used to silently undo an explicit stop.
+     *
+     * <p>Deliberately narrow: <b>only</b> an explicit user stop latches it. A crash, an OOM kill
+     * or a boot must still bring the gateway back, because a gateway that does not come back is
+     * worse than the bug this closes.
+     */
+    private static final String KEY_USER_STOPPED = "user_stopped";
 
     // State
     /**
@@ -162,6 +217,12 @@ public class PjsipSipService extends Service implements SipCallService {
      * meant to.
      */
     private volatile boolean isRunning = false;
+
+    /**
+     * Duplicate-{@link #stop()} guard for <em>this</em> service instance. It is not the record
+     * of a user stop - {@code onCreate} resets it, so it cannot be - that is
+     * {@link #KEY_USER_STOPPED}, which is persisted.
+     */
     private volatile boolean stopRequested = false;
     private Handler mainHandler;
 
@@ -273,11 +334,36 @@ public class PjsipSipService extends Service implements SipCallService {
         accountManager.setListener(accountListener);
     }
 
+    /**
+     * <h3>Restart semantics (GW-26 §5)</h3>
+     * The service stays {@code START_STICKY} on every ordinary path: a gateway that does not
+     * come back after a crash, an OOM kill or a reboot is worse than the bug this closes. The
+     * one suppressed case is a <b>sticky redelivery</b> ({@code intent == null}, i.e. the system
+     * restarting us of its own accord) that arrives after a human explicitly stopped the
+     * gateway - previously that quietly resurrected it, which made the documented {@code STOP}
+     * broadcast unreliable.
+     *
+     * <p>Any start carrying an intent is somebody asking for the gateway, so it clears the
+     * latch: {@code BootReceiver}, the {@code START} broadcast, the UI and
+     * {@code GatewayInCallService} all reach us that way.
+     */
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        // The check-then-set on isRunning below is what this asserts; the field's javadoc has
+        // claimed the assertion was here since GW-10, and until GW-26 only the getter had it.
+        assertMainThread("onStartCommand");
         Log.d(TAG, "Service starting");
 
+        // Unconditional and first: a startForegroundService() we answer with stopSelf() still
+        // owes the system a startForeground() within 5 s, or it kills the process.
         startForegroundNotification();
+
+        if (intent == null && isUserStopped(this)) {
+            Log.i(TAG, "Sticky restart after an explicit user stop - staying down");
+            stopSelf();
+            return START_NOT_STICKY;
+        }
+        setUserStopped(this, false);
 
         if (!isRunning) {
             isRunning = true;
@@ -307,79 +393,187 @@ public class PjsipSipService extends Service implements SipCallService {
         return START_STICKY;
     }
 
+    /**
+     * <h3>Shape of teardown (GW-26, closes AUDIT G2, H8, H8c, H11)</h3>
+     * Four rules, in this order:
+     * <ol>
+     *   <li><b>Stop new work arriving.</b> {@code isRunning}, {@code instance} and the status
+     *       snapshot go first, before anything is torn down.
+     *   <li><b>Cancel, do not wait.</b> {@link #sipInitCancellation} invalidates an in-flight
+     *       {@link #initializeSip()} immediately, including one parked in
+     *       {@code createEndpointOnMainThread}'s latch waiting for a runnable that is queued
+     *       behind <em>this method</em>. Without it, the bounded join below abandons that
+     *       thread and it goes on to register a SIP account for a service that is gone.
+     *   <li><b>One posted task owns everything the control thread owns</b>
+     *       ({@link #teardownOnControlThread()}), including {@link #shutdownSip()}, which used
+     *       to run on main afterwards. Nothing on main touches pjsua2 any more, so main's
+     *       {@code deleteAccount()} can no longer destroy a conference port while the control
+     *       thread is inside {@code unwireBridge()}'s liveness check - a pjmedia
+     *       {@code abort()}, not an exception (H11).
+     *   <li><b>Every step is individually guarded</b>, catching {@link Throwable} rather than
+     *       {@link Exception}: with {@code libpjsua2} absent - the static loader above catches
+     *       {@code UnsatisfiedLinkError} and lets the service run without it - every pjsua2 call
+     *       throws an {@code Error}, and {@code SipAccountManager.deleteAccount()} catches only
+     *       {@code Exception}. That {@code Error} used to escape {@code shutdownSip()} and skip
+     *       the wake-lock release, the telephony unlisten, the mute restore and
+     *       {@code stopForeground} (H8).
+     * </ol>
+     *
+     * <p>{@code super.onDestroy()} is called <b>last</b>, once teardown has finished.
+     *
+     * <p>The two waits main performs here are both bounded and both deliberate: the
+     * {@code quitSafely} join ({@link #CONTROL_QUIT_TIMEOUT_MS}), which is the app's only
+     * main-blocks-on-control wait, and {@code awaitRestore}
+     * ({@link #MUTE_RESTORE_TIMEOUT_MS}), which waits on {@code DeviceMuteManager}'s own
+     * executor and not on the control thread. Do not add a third.
+     *
+     * <p><b>What still runs after this returns.</b> If the join expires the control thread is
+     * abandoned, and {@code quitSafely} drains messages that are already due - so the teardown
+     * task will still run, later, on that abandoned thread. That is deliberate: whatever a
+     * doomed init managed to create is torn down by the task queued behind it, on the same
+     * thread, in order. Main does not wait for it and must not.
+     */
     @Override
     public void onDestroy() {
-        super.onDestroy();
+        final long startedAt = SystemClock.uptimeMillis();
         Log.d(TAG, "Service destroying");
 
+        // 1. Stop new work arriving. Before anything else, and before super.onDestroy().
         isRunning = false;
         instance = null;
         status = GatewayStatus.UNAVAILABLE;
 
-        // Hand the device's mic and earpiece back FIRST (AUDIT B1). Queued here rather than
-        // waited on here, so the restore runs while the teardown below does its own work.
+        // 2. Cancel in-flight SIP init. Not a request to stop soon - it makes the 30 s
+        //    endpoint-creation latch give up within one poll interval, so the teardown task
+        //    posted below reaches the head of the control queue in milliseconds instead of
+        //    long after the join has expired.
+        sipInitCancellation.cancel();
+
+        // 3. Hand the device's mic and earpiece back (AUDIT B1). Queued here rather than
+        //    waited on here, so the restore runs while the teardown below does its own work.
         DeviceMuteManager mute = null;
         long lease = muteLease.getAndSet(DeviceMuteManager.NO_LEASE);
         if (lease != DeviceMuteManager.NO_LEASE) {
             mute = DeviceMuteManager.getInstance(this);
-            mute.release(lease);
+            final DeviceMuteManager releasing = mute;
+            final long releasedLease = lease;
+            teardownStep("mute release", () -> releasing.release(releasedLease));
         }
 
-        // Stop components. Both timers now live on the control looper (GW-15), so disarming
-        // them is a post, drained by the quitSafely() below. Nothing here has to have happened
-        // before onDestroy returns: both timers are *delayed* messages on the very looper that
-        // quitSafely() is about to terminate, and quitSafely drops messages whose due time is
-        // still in the future. This post is belt to that braces - and it is what keeps
-        // `running` and `pending` honest if the service is ever destroyed without quitting the
-        // looper.
-        control.post(() -> {
-            watchdog.stop();
-            reconnection.setEnabled(false);
-            reconnection.cancel();
-        });
-
+        // 4. Silence the two things that feed work INTO the control thread from outside it,
+        //    before it is retired. Both are main-thread calls today and both stay ahead of the
+        //    quit deliberately: an SMS ContentObserver firing, or a NanoHTTPD worker calling
+        //    reloadConfig(), after the looper is gone is a post to a dead thread. It is
+        //    harmless today (the post just fails) but GW-21 moves the observer ONTO the control
+        //    looper, at which point unregistering it after the quit becomes a real race. Keep
+        //    this order.
         if (smsHandler != null) {
-            smsHandler.stop();
+            teardownStep("smsHandler.stop", smsHandler::stop);
+        }
+        teardownStep("stopWebServer", this::stopWebServer);
+
+        // 5. Everything the control thread owns, as one task on that thread, behind whatever it
+        //    is already running. Posted rather than called: quitSafely() drains what is queued.
+        if (control != null) {
+            control.post(this::teardownOnControlThread);
+
+            // The one main-blocks-on-control wait in the app, bounded on purpose. See
+            // GatewayControlThread.quitSafely(long) and this method's javadoc.
+            control.quitSafely(CONTROL_QUIT_TIMEOUT_MS);
+        } else {
+            // onCreate never got as far as constructing it. Nothing was ever queued.
+            Log.w(TAG, "No control thread - destroying a service that never finished onCreate");
         }
 
-        stopWebServer();
-
-        // Unwire the audio bridge on the thread that owns it (GW-12). This used to run
-        // inline in shutdownSip() below, on main, while a queued teardown could be running
-        // the very same code on the control thread - and the failure mode of two threads in
-        // unwireBridge() is a pjmedia abort(), not an exception. Queued here rather than
-        // called: quitSafely() drains what is already queued, so this runs on the owning
-        // thread, behind everything else, and is done before the join returns.
-        control.post(this::stopAudioBridge);
-
-        // Retire the control thread BEFORE tearing SIP down, so nothing still queued there
-        // runs against an endpoint this thread is about to shut down. quitSafely() drains
-        // what is already queued; the join is bounded, which is what keeps this - the only
-        // main-blocks-on-control wait in the app - from being a deadlock. See
-        // GatewayControlThread.quitSafely(long).
-        control.quitSafely(CONTROL_QUIT_TIMEOUT_MS);
-
-        // Shutdown SIP. Still on main, as before: it calls pjsua2 and main is registered with
-        // pjlib. Moving it off main is AUDIT G2, owned by GW-26.
-        shutdownSip();
-
-        // Release power
-        powerController.release();
-
-        // Cleanup telephony
+        // 6. The rest of main's teardown, after the control thread is retired - the wake lock
+        //    in particular stays held while that thread does its work. Each step independent, so
+        //    one failure cannot skip the rest: powerController.release() must run on every path
+        //    or the Gateway::CpuWakeLock leaks (H8).
+        if (powerController != null) {
+            teardownStep("powerController.release", powerController::release);
+        }
         if (telephonyManager != null && phoneStateListener != null) {
-            telephonyManager.listen(phoneStateListener, PhoneStateListener.LISTEN_NONE);
+            teardownStep("telephony unlisten", () ->
+                    telephonyManager.listen(phoneStateListener, PhoneStateListener.LISTEN_NONE));
         }
 
-        // Only now wait on the restore queued at the top: by this point it has almost always
-        // finished behind shutdownSip(), so the wait costs nothing. Bounded either way — a
-        // phone left without a microphone is worse than a slow teardown, but not unboundedly.
-        if (mute != null && !mute.awaitRestore(MUTE_RESTORE_TIMEOUT_MS)) {
-            Log.w(TAG, "Mute restore still running after " + MUTE_RESTORE_TIMEOUT_MS + " ms");
+        // 7. Only now wait on the restore queued in step 3: by this point it has almost always
+        //    finished behind the control-thread teardown, so the wait costs nothing. Bounded
+        //    either way - a phone left without a microphone is worse than a slow teardown, but
+        //    not unboundedly.
+        if (mute != null) {
+            final DeviceMuteManager restoring = mute;
+            teardownStep("awaitRestore", () -> {
+                if (!restoring.awaitRestore(MUTE_RESTORE_TIMEOUT_MS)) {
+                    Log.w(TAG, "Mute restore still running after "
+                            + MUTE_RESTORE_TIMEOUT_MS + " ms");
+                }
+            });
         }
 
-        stopForeground(true);
-        Log.d(TAG, "Service destroyed");
+        teardownStep("stopForeground", () -> stopForeground(true));
+
+        // 8. Last, per GW-26 §4: the framework teardown runs once ours has finished, not before.
+        super.onDestroy();
+        Log.d(TAG, "Service destroyed in " + (SystemClock.uptimeMillis() - startedAt)
+                + " ms on main");
+    }
+
+    /**
+     * Everything {@code onDestroy} hands to the control thread, in order, as one task.
+     *
+     * <p>One task rather than three posts so the sequence cannot be interleaved with anything a
+     * late pjsua callback might still queue, and so {@link #shutdownSip()} is guaranteed to run
+     * <em>after</em> the bridge is unwired, on the same thread. That adjacency is the whole of
+     * GW-12's argument, and {@code deleteAccount()} running on main was the one remaining path
+     * that could violate it (AUDIT H11).
+     */
+    @ControlThread
+    private void teardownOnControlThread() {
+        control.assertOnControlThread("teardownOnControlThread");
+        Log.d(TAG, "Control-thread teardown starting");
+
+        // Both timers live on this looper (GW-15), so disarming them here is ordinary ordering
+        // rather than a cross-thread poke. quitSafely() drops their still-future messages
+        // anyway; this is what keeps `running` and `pending` honest if the service is ever
+        // destroyed without quitting the looper.
+        if (watchdog != null) {
+            teardownStep("watchdog.stop", watchdog::stop);
+        }
+        if (reconnection != null) {
+            teardownStep("reconnection.disable", () -> {
+                reconnection.setEnabled(false);
+                reconnection.cancel();
+            });
+        }
+        if (audioBridge != null) {
+            teardownStep("stopAudioBridge", this::stopAudioBridge);
+        }
+        if (accountManager != null && endpointManager != null) {
+            teardownStep("shutdownSip", this::shutdownSip);
+        }
+
+        Log.d(TAG, "Control-thread teardown complete");
+    }
+
+    /**
+     * Run one teardown step, absorbing whatever it throws.
+     *
+     * <p>{@link Throwable}, not {@link Exception}, and that is the point rather than
+     * defensiveness: the reachable failure here <em>is</em> an {@code Error}. The static
+     * initialiser above catches {@code UnsatisfiedLinkError} and lets the service run with no
+     * {@code libpjsua2}, after which every pjsua2 call throws {@code UnsatisfiedLinkError} or
+     * {@code NoClassDefFoundError} - neither an {@code Exception}, and neither caught by
+     * {@code SipAccountManager.deleteAccount()}. Before GW-26 that {@code Error} escaped
+     * {@code shutdownSip()} on main and skipped every remaining teardown step, including
+     * {@code powerController.release()} (AUDIT H8).
+     */
+    private static void teardownStep(String what, Runnable step) {
+        try {
+            step.run();
+        } catch (Throwable t) {
+            Log.e(TAG, "Teardown step '" + what + "' failed: " + t, t);
+        }
     }
 
     @Override
@@ -410,20 +604,50 @@ public class PjsipSipService extends Service implements SipCallService {
      * Keep it this way: <b>control may block on main, main must never block on control</b>
      * (plan §2.4). If a future change makes main wait on a control-thread result, this await
      * becomes a real deadlock.
+     *
+     * <h3>Cancellation (GW-26, AUDIT H8c)</h3>
+     * Before GW-26 this method had no cancellation check anywhere, and the bounded join in
+     * {@code onDestroy} was therefore not a shutdown mechanism but an abandonment. The
+     * pathological run: the join expires while this task sits in the 30 s endpoint latch; the
+     * runnable that latch waits for was queued behind {@code onDestroy} on main, so it runs the
+     * instant {@code onDestroy} returns; this method then walks straight on to
+     * {@code createAccount(this)} and <b>registers a fresh SIP account for a destroyed
+     * service</b>, against the {@code static} Endpoint that main only ran
+     * {@code hangupAllCalls()} on. Its callbacks post to a looper that has been quit, so nothing
+     * ever tears it down.
+     *
+     * <p>So a {@link LifecycleCancellation.Token} is taken at entry, checked before every
+     * blocking step, and handed to {@code createEndpoint} so the latch itself aborts early. A
+     * cancelled init returns silently: no reconnect, no notification, no status publish - the
+     * service it was initialising no longer exists.
+     *
+     * <p>The token is taken at entry rather than at post time and that is safe only because
+     * cancellation is <b>terminal</b>: this task is frequently still <em>queued</em> when
+     * destroy runs, so {@code begin()} below executes after {@code cancel()}, and a reusable
+     * generation would hand it a live token. See {@link LifecycleCancellation}.
+     *
+     * <p>The check is advisory, and deliberately so. If teardown lands between the last check
+     * and {@code createAccount}, the account <em>is</em> created - and then deleted by the
+     * teardown task queued behind this one, on this same thread. Cancellation bounds how far a
+     * doomed init gets; single-thread ordering is what cleans up the rest.
      */
     @ControlThread
     private void initializeSip() {
         control.assertOnControlThread("initializeSip");
+        final LifecycleCancellation.Token cancel = sipInitCancellation.begin();
         try {
             Log.d(TAG, "Initializing SIP...");
 
-            // Create endpoint (hops to main and waits - see the javadoc above)
-            endpointManager.createEndpoint();
+            // Create endpoint (hops to main and waits - see the javadoc above). The token goes
+            // in so the wait aborts at destroy instead of 30 s later.
+            cancel.throwIfCancelled("SIP init");
+            endpointManager.createEndpoint(cancel);
 
             // Hand THIS thread to pjlib now that an endpoint exists to register with. This
             // MUST happen before any other PJSIP call from here. Idempotent and one-shot:
             // GatewayControlThread also tries this at the head of every task, so whichever
             // gets there first is the only registration that ever happens.
+            cancel.throwIfCancelled("SIP init");
             if (!control.registerWithPjlib()) {
                 throw new Exception("Failed to register the control thread with pjlib");
             }
@@ -436,14 +660,22 @@ public class PjsipSipService extends Service implements SipCallService {
                 }
             });
 
-            // Initialize audio bridge
+            // Initialize audio bridge. Opens ALSA with retry - blocking, hence a check first.
+            cancel.throwIfCancelled("SIP init");
             audioBridge.initialize();
 
-            // Create and register account
+            // Create and register account. THE step cancellation exists for: an account created
+            // here for a destroyed service is a live SIP registration nothing owns.
+            cancel.throwIfCancelled("SIP init");
             accountManager.createAccount(this);
 
             Log.d(TAG, "SIP initialized");
 
+        } catch (LifecycleCancellation.CancelledException e) {
+            // Deliberately not a failure: no reconnect, no notification, no publishStatus. The
+            // service is gone; the teardown task behind us on this queue owns what is left.
+            Log.i(TAG, "SIP init abandoned: " + e.getMessage());
+            return;
         } catch (SipEndpointManager.TlsChangedException e) {
             // TLS setting changed - PJSIP cannot safely recreate endpoint
             // Must kill the entire process and restart
@@ -469,15 +701,25 @@ public class PjsipSipService extends Service implements SipCallService {
     }
 
     /**
-     * Still on main, as before - it calls pjsua2 and main is registered with pjlib. Moving it
-     * off main is AUDIT G2, owned by GW-26.
+     * Tear SIP down. <b>Control thread</b> since GW-26 (AUDIT G2): the un-REGISTER inside
+     * {@code deleteAccount()} is network I/O that {@code account.delete()} then waits on, and it
+     * used to run inline on main from {@code onDestroy}.
      *
-     * <p>The audio bridge is <em>not</em> torn down here: that belongs to the control thread
-     * and {@code onDestroy} queues {@link #stopAudioBridge()} ahead of {@code quitSafely()}.
-     * The port itself is deliberately never deleted - GW-12 removed the {@code release()}
-     * that would have, because it nulled a port the pjmedia RT thread can still be inside.
+     * <p>Moving it here also closes H11. The bounded join can abandon the control thread, and
+     * while it was abandoned main went on to {@code deleteAccount()} - destroying the call's
+     * conference port, which is exactly what {@code unwireBridge()}'s liveness check on the
+     * control thread must not race. The failure mode of that race is a pjmedia {@code abort()},
+     * not an exception, so no {@code try/catch} would have caught it. Now both are steps of
+     * {@link #teardownOnControlThread()}, in order, on one thread.
+     *
+     * <p>The audio bridge is <em>not</em> torn down here: {@link #stopAudioBridge()} is the
+     * step before this one. The port itself is deliberately never deleted - GW-12 removed the
+     * {@code release()} that would have, because it nulled a port the pjmedia RT thread can
+     * still be inside.
      */
+    @ControlThread
     private void shutdownSip() {
+        control.assertOnControlThread("shutdownSip");
         Log.d(TAG, "Shutting down SIP...");
 
         // Delete account
@@ -1347,18 +1589,75 @@ public class PjsipSipService extends Service implements SipCallService {
         return testCall == null ? "" : testCall.getReport();
     }
 
+    /**
+     * An explicit, human-initiated stop: the {@code STOP} broadcast
+     * ({@code GatewayControlReceiver}) and the UI's stop button ({@code MainViewModel}).
+     *
+     * <p>Latched in {@link #KEY_USER_STOPPED} so nothing brings the gateway back behind the
+     * operator's back - not a sticky restart, and not {@code GatewayInCallService.onCreate}.
+     * The flag is written <em>before</em> {@code stopSelf()}, which matters: {@code onDestroy}
+     * nulls {@link #instance} first, so an InCallService that binds during teardown sees no
+     * service and would otherwise start one.
+     */
     public void stop() {
+        stop(true);
+    }
+
+    /**
+     * @param userRequested true for a human stop, which latches {@link #KEY_USER_STOPPED};
+     *                      false for an internal stop that must leave every restart path
+     *                      working (the reload's give-up branch)
+     */
+    private void stop(boolean userRequested) {
         if (stopRequested) {
             Log.w(TAG, "Stop already requested, ignoring duplicate");
             return;
         }
         stopRequested = true;
-        Log.d(TAG, "Stop requested");
+        Log.d(TAG, "Stop requested (userRequested=" + userRequested + ")");
+        if (userRequested) {
+            setUserStopped(this, true);
+        }
         // Called from main (the broadcast receiver, MainViewModel, the reload path). The
         // reconnect flags belong to the control thread since GW-15, so this is a post; it is
         // ordered ahead of onDestroy's own disarm on the same queue.
-        control.post(() -> reconnection.setEnabled(false));
+        if (control != null) {
+            control.post(() -> reconnection.setEnabled(false));
+        }
         stopSelf();
+    }
+
+    // ========== Persisted stop latch (GW-26 §5) ==========
+
+    /**
+     * True when the gateway is down because a human stopped it.
+     *
+     * <p>Public and static so {@code GatewayInCallService.onCreate} can consult it before
+     * starting us: it binds whenever the app is the default dialler, sees a null
+     * {@link #instance}, and would otherwise restart the service the operator just stopped -
+     * including <em>during</em> our own teardown, since {@code onDestroy} nulls
+     * {@code instance} first.
+     */
+    public static boolean isUserStopped(Context context) {
+        return context.getSharedPreferences(PREFS_LIFECYCLE, Context.MODE_PRIVATE)
+                .getBoolean(KEY_USER_STOPPED, false);
+    }
+
+    /**
+     * {@code commit()}, not {@code apply()}: the write must be on disk before {@code stopSelf()}
+     * lets the process go, and setting it is a rare, human-paced event.
+     *
+     * <p>Package-visible rather than private so {@code PjsipSipServiceLifecycleTest} can clear
+     * the latch between tests without hard-coding the preference file name.
+     */
+    static void setUserStopped(Context context, boolean stopped) {
+        SharedPreferences prefs =
+                context.getSharedPreferences(PREFS_LIFECYCLE, Context.MODE_PRIVATE);
+        if (prefs.getBoolean(KEY_USER_STOPPED, false) == stopped) {
+            return;
+        }
+        prefs.edit().putBoolean(KEY_USER_STOPPED, stopped).commit();
+        Log.i(TAG, "User-stop latch " + (stopped ? "set" : "cleared"));
     }
 
     /**
@@ -1459,11 +1758,14 @@ public class PjsipSipService extends Service implements SipCallService {
         try {
             // 0. Check if endpoint exists
             if (!endpointManager.isInitialized()) {
-                Log.w(TAG, "Endpoint not initialized, cannot reload - restarting service");
-                mainHandler.post(() -> {
-                    stop();
-                    // Service will be restarted by system due to START_STICKY
-                });
+                Log.w(TAG, "Endpoint not initialized, cannot reload - stopping service");
+                // stop(false): this is the gateway giving up on itself, not a human stopping
+                // it, so it must NOT latch the user-stop flag - every restart path has to keep
+                // working. NOTE: the comment that used to sit here claimed START_STICKY would
+                // bring the service back. It does not: a service ended by stopSelf() is not
+                // restarted, so this branch leaves the gateway down until something starts it.
+                // Pre-existing, out of GW-26's scope, filed as AUDIT H14.
+                mainHandler.post(() -> stop(false));
                 return;
             }
 
@@ -1624,10 +1926,11 @@ public class PjsipSipService extends Service implements SipCallService {
     }
 
     /**
-     * The check-then-set on {@link #isRunning} in {@code onStartCommand} is main-only and
-     * this is what says so. Same shape as {@code GatewayInCallService.assertMainThread}: log
-     * loudly rather than throw, because a violation here is a wrong-thread bug to fix, not a
-     * reason to kill a live gateway. Cross-thread <em>reads</em> of the flag are fine and
+     * The check-then-set on {@link #isRunning} in {@link #onStartCommand} is main-only and this
+     * is what says so - GW-26 added the call there, which until then the field's javadoc had
+     * claimed without it existing. Same shape as {@code GatewayInCallService.assertMainThread}:
+     * log loudly rather than throw, because a violation here is a wrong-thread bug to fix, not
+     * a reason to kill a live gateway. Cross-thread <em>reads</em> of the flag are fine and
      * defined - it is volatile - and the UI takes it from the snapshot anyway.
      */
     private static void assertMainThread(String what) {
