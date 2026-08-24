@@ -30,10 +30,31 @@ import org.onetwoone.gateway.sip.SipAccountManager;
  * read surface to be {@code isRunning}, {@code isSipRegistered} and the composite status
  * string. Everything else that looked like a status getter is dead code (noted for GW-31),
  * or needs a genuinely live pjsua2 object - and those must be posted to the control thread
- * and dereferenced there, never described here.
+ * and dereferenced there, never described here. Narrow is about <em>what may be captured</em>,
+ * not about how much of it the UI is allowed to see; growth since (GW-14's reload counter,
+ * GW-22's call counters, GW-25's {@link WatchdogFindings}) all obeys the same rule, which is
+ * that the control thread already owns the value.
+ *
+ * <h3>Who reads this</h3>
+ *
+ * <p>Since GW-45 the object itself is the UI's status surface: {@code MainViewModel} publishes
+ * it whole as {@code LiveData<GatewayStatus>} once a second and the screen derives from it.
+ * It used to keep three fields and throw the rest away (Phase 4 plan §2 C1), which is why
+ * {@link #getStatusText()} exists at all - and why it is now deprecated. <b>Anything added
+ * here is reachable by the UI without further plumbing; anything the UI needs belongs here
+ * rather than in a live read of a manager.</b>
  *
  * <p>{@link #toBundle()} exists because the snapshot's second consumer is
  * {@code GatewayControlReceiver}'s {@code GET_STATUS}, which is a {@code TODO} stub today.
+ *
+ * <h3>What is deliberately absent</h3>
+ *
+ * <p>SMS. Not an oversight and not a rendering gap - see
+ * {@code docs/refactor/issues/GW-46-sms-status.md}. The counters a status screen would want
+ * (forwarded, failed, last delivery) are not state {@code SmsHandler} keeps today, and the
+ * outbound send outcome arrives on <em>main</em>, in a {@code BroadcastReceiver} registered
+ * with no handler. Publishing it would mean new counters and a new cross-thread hand-off,
+ * which is exactly what three phases of this refactor have been removing.
  */
 public final class GatewayStatus {
 
@@ -326,7 +347,18 @@ public final class GatewayStatus {
                 < CallManager.GSM_CALL_GRACE_PERIOD_MS;
     }
 
-    /** The three-line composite the UI has always shown. */
+    /**
+     * The three-line composite the UI has always shown.
+     *
+     * @deprecated GW-45. A compatibility shim for the pre-Phase-4 screen, not a status API:
+     *     it glues {@link #getSipStatus()}, {@link #getCallStatus()} and
+     *     {@link #getAudioStatus()} into one String that a caller then has to take apart
+     *     again to style, colour or lay out any part of it. Read the three separately. Kept
+     *     while {@code MainViewModel}'s deprecated {@code getStatusText()} LiveData and
+     *     {@code PjsipSipService.getStatus()} still call it; GW-41 removes the first and
+     *     GW-31 is where the second belongs.
+     */
+    @Deprecated
     public String getStatusText() {
         return "SIP: " + sipStatus + "\n"
                 + "Call: " + callStatus + "\n"

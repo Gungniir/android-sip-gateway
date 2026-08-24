@@ -37,7 +37,29 @@ import java.util.Set;
 public class MainViewModel extends AndroidViewModel {
     private static final String TAG = "MainVM";
 
-    // Service state
+    /**
+     * The gateway's whole status, as the control thread published it. GW-45.
+     *
+     * <p>Never null: {@link GatewayStatus#UNAVAILABLE} stands in whenever there is no service
+     * binding, which is what plan §4 GW-45 constraint 4 asks for instead of a null-state or
+     * a locally invented sentinel.
+     */
+    private final MutableLiveData<GatewayStatus> gatewayStatus =
+            new MutableLiveData<>(GatewayStatus.UNAVAILABLE);
+
+    /**
+     * Whether this ViewModel currently holds a live {@code PjsipSipService} binding. GW-45.
+     *
+     * <p>Separate from the snapshot on purpose. {@link GatewayStatus} describes the
+     * <em>gateway</em>; whether the UI is bound to the process hosting it is a fact about this
+     * ViewModel, and folding it into the snapshot would put a UI concern inside the
+     * publication boundary Phases 1 and 2 exist to keep clean. It is also the one thing
+     * {@link GatewayStatus#UNAVAILABLE} cannot tell you apart from: a freshly created service
+     * publishes {@code UNAVAILABLE} too.
+     */
+    private final MutableLiveData<Boolean> serviceConnected = new MutableLiveData<>(false);
+
+    // Service state - the pre-GW-45 surface. Deprecated, still fed on every tick.
     private final MutableLiveData<ServiceState> serviceState = new MutableLiveData<>(new ServiceState());
     private final MutableLiveData<String> statusText = new MutableLiveData<>("Not connected");
     private final MutableLiveData<Boolean> isRegistered = new MutableLiveData<>(false);
@@ -131,14 +153,91 @@ public class MainViewModel extends AndroidViewModel {
 
     // ========== LiveData Getters ==========
 
+    /**
+     * <b>The status surface (GW-45).</b> The whole immutable {@link GatewayStatus} the control
+     * thread published, handed over as it is rather than flattened into a String on the way
+     * through. This is what a status-first screen renders from.
+     *
+     * <p><b>Contract</b>
+     * <ul>
+     *   <li><b>Never null.</b> Before the first poll, and whenever there is no service
+     *       binding, the value is {@link GatewayStatus#UNAVAILABLE}.
+     *   <li><b>Verbatim.</b> The object is the one {@code PjsipSipService.getStatusSnapshot()}
+     *       returned - not copied, not re-wrapped, nothing dropped. Everything the control
+     *       thread published is reachable: {@link GatewayStatus#getSipStatus()},
+     *       {@link GatewayStatus#getCallStatus()}, {@link GatewayStatus#getAudioStatus()} as
+     *       three separate values, {@link GatewayStatus#getCallState()},
+     *       {@link GatewayStatus#getCallsAlive()}, {@link GatewayStatus#getConfigGeneration()}
+     *       and the whole of {@link GatewayStatus.WatchdogFindings}.
+     *   <li><b>Republished every tick.</b> {@code setValue} dispatches unconditionally, so
+     *       observers fire once a second even when the control thread has published nothing
+     *       new and the value is the same instance as last tick.
+     * </ul>
+     *
+     * <p>That last point is load-bearing, not waste. {@link GatewayStatus#getCallDurationMs()}
+     * and {@link GatewayStatus#isInGracePeriod()} re-read the clock on <em>every</em> call by
+     * design, and the service publishes a new snapshot only on events - so during a call that
+     * is generating none, the same object has to be asked again each second.
+     * <b>Read those two inside the observer and never cache what they return</b>; a field
+     * holding the derived value is the stopwatch that never advances their javadoc warns
+     * about.
+     *
+     * <p>Not in here: the test-call report. It is a {@code StringBuilder} capped at 20 000
+     * chars and copying it into every 1 Hz publish would make publishing cost proportional to
+     * report length (PHASE-2-PLAN §2.7). It stays {@link #getTestReport()}.
+     *
+     * <p>Not in here either: what "no service" should read as on screen. That is presentation
+     * - observe {@link #getServiceConnected()} and pick a string resource.
+     */
+    public LiveData<GatewayStatus> getGatewayStatus() {
+        return gatewayStatus;
+    }
+
+    /**
+     * Whether the ViewModel is bound to the gateway service right now (GW-45).
+     *
+     * <p>The companion to {@link #getGatewayStatus()}: {@code false} means the snapshot beside
+     * it is {@link GatewayStatus#UNAVAILABLE} because there is nothing to read, rather than
+     * because the gateway is idle. Both cases render as "nothing is running"; only this one
+     * should say so in the words of a disconnected UI, and choosing those words is the view's
+     * job.
+     */
+    public LiveData<Boolean> getServiceConnected() {
+        return serviceConnected;
+    }
+
+    /**
+     * @deprecated GW-45. A mutable POJO with public fields, handed out through LiveData, that
+     *     carries three of the snapshot's fields and drops the rest - one of the three being
+     *     {@link GatewayStatus#getStatusText()}, a pre-formatted composite rather than status.
+     *     Use {@link #getGatewayStatus()} and {@link #getServiceConnected()}. Kept working
+     *     because {@code MainActivity} still observes it; GW-41 rewrites that screen and
+     *     deletes this with it.
+     */
+    @Deprecated
     public LiveData<ServiceState> getServiceState() {
         return serviceState;
     }
 
+    /**
+     * @deprecated GW-45. The three-line {@code "SIP: x\nCall: y\nAudio: z"} composite, which
+     *     a caller then has to take apart to style any part of it. Observe
+     *     {@link #getGatewayStatus()} and read {@link GatewayStatus#getSipStatus()},
+     *     {@link GatewayStatus#getCallStatus()} and {@link GatewayStatus#getAudioStatus()}
+     *     separately. Removed by GW-41.
+     */
+    @Deprecated
     public LiveData<String> getStatusText() {
         return statusText;
     }
 
+    /**
+     * @deprecated GW-45. One boolean lifted out of the snapshot. Observe
+     *     {@link #getGatewayStatus()} and read {@link GatewayStatus#isSipRegistered()}, which
+     *     comes with {@link GatewayStatus#getSipStatus()} beside it from the same capture
+     *     instead of from a second LiveData that could be a tick behind. Removed by GW-41.
+     */
+    @Deprecated
     public LiveData<Boolean> getIsRegistered() {
         return isRegistered;
     }
@@ -284,8 +383,38 @@ public class MainViewModel extends AndroidViewModel {
     }
 
     /**
+     * What the pre-GW-45 status line said when nothing was bound.
+     *
+     * <p>Hoisted out of {@link #updateServiceState()} so the deprecated composite stays
+     * byte-identical while it lives, and so the one literal left in it has a name to grep for.
+     * It is presentation and belongs in {@code strings.xml}, but {@code res/} is GW-40's and
+     * the whole composite is GW-41's to delete - so it is a seam, not a home.
+     *
+     * @deprecated GW-45, with {@link #getStatusText()}. A view observing
+     *     {@link #getServiceConnected()} picks its own string resource.
+     */
+    @Deprecated
+    static final String DISCONNECTED_STATUS_TEXT = "Service not connected";
+
+    /**
      * The 1 Hz poll. Reads the service's immutable {@link GatewayStatus} snapshot, never the
      * live managers - those are owned by the control thread now (GW-10).
+     *
+     * <p><b>GW-45: the snapshot is republished whole.</b> This method used to flatten it into
+     * three fields of a mutable {@link ServiceState} - {@code isRunning}, {@code isRegistered}
+     * and the pre-formatted {@link GatewayStatus#getStatusText()} composite - and drop
+     * everything else the control thread had published: the three status lines separately, the
+     * call state, the call duration, the call-object counters, the config generation and the
+     * whole of {@link GatewayStatus.WatchdogFindings}. That is plan §2 C1: the UI could not
+     * render status it could not reach. {@link #getGatewayStatus()} hands the object over
+     * instead and leaves the deriving to the view.
+     *
+     * <p>{@code setValue} dispatches on every call, so observers fire once a second even when
+     * the service has published nothing new and the value is the same instance as last tick.
+     * That is deliberate: {@code publishStatus()} on the service side is event-driven, while
+     * {@link GatewayStatus#getCallDurationMs()} and {@link GatewayStatus#isInGracePeriod()}
+     * re-read the clock on every call - so a call that is generating no events still has to be
+     * asked again each second or the screen shows a stopwatch that never advances.
      *
      * <p>The test-call report is deliberately fetched separately and is not part of the
      * snapshot: it is a {@code StringBuilder} capped at 20 000 chars, and copying it into
@@ -301,14 +430,18 @@ public class MainViewModel extends AndroidViewModel {
      * on every publish.
      */
     private void updateServiceState() {
-        ServiceState state = new ServiceState();
+        // One read of the binding per tick. It is only ever written on this thread, but a
+        // local keeps the branches below and the report fetch talking about the same object.
+        final PjsipSipService service = pjsipService;
+        final boolean connected = service != null;
 
-        if (pjsipService != null) {
-            GatewayStatus snapshot = pjsipService.getStatusSnapshot();
-            state.isRunning = snapshot.isRunning();
-            state.isRegistered = snapshot.isSipRegistered();
-            state.statusMessage = snapshot.getStatusText();
+        // UNAVAILABLE is the "service not connected" value (plan §4 GW-45 constraint 4), so
+        // there is no null-state and no locally invented sentinel for the view to handle.
+        // What it should read as on screen is presentation, and is not decided here.
+        final GatewayStatus snapshot =
+                connected ? service.getStatusSnapshot() : GatewayStatus.UNAVAILABLE;
 
+        if (connected) {
             long generation = snapshot.getConfigGeneration();
             if (seenConfigGeneration < 0) {
                 // First snapshot after binding - nothing has changed underneath us yet, and
@@ -320,23 +453,49 @@ public class MainViewModel extends AndroidViewModel {
                 loadConfig();
             }
         } else {
-            state.isRunning = false;
-            state.isRegistered = false;
-            state.statusMessage = "Service not connected";
             // A restarted process starts counting from zero again, so forget what we saw.
             seenConfigGeneration = -1L;
         }
 
-        serviceState.setValue(state);
-        statusText.setValue(state.statusMessage);
-        isRegistered.setValue(state.isRegistered);
+        // GW-45. Verbatim: the object the control thread published, nothing derived from it
+        // cached here - getCallDurationMs() and isInGracePeriod() are the view's to call, on
+        // this object, at the moment it draws.
+        serviceConnected.setValue(connected);
+        gatewayStatus.setValue(snapshot);
 
-        if (pjsipService != null) {
-            String report = pjsipService.getTestCallReport();
+        publishLegacyServiceState(connected, snapshot);
+
+        if (connected) {
+            String report = service.getTestCallReport();
             if (report != null && !report.isEmpty()) {
                 testReport.setValue(report);
             }
         }
+    }
+
+    /**
+     * Feed the pre-GW-45 LiveData from the same snapshot, unchanged in what it shows.
+     *
+     * <p>{@code MainActivity} still observes {@link #getServiceState()} and wave 1 has to leave
+     * a working app, so this keeps the old three fields exactly as they were - including
+     * {@link #DISCONNECTED_STATUS_TEXT}, which is what the unbound case said before and is not
+     * {@link GatewayStatus#getStatusText()} of {@link GatewayStatus#UNAVAILABLE}. GW-41 rewrites
+     * that screen and deletes this method with the getters it feeds.
+     *
+     * @deprecated with the surface it publishes.
+     */
+    @Deprecated
+    @SuppressWarnings("deprecation")
+    private void publishLegacyServiceState(boolean connected, GatewayStatus snapshot) {
+        ServiceState state = new ServiceState();
+        state.isRunning = snapshot.isRunning();
+        state.isRegistered = snapshot.isSipRegistered();
+        state.statusMessage =
+                connected ? snapshot.getStatusText() : DISCONNECTED_STATUS_TEXT;
+
+        serviceState.setValue(state);
+        statusText.setValue(state.statusMessage);
+        isRegistered.setValue(state.isRegistered);
     }
 
     // ========== SIP Diagnostics ==========
@@ -636,6 +795,14 @@ public class MainViewModel extends AndroidViewModel {
 
     // ========== Data Classes ==========
 
+    /**
+     * @deprecated GW-45. A mutable POJO with public fields, published through LiveData, that
+     *     carried three of {@link GatewayStatus}'s fields and dropped the rest. Observe
+     *     {@link #getGatewayStatus()} - immutable, and complete - with
+     *     {@link #getServiceConnected()} beside it. Removed by GW-41 together with the
+     *     screen that reads it.
+     */
+    @Deprecated
     public static class ServiceState {
         public boolean isRunning = false;
         public boolean isRegistered = false;
