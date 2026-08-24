@@ -341,7 +341,7 @@ public class GatewayControlThreadTest {
         control.post(() -> {
             control.assertOnControlThread("publishStatus");
             publishedOn.set(Thread.currentThread().getName());
-            published.set(GatewayStatus.capture(true, null, null, null));
+            published.set(GatewayStatus.capture(true, null, null, null, 0L));
         });
 
         assertSame("nothing may be published before the task runs",

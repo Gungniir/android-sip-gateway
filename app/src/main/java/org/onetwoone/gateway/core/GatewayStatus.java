@@ -39,7 +39,7 @@ public final class GatewayStatus {
 
     /** What the UI sees before the service has ever published anything. */
     public static final GatewayStatus UNAVAILABLE = new GatewayStatus(
-            false, false, "Not configured", "Idle", "Not initialized", "IDLE", 0L, 0L);
+            false, false, "Not configured", "Idle", "Not initialized", "IDLE", 0L, 0L, 0L);
 
     private final boolean running;
     private final boolean sipRegistered;
@@ -54,12 +54,17 @@ public final class GatewayStatus {
      */
     private final long gsmCallPlacedAtWallMs;
 
+    /**
+     * How many config reloads the control thread has run. See {@link #getConfigGeneration()}.
+     */
+    private final long configGeneration;
+
     /** Wall-clock instant this snapshot was taken, for staleness diagnostics. */
     private final long capturedAtWallMs;
 
     GatewayStatus(boolean running, boolean sipRegistered, String sipStatus, String callStatus,
                   String audioStatus, String callState, long gsmCallPlacedAtWallMs,
-                  long capturedAtWallMs) {
+                  long configGeneration, long capturedAtWallMs) {
         this.running = running;
         this.sipRegistered = sipRegistered;
         this.sipStatus = sipStatus;
@@ -67,6 +72,7 @@ public final class GatewayStatus {
         this.audioStatus = audioStatus;
         this.callState = callState;
         this.gsmCallPlacedAtWallMs = gsmCallPlacedAtWallMs;
+        this.configGeneration = configGeneration;
         this.capturedAtWallMs = capturedAtWallMs;
     }
 
@@ -75,12 +81,16 @@ public final class GatewayStatus {
      *
      * <p>Must be called on the control thread - it reads state that thread owns. The caller
      * asserts that; this method takes plain references so it stays unit-testable.
+     *
+     * @param configGeneration the service's reload counter - a plain value, not a manager
+     *                         read, so it is passed in rather than captured here
      */
     @ControlThread
     public static GatewayStatus capture(boolean running,
                                         SipAccountManager account,
                                         CallManager calls,
-                                        AudioBridgeManager audio) {
+                                        AudioBridgeManager audio,
+                                        long configGeneration) {
         return new GatewayStatus(
                 running,
                 account != null && account.isRegistered(),
@@ -89,6 +99,7 @@ public final class GatewayStatus {
                 audio == null ? "Not initialized" : audio.getStatusString(),
                 calls == null ? CallManager.CallState.IDLE.name() : calls.getState().name(),
                 calls == null ? 0L : calls.getGsmCallPlacedAtWallMs(),
+                configGeneration,
                 System.currentTimeMillis());
     }
 
@@ -119,6 +130,34 @@ public final class GatewayStatus {
 
     public long getCapturedAtWallMs() {
         return capturedAtWallMs;
+    }
+
+    /**
+     * A monotonic counter of config reloads, bumped by {@code PjsipSipService.doReloadConfig}.
+     *
+     * <p>GW-14 deleted the {@code MainActivity} relaunch with
+     * {@code FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TASK} that used to end a reload, so
+     * a config save from the web interface no longer throws away whatever the person holding
+     * the phone was doing. This is what replaces it.
+     *
+     * <p>The rest of the snapshot already covered the <em>status</em> half of "reflect the new
+     * config": {@link #getStatusText()} is rebuilt from the live managers on every publish, so
+     * the SIP line goes "Connecting..." then "Registered" within a poll of the reload either
+     * way. What it did not and should not cover is the <em>configuration</em> half - the form
+     * fields in {@code MainActivity} come from {@code MainViewModel.loadConfig()}, which reads
+     * {@code GatewayConfig} (SharedPreferences) and is only called from the ViewModel
+     * constructor and after an in-app save. A web-interface save writes those preferences from
+     * a NanoHTTPD worker and never touches the ViewModel, so the on-screen fields went stale
+     * and only the activity restart papered over it.
+     *
+     * <p>Carrying a counter rather than the values themselves is deliberate: config is not
+     * control-thread-owned state, it is preferences that any thread can already read, and
+     * plan §2.7 keeps this snapshot to what the control thread owns. The counter says only
+     * "the persisted config changed, re-read it", which is the one fact the UI could not get
+     * for itself.
+     */
+    public long getConfigGeneration() {
+        return configGeneration;
     }
 
     /**
@@ -154,6 +193,7 @@ public final class GatewayStatus {
         b.putString("audio_status", audioStatus);
         b.putString("call_state", callState);
         b.putBoolean("in_grace_period", isInGracePeriod());
+        b.putLong("config_generation", configGeneration);
         b.putLong("captured_at_wall_ms", capturedAtWallMs);
         return b;
     }
@@ -162,6 +202,7 @@ public final class GatewayStatus {
     public String toString() {
         return "GatewayStatus{running=" + running
                 + ", sipRegistered=" + sipRegistered
+                + ", configGeneration=" + configGeneration
                 + ", callState=" + callState
                 + ", sip=" + sipStatus
                 + ", call=" + callStatus

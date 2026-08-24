@@ -73,6 +73,12 @@ public class MainViewModel extends AndroidViewModel {
     private final Runnable statusPoller;
     private boolean polling = false;
 
+    /**
+     * Last {@link GatewayStatus#getConfigGeneration()} this ViewModel has re-read config for.
+     * {@code -1} so the first poll after binding never counts as a change.
+     */
+    private long seenConfigGeneration = -1L;
+
     private final ServiceConnection serviceConnection = new ServiceConnection() {
         @Override
         public void onServiceConnected(ComponentName name, IBinder binder) {
@@ -284,6 +290,15 @@ public class MainViewModel extends AndroidViewModel {
      * <p>The test-call report is deliberately fetched separately and is not part of the
      * snapshot: it is a {@code StringBuilder} capped at 20 000 chars, and copying it into
      * every publish would make publishing cost proportional to report length (plan §2.7).
+     *
+     * <p>The config-generation check is what replaces GW-14's deleted {@code MainActivity}
+     * relaunch. A config save from the web interface writes SharedPreferences on a NanoHTTPD
+     * worker and never touches this ViewModel, so the SIP/audio form fields went stale; the
+     * old reload path "fixed" that by restarting the activity with {@code CLEAR_TASK}, which
+     * threw away whatever the person holding the phone was doing. Now the reload bumps a
+     * counter in the snapshot and this poll re-reads config in place, at most a second later.
+     * The status half needs nothing: {@code getStatusText()} is rebuilt from the live managers
+     * on every publish.
      */
     private void updateServiceState() {
         ServiceState state = new ServiceState();
@@ -293,10 +308,23 @@ public class MainViewModel extends AndroidViewModel {
             state.isRunning = snapshot.isRunning();
             state.isRegistered = snapshot.isSipRegistered();
             state.statusMessage = snapshot.getStatusText();
+
+            long generation = snapshot.getConfigGeneration();
+            if (seenConfigGeneration < 0) {
+                // First snapshot after binding - nothing has changed underneath us yet, and
+                // loadConfig() has already run in the constructor.
+                seenConfigGeneration = generation;
+            } else if (generation != seenConfigGeneration) {
+                seenConfigGeneration = generation;
+                Log.d(TAG, "Config reloaded elsewhere (generation " + generation + "), re-reading");
+                loadConfig();
+            }
         } else {
             state.isRunning = false;
             state.isRegistered = false;
             state.statusMessage = "Service not connected";
+            // A restarted process starts counting from zero again, so forget what we saw.
+            seenConfigGeneration = -1L;
         }
 
         serviceState.setValue(state);

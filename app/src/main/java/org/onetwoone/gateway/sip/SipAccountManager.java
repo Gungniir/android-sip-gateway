@@ -59,9 +59,32 @@ public class SipAccountManager {
 
     /**
      * Get the current account.
+     *
+     * <p>The reference is only meaningful for as long as it is still the current one:
+     * {@link #deleteAccount()} calls {@code delete()} on the native object and then drops the
+     * field, and pjsua2 gives no way to ask a {@code GatewayAccount} whether its native peer
+     * is still alive. Callers must therefore hold this on the control thread, from the read
+     * right through to the pjsua2 call that consumes it, and re-check with
+     * {@link #isCurrentAccount(GatewayAccount)} immediately before that call. AUDIT F4.
      */
     public GatewayAccount getAccount() {
         return account;
+    }
+
+    /**
+     * True while {@code candidate} is still the account this manager owns.
+     *
+     * <p>The last-moment half of the F4 guard. It is <em>not</em> a substitute for holding the
+     * control thread across the read and the use - {@code account} can only change while this
+     * thread is not looking, so a re-check on a different thread proves nothing and would just
+     * narrow the window. What it does buy, on the control thread, is a cheap check against the
+     * one writer that is still not on it: {@code shutdownSip()} calls {@link #deleteAccount()}
+     * from main during {@code onDestroy}. That path is ordered behind
+     * {@code control.quitSafely(...)}, so it cannot normally overlap a control-thread user of
+     * the account at all; this catches the case where that bounded join times out.
+     */
+    public boolean isCurrentAccount(GatewayAccount candidate) {
+        return candidate != null && candidate == account;
     }
 
     /**
@@ -159,6 +182,16 @@ public class SipAccountManager {
 
     /**
      * Unregister and delete the account.
+     *
+     * <p>Both steps are synchronous by the time this returns, which is why the reload no
+     * longer sleeps afterwards: {@code Account.delete()} is the SWIG destructor and runs
+     * {@code Account::shutdown()} -> {@code pjsua_acc_del()}, which invalidates and frees the
+     * account slot under the pjsua lock before it returns. See {@code doReloadConfig}'s javadoc
+     * for why the removed 500 ms could not have established anything the reload needed.
+     *
+     * <p>Nothing is queued or deferred here, so the next statement on this thread may create a
+     * replacement account. Callers on the control thread get "deleted, then recreated, with no
+     * window in between" for free; that is the whole F4 remedy.
      */
     public void deleteAccount() {
         // Snapshot: createAccount() runs on the control thread (SIP init / reload) and can
