@@ -1809,3 +1809,55 @@ count toward the 12 s. Until then, treat any `silent_bridge_episodes` figure gat
 `ANSWER_FIRST` as unreliable, and do not use it as promotion evidence.
 
 Related: H16 (the counter has no consumer either), GW-25.
+
+#### H19. D6 fires inside the DISCONNECTING window and misreports it as a missed callback — NEW, P2
+Found on hardware during the wave-3 lavender run (2026-08-24). It did **not** reproduce on
+merlinx, and the reason it did not is the whole finding.
+
+D6's repair fired 103 ms **before** the DISCONNECTED it claimed had been missed:
+
+```
+22:09:48.067  GatewayInCall: Call state changed: DISCONNECTING (gsmCallId=2)
+22:09:48.450  E GatewaySvc: INVARIANT (AUDIT D6): GSM leg 2 is tracked but Telecom no
+              longer has it - a DISCONNECTED was missed ... repairing
+22:09:48.553  GatewayInCall: Call state changed: DISCONNECTED (gsmCallId=2)
+22:09:48.554  GatewaySvc: GSM call 2 already ended (disconnected) - ignoring
+```
+
+Nothing was missed. The leg was mid-teardown, in `DISCONNECTING`, where Telecom no longer
+lists it but the final callback has not yet arrived. D6 has no tolerance for that window, so
+it reads "not in Telecom + still tracked" as a dropped callback.
+
+**Why lavender and not merlinx** — the window is an order of magnitude wider on the older
+device:
+
+| Device | `DISCONNECTING` → `DISCONNECTED` |
+|---|---|
+| merlinx (MT6768) | ~46 ms |
+| lavender (SDM660) | **486 ms** |
+
+At a 3 s tick, a 46 ms window is hit roughly 1.5% of the time and a 486 ms window ~16%. This
+is a race whose probability is set by device speed, so it will look like "an old-phone bug"
+and be dismissed. It is not — merlinx is simply winning the race most of the time.
+
+**Impact is low but not nil.**
+
+1. No healthy call was harmed: the call was already terminating. The repair stopped a port
+   that the normal path had already stopped 288 ms earlier, and `stopCapture()` proved
+   idempotent (no `Starting native audio` in between, second stop clean). The real
+   DISCONNECTED was then correctly absorbed as `already ended - ignoring`.
+2. It logs at **ERROR**, asserting a Telecom defect that did not occur. Anyone debugging a
+   real dropped-callback problem will be chasing this first.
+3. It increments `watchdog_terminations` — the same evidence counter H18 pollutes. Two
+   independent false sources now feed the number that is supposed to decide whether the
+   watchdog rules are trustworthy enough to act automatically.
+4. The repair path runs concurrently with the normal teardown, on the same objects. It was
+   safe here only because the stop is idempotent; that is a property worth keeping
+   deliberately rather than by luck.
+
+**Fix direction.** Require the leg to have been absent from Telecom for more than one tick
+before concluding a callback was missed, or exempt legs whose last known state was
+`DISCONNECTING`. Either removes the race without weakening the genuine D6 case, which is a
+leg that stays untracked indefinitely.
+
+Related: H18 (the other false contributor to `watchdog_terminations`), GW-25.

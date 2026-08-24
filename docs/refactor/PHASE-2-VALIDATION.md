@@ -121,10 +121,32 @@ After the 6-call run above, what is still open:
 
 - **GW-22** — the graveyard under a longer soak.
 - **GW-21** — the 20-SMS burst, SMS during a bridged call, PBX-down backoff.
-- **lavender** has had no calls at all; the Qualcomm audio path is unexercised. Its B1e
-  cross-check did pass.
+- **A second SIP-initiated hangup on lavender.** Only one was captured (8 ms), and one
+  sample of a lock-fairness lottery establishes nothing — see the lavender run below.
 - Deliberately not chased: `MAX_CALL_DURATION_MS` and `TERMINATING_DWELL_MAX_MS` need
   temporarily shortened constants to reach (validation step 8), not longer real calls.
+
+### lavender run — 4 calls, Qualcomm, release build, 2026-08-24
+
+3 inbound + 1 outbound, all bridged, 4 clean teardowns. The SIM was moved over from merlinx
+for this (lavender's own slots read `ABSENT,ABSENT` — worth checking before blaming the app
+when a device will not place calls).
+
+- **Two-way audio confirmed on Qualcomm by the operator**, with `bulkCopy=true` and
+  `captureErr=0, playbackErr=0`. Together with merlinx this closes GW-23a **on both SoCs** —
+  and the two profiles genuinely differ: `playback=0@8000` here against `playback=2@48000/1ch`
+  on MediaTek, so the resampler path and the non-resampler path are both exercised.
+- **E5, release build, n=1: 8 ms.** This is the clean CheckJNI-free number GW-23b §6 asked
+  for, and it is *not* evidence that E5 is absent on Qualcomm. Only one SIP-initiated hangup
+  occurred. merlinx spread 0.00–52.12 s over four samples; a single fast sample is exactly
+  what winning the lock race once looks like. **Do not quote 8 ms as the Qualcomm baseline
+  until there are several samples.**
+- GSM-initiated hangups: 0.002 s, 0.002 s, 0.001 s — the fast path, consistent with merlinx.
+- **New finding H19** — D6 fired 103 ms before the DISCONNECTED it claimed was missed,
+  because the leg was in the `DISCONNECTING` window. Harmless here (the call was already
+  ending and the port stop is idempotent) but it logs at ERROR alleging a Telecom defect that
+  did not happen, and it inflates `watchdog_terminations`. It reproduced on lavender and not
+  merlinx purely because that window is 486 ms there against 46 ms on merlinx.
 
 ### Notes for re-running
 
