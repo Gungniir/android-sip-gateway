@@ -92,7 +92,7 @@ public class AudioBridgeManagerTest {
         CountDownLatch done = new CountDownLatch(1);
         new Thread(() -> {
             try {
-                bridge.stopBridge();
+                bridge.stopBridge(AudioBridgeManager.ANY_GENERATION);
             } catch (Throwable t) {
                 thrown.set(t);
             } finally {
@@ -119,7 +119,7 @@ public class AudioBridgeManagerTest {
         AudioBridgeManager.setWiringForTest(new AudioBridgeManager.Wiring(null));
 
         assertRefusedOffThread("initialize", bridge::initialize);
-        assertRefusedOffThread("stopBridge", bridge::stopBridge);
+        assertRefusedOffThread("stopBridge", () -> bridge.stopBridge(AudioBridgeManager.ANY_GENERATION));
         assertRefusedOffThread("startAudioStreams", bridge::startAudioStreams);
         assertRefusedOffThread("stopAudioStreams", bridge::stopAudioStreams);
     }
@@ -202,7 +202,7 @@ public class AudioBridgeManagerTest {
                 oldInstance.isBridgeActive());
 
         // And it must actually unwire, rather than early-returning on a stale false.
-        restarted.stopBridge();
+        restarted.stopBridge(AudioBridgeManager.ANY_GENERATION);
 
         assertFalse(restarted.isBridgeActive());
         assertNull(wiring.callMedia);
@@ -247,7 +247,7 @@ public class AudioBridgeManagerTest {
     public void mutatorsAreNoOpsBeforeInitialize() {
         AudioBridgeManager bridge = newManager();
 
-        bridge.stopBridge();
+        bridge.stopBridge(AudioBridgeManager.ANY_GENERATION);
         bridge.startAudioStreams();
         bridge.stopAudioStreams();
 
@@ -257,5 +257,116 @@ public class AudioBridgeManagerTest {
         assertFalse(bridge.handlesMicMute());
         assertNull(bridge.getGsmAudioPort());
         assertEquals("Not initialized", bridge.getStatusString());
+    }
+
+    // ========== Generation-tagged wiring ==========
+
+    private static AudioBridgeManager.Wiring wiredTo(long generation) {
+        AudioBridgeManager.Wiring wiring = new AudioBridgeManager.Wiring(null);
+        wiring.active = true;
+        wiring.confSlot = 3;
+        wiring.wiredGeneration = generation;
+        wiring.newestGeneration = generation;
+        AudioBridgeManager.setWiringForTest(wiring);
+        return wiring;
+    }
+
+    /**
+     * The teardown half of the generation tag. A {@code stopBridge} raised for a call that has
+     * already been replaced must leave the replacement's audio alone - the case the wiring
+     * state was always meant to cover ("unwire exactly what we wired") but could not, because
+     * it had no way to tell one call's wiring from another's.
+     */
+    @Test
+    public void stopBridgeIgnoresAGenerationThatIsNoLongerWired() {
+        AudioBridgeManager.Wiring wiring = wiredTo(9L);
+
+        newManager().stopBridge(8L);
+
+        assertTrue("call 8's teardown must not unwire call 9", wiring.active);
+        assertEquals(9L, wiring.wiredGeneration);
+    }
+
+    @Test
+    public void stopBridgeUnwiresItsOwnGeneration() {
+        AudioBridgeManager.Wiring wiring = wiredTo(9L);
+
+        newManager().stopBridge(9L);
+
+        assertFalse(wiring.active);
+        assertEquals(AudioBridgeManager.NO_GENERATION, wiring.wiredGeneration);
+    }
+
+    /** A full teardown drops whatever is wired, and forgets the high-water mark with it. */
+    @Test
+    public void anyGenerationUnwiresWhateverIsWiredAndResetsTheHighWaterMark() {
+        AudioBridgeManager.Wiring wiring = wiredTo(9L);
+
+        newManager().stopBridge(AudioBridgeManager.ANY_GENERATION);
+
+        assertFalse(wiring.active);
+        assertEquals(AudioBridgeManager.NO_GENERATION, wiring.wiredGeneration);
+        assertEquals(AudioBridgeManager.NO_GENERATION, wiring.newestGeneration);
+    }
+
+    /**
+     * AUDIT D1b. {@code CallManager.onSipCallState} fires {@code onSipCallConnected(call)} on
+     * CONFIRMED without checking that the call is current, and that callback is posted - so a
+     * CONFIRMED for a superseded call can arrive after its replacement is up. The bridge must
+     * refuse it rather than trust the caller.
+     */
+    @Test
+    public void aSupersededGenerationIsRefused() {
+        AudioBridgeManager bridge = newManager();
+        AudioBridgeManager.Wiring wiring = new AudioBridgeManager.Wiring(null);
+
+        assertTrue("call 5 arrives first", bridge.admitGeneration(wiring, false, 5L));
+        assertTrue("call 6 replaces it", bridge.admitGeneration(wiring, false, 6L));
+        assertFalse("call 5's queued CONFIRMED must not bridge a replaced call",
+                bridge.admitGeneration(wiring, false, 5L));
+
+        assertEquals("a refusal must not move the high-water mark", 6L, wiring.newestGeneration);
+    }
+
+    /** The same call asking again - the re-INVITE/UPDATE rewire path - is always admitted. */
+    @Test
+    public void theCurrentGenerationIsAdmittedRepeatedly() {
+        AudioBridgeManager bridge = newManager();
+        AudioBridgeManager.Wiring wiring = new AudioBridgeManager.Wiring(null);
+
+        assertTrue(bridge.admitGeneration(wiring, false, 6L));
+        assertTrue("PJSIP re-creates the media stream on its own codec-locking UPDATE",
+                bridge.admitGeneration(wiring, false, 6L));
+        assertEquals(6L, wiring.newestGeneration);
+    }
+
+    /**
+     * The diagnostic test call is operator-initiated, so it is current by definition. It must
+     * also leave the gateway's high-water mark alone: a BRIDGE-mode test call placed during a
+     * live gateway call would otherwise lock that call out of re-wiring once the test ended.
+     */
+    @Test
+    public void theDiagnosticCallIsExemptAndDoesNotMoveTheHighWaterMark() {
+        AudioBridgeManager bridge = newManager();
+        AudioBridgeManager.Wiring wiring = new AudioBridgeManager.Wiring(null);
+
+        assertTrue(bridge.admitGeneration(wiring, false, 5L));
+        assertTrue("a diagnostic call is never stale", bridge.admitGeneration(wiring, true, 99L));
+        assertEquals("...and never advances the gateway's mark", 5L, wiring.newestGeneration);
+
+        assertTrue("so the gateway call can still re-wire after the test ends",
+                bridge.admitGeneration(wiring, false, 5L));
+    }
+
+    /** A restarted service must not inherit a high-water mark that would refuse the next call. */
+    @Test
+    public void initializeForgetsTheHighWaterMarkAlongWithTheStaleWiring() {
+        AudioBridgeManager.Wiring wiring = wiredTo(9L);
+
+        newManager().initialize();
+
+        assertFalse(wiring.active);
+        assertEquals(AudioBridgeManager.NO_GENERATION, wiring.wiredGeneration);
+        assertEquals(AudioBridgeManager.NO_GENERATION, wiring.newestGeneration);
     }
 }

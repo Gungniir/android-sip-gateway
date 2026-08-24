@@ -414,7 +414,7 @@ public class PjsipSipService extends Service implements SipCallService {
     @ControlThread
     private void stopAudioBridge() {
         control.assertOnControlThread("stopAudioBridge");
-        audioBridge.stopBridge();
+        audioBridge.stopBridge(AudioBridgeManager.ANY_GENERATION);
         audioBridge.stopAudioStreams();
     }
 
@@ -586,7 +586,7 @@ public class PjsipSipService extends Service implements SipCallService {
 
         @Override
         public void onCallsTerminated() {
-            audioBridge.stopBridge();
+            audioBridge.stopBridge(AudioBridgeManager.ANY_GENERATION);
             audioBridge.stopAudioStreams();
             updateNotification(accountManager.isRegistered() ? "Registered" : "Not registered");
             publishStatus();
@@ -1166,7 +1166,7 @@ public class PjsipSipService extends Service implements SipCallService {
             Thread.sleep(100);
 
             // 3. Stop audio streams (but keep port alive)
-            audioBridge.stopBridge();
+            audioBridge.stopBridge(AudioBridgeManager.ANY_GENERATION);
             audioBridge.stopAudioStreams();
 
             // 4. Delete old account

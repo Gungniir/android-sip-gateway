@@ -5,6 +5,8 @@ import android.util.Log;
 
 import org.pjsip.pjsua2.*;
 
+import java.util.concurrent.atomic.AtomicLong;
+
 /**
  * PJSIP Call implementation for GSM-SIP Gateway.
  * Handles call state changes and media state.
@@ -70,6 +72,29 @@ public class GatewayCall extends Call {
     private final Owner owner;
 
     /**
+     * Hands out {@link #generation}. Process-scoped and monotonic, like the audio bridge's
+     * wiring state that consumes it - a service restart must not start handing out numbers a
+     * still-wired bridge has already seen. Starts at 1 so 0 can mean "no generation".
+     */
+    private static final AtomicLong GENERATIONS = new AtomicLong(1);
+
+    /**
+     * This call's place in the process-wide order of calls, fixed at construction.
+     *
+     * <p>What {@code AudioBridgeManager} uses to refuse a stale wiring request (AUDIT D1b).
+     * {@code CallManager.onSipCallState} fires {@code onSipCallConnected(call)} on CONFIRMED
+     * without checking that {@code call} is the current one, and since GW-10 that callback is
+     * posted - so a CONFIRMED for a call that has already been replaced can arrive after its
+     * successor is up. Comparing generations answers "is this still the newest call the bridge
+     * has been asked about?", which a {@code call == currentSipCall} identity check cannot:
+     * identity says nothing about ordering once calls can legitimately be replaced.
+     *
+     * <p>Immutable, so evaluating it late gives the same answer as evaluating it inline -
+     * the same property that makes {@link Owner} safe to demux on.
+     */
+    private final long generation = GENERATIONS.getAndIncrement();
+
+    /**
      * Constructor for outgoing gateway calls.
      */
     public GatewayCall(SipCallService service, Account account) {
@@ -98,6 +123,11 @@ public class GatewayCall extends Call {
     /** Never null, never changes. See {@link Owner}. */
     public Owner getOwner() {
         return owner;
+    }
+
+    /** Monotonic, unique, and fixed at construction. See {@link #generation}. */
+    public long getGeneration() {
+        return generation;
     }
 
     /**

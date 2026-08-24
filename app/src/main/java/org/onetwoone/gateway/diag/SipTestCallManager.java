@@ -122,6 +122,13 @@ public class SipTestCallManager {
     // Media we created/linked, kept so teardown can unwire exactly what it wired.
     // Main-thread only, as above.
     private AudioMedia wiredCallMedia;
+
+    /**
+     * The {@code GatewayCall} generation currently wired into the audio bridge in BRIDGE mode,
+     * so {@link #unwireMedia()} unwires that and nothing else. Main-thread only, as above.
+     */
+    private long bridgedGeneration = AudioBridgeManager.NO_GENERATION;
+
     private ToneGenerator toneGen;
     private AudioMediaRecorder recorder;
     private File recordFile;
@@ -328,6 +335,7 @@ public class SipTestCallManager {
                     // Hop to the bridge's owner (GW-12). append() is synchronized and is
                     // already reached from foreign threads, so reporting from there is fine.
                     final GatewayCall bridged = current;
+                    bridgedGeneration = bridged.getGeneration();
                     control.post(() -> {
                         audioBridge.startBridge(bridged);
                         append("wired GSM bridge; audio streams "
@@ -530,7 +538,9 @@ public class SipTestCallManager {
             // the hangup below has destroyed the call's conference port - which is the
             // ordinary case for the gateway path too, and exactly what unwireBridge()'s
             // liveness check is there to survive.
-            control.post(audioBridge::stopBridge);
+            final long generation = bridgedGeneration;
+            bridgedGeneration = AudioBridgeManager.NO_GENERATION;
+            control.post(() -> audioBridge.stopBridge(generation));
         }
 
         wiredCallMedia = null;
@@ -563,7 +573,8 @@ public class SipTestCallManager {
     }
 
     /**
-     * {@link #mode}, {@link #mediaWired}, {@link #wiredCallMedia}, {@link #toneGen},
+     * {@link #mode}, {@link #mediaWired}, {@link #wiredCallMedia}, {@link #bridgedGeneration},
+     * {@link #toneGen},
      * {@link #recorder}, {@link #recordFile} and {@link #loopbackWired} are owned by the main
      * looper - every public entry point hops onto it before touching them, which is also what
      * makes them safe to call PJSIP from. Same shape as

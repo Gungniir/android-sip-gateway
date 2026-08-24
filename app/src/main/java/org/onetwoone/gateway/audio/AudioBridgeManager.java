@@ -28,6 +28,13 @@ import org.pjsip.pjsua2.*;
  * against it is a liveness check, and a liveness check is worth nothing if another thread can
  * destroy or re-wire the port between the check and the use. See {@link #unwireBridge(Wiring)}.
  *
+ * <h3>Generations (GW-12)</h3>
+ * Wiring is tagged with the {@code GatewayCall.getGeneration()} it belongs to, and
+ * {@link #stopBridge(long)} disconnects only if that tag still matches. Two different bugs
+ * need it: a teardown for a call that has already been replaced must not disconnect its
+ * successor's audio, and a stale queued {@code CONFIRMED} must not bridge a call that is no
+ * longer current (AUDIT D1b - see {@link #admitGeneration}).
+ *
  * <p>The read-only accessors ({@link #isBridgeActive()}, {@link #getGsmAudioPort()},
  * {@link #isAudioStreaming()}, {@link #handlesMicMute()}, {@link #getStatusString()},
  * {@link #isInitialized()}) are deliberately <em>not</em> asserted: they are read from
@@ -36,6 +43,21 @@ import org.pjsip.pjsua2.*;
  */
 public class AudioBridgeManager {
     private static final String TAG = "AudioBridge";
+
+    /** No call: nothing is wired, and no generation has been seen yet. */
+    public static final long NO_GENERATION = 0L;
+
+    /**
+     * Passed to {@link #stopBridge(long)} by a teardown that must unwire whatever is wired,
+     * whichever call it belongs to: service destroy, {@code onCallsTerminated}, a config
+     * reload. It also means "the gateway has no current call any more", so it resets the
+     * generation high-water mark - see {@link #stopBridge(long)}.
+     *
+     * <p>There is deliberately no no-argument {@code stopBridge()}. Every caller has to say
+     * which of the two it means, because "unwire everything" and "unwire my call" differ in
+     * exactly the case the generation exists for.
+     */
+    public static final long ANY_GENERATION = -1L;
 
     /**
      * Everything that outlives a service instance: the GSM audio port <em>and</em> what it is
@@ -76,6 +98,22 @@ public class AudioBridgeManager {
         /** Conference slot of {@link #callMedia}, for logging. */
         @ControlThread
         int confSlot = -1;
+
+        /**
+         * {@code GatewayCall.getGeneration()} of the call {@link #callMedia} belongs to.
+         * This is what makes "unwire exactly what we wired" hold: {@link #stopBridge(long)}
+         * disconnects only if the bridge is still wired to the generation it was asked about.
+         */
+        @ControlThread
+        long wiredGeneration = NO_GENERATION;
+
+        /**
+         * The newest <em>gateway</em> generation {@link #startBridge} has been asked to wire.
+         * A request for anything older is a stale queued callback and is refused (AUDIT D1b).
+         * Diagnostic calls do not move it - see {@link #admitGeneration}.
+         */
+        @ControlThread
+        long newestGeneration = NO_GENERATION;
 
         Wiring(GsmAudioPort port) {
             this.port = port;
@@ -182,6 +220,8 @@ public class AudioBridgeManager {
                 + " (conf slot " + existing.confSlot + " is gone) - clearing it");
         existing.callMedia = null;
         existing.confSlot = -1;
+        existing.wiredGeneration = NO_GENERATION;
+        existing.newestGeneration = NO_GENERATION;
         existing.active = false;
     }
 
@@ -203,6 +243,11 @@ public class AudioBridgeManager {
         }
         GsmAudioPort port = state.port;
 
+        long generation = call.getGeneration();
+        if (!admitGeneration(state, call.getOwner() == GatewayCall.Owner.DIAGNOSTIC, generation)) {
+            return;
+        }
+
         try {
             CallInfo info = call.getInfo();
             CallMediaInfoVector mediaVec = info.getMedia();
@@ -221,16 +266,32 @@ public class AudioBridgeManager {
                     // silently drops every link while keeping the same slot number. An
                     // early return here is what leaves the transmit leg dead
                     // (onFrameRequested stays at 0).
-                    if (state.active && SipDiagnostics.isTransmitting(port, confSlot)) {
+                    // The generation guard on both branches is what keeps them meaning what
+                    // their comments say: they are about THIS call's media stream being
+                    // re-created, not about a different call arriving. A different call takes
+                    // the else branch, which unwires properly.
+                    if (state.active && state.wiredGeneration == generation
+                            && SipDiagnostics.isTransmitting(port, confSlot)) {
                         Log.d(TAG, "Bridge already wired to conf slot " + confSlot);
                         return;
                     }
-                    if (state.active) {
+                    if (state.active && state.wiredGeneration == generation) {
                         Log.i(TAG, "Conference links lost (media stream re-created), rewiring");
                         // Deliberately no stopTransmit: the old port is already gone and
                         // its slot may have been handed to somebody else.
                         state.callMedia = null;
                         state.confSlot = -1;
+                    } else if (state.active) {
+                        // A DIFFERENT call. Previously this fell into the branch above and
+                        // simply dropped the old links on the floor, leaving the previous
+                        // call's ports listening to ours for the life of the process (E1).
+                        // Here the old media is still the media we wired, so it can be
+                        // disconnected properly - liveness-checked, like every other unwire.
+                        Log.i(TAG, "Bridge was wired to generation " + state.wiredGeneration
+                                + " - unwiring it before wiring generation " + generation);
+                        unwireBridge(state);
+                        state.active = false;
+                        state.wiredGeneration = NO_GENERATION;
                     }
 
                     AudioMedia audioMedia = AudioMedia.typecastFromMedia(call.getMedia(i));
@@ -254,6 +315,7 @@ public class AudioBridgeManager {
 
                     state.callMedia = audioMedia;
                     state.confSlot = confSlot;
+                    state.wiredGeneration = generation;
                     state.active = true;
 
                     Log.i(TAG, "Audio bridge started");
@@ -281,10 +343,53 @@ public class AudioBridgeManager {
     }
 
     /**
-     * Stop the audio bridge.
+     * AUDIT D1b: refuse to bridge a call that has already been superseded.
+     *
+     * <p>{@code CallManager.onSipCallState} fires {@code onSipCallConnected(call)} on
+     * CONFIRMED without checking that {@code call} is the current one, and since GW-10 that
+     * callback is posted - so a CONFIRMED belonging to a call that has since been replaced can
+     * arrive after its replacement is already up. {@code startBridge} used to bridge whatever
+     * it was handed. It no longer trusts the caller: the decision is made here, from the
+     * call's own immutable generation, so it does not depend on {@code CallManager} being
+     * fixed (GW-11 owns that file and is editing it concurrently).
+     *
+     * <p>A {@code call == currentSipCall} identity check would not do: identity says nothing
+     * about ordering, so it cannot distinguish "the current call, again" from "a call that was
+     * current when this callback was queued".
+     *
+     * <p>The diagnostic test call is exempt in both directions. It is operator-initiated, so
+     * it is current by definition and can never be a stale queued callback; and it must not
+     * advance the gateway's high-water mark, or a BRIDGE-mode test call placed during a live
+     * gateway call would permanently lock that call out of re-wiring once the test ends.
+     *
+     * <p>Package-private, and taking the two facts rather than the {@code GatewayCall}, so a
+     * JVM test can drive it - a {@code GatewayCall} cannot be constructed without pjsua2.
      */
     @ControlThread
-    public void stopBridge() {
+    boolean admitGeneration(Wiring state, boolean diagnostic, long generation) {
+        if (diagnostic) {
+            return true;
+        }
+        if (generation < state.newestGeneration) {
+            Log.w(TAG, "Refusing to bridge call generation " + generation
+                    + ": superseded by generation " + state.newestGeneration);
+            return false;
+        }
+        state.newestGeneration = generation;
+        return true;
+    }
+
+    /**
+     * Unwire the bridge, if it is still wired to {@code generation}.
+     *
+     * @param generation the {@code GatewayCall.getGeneration()} whose wiring the caller wants
+     *                   dropped, or {@link #ANY_GENERATION} for a teardown that must drop
+     *                   whatever is wired. Anything else is a no-op, which is the point:
+     *                   a teardown for a call that has already been replaced must not
+     *                   disconnect its successor's audio.
+     */
+    @ControlThread
+    public void stopBridge(long generation) {
         control.assertOnControlThread("stopBridge");
 
         Wiring state = wiring;
@@ -292,10 +397,23 @@ public class AudioBridgeManager {
             return;
         }
 
+        if (generation != ANY_GENERATION && generation != state.wiredGeneration) {
+            Log.d(TAG, "Not unwiring: the bridge belongs to generation "
+                    + state.wiredGeneration + ", not " + generation);
+            return;
+        }
+
         Log.d(TAG, "Stopping audio bridge");
 
         unwireBridge(state);
         state.active = false;
+        state.wiredGeneration = NO_GENERATION;
+        if (generation == ANY_GENERATION) {
+            // A full teardown means the gateway has no current call, so nothing can be stale
+            // relative to one. Leaving the high-water mark up would refuse the next call
+            // after a process-scoped counter had moved on elsewhere.
+            state.newestGeneration = NO_GENERATION;
+        }
 
         if (listener != null) {
             listener.onBridgeStopped();
