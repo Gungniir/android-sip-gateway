@@ -5,9 +5,6 @@ import android.util.Log;
 
 import org.onetwoone.gateway.config.GatewayConfig;
 
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
@@ -34,8 +31,19 @@ public class QualcommAudioProfile implements AudioProfile {
     private static final int SAMPLE_RATE = 8000;
     private static final int CHANNELS = 1;
 
-    /** Value saved for a " Volume" control that could not be read. */
-    private static final int VOLUME_READ_FALLBACK = 84;
+    /**
+     * Passed as {@code getValue}'s fallback so that "unreadable" comes back as a value no
+     * control can legitimately hold, instead of a plausible-looking one.
+     *
+     * <p>It used to be {@code VOLUME_READ_FALLBACK = 84} — a hardcoded guess at the resting
+     * value of {@code DEC* Volume} — and because the read path was dead (AUDIT <b>B1e</b>:
+     * it shelled out to a {@code tinymix} that is not installed), <em>every</em> saved
+     * "original" was that guess, with nothing ever read. It is also the wrong guess: the
+     * measured resting value on lavender is <b>0</b>, so teardown wrote a value that was
+     * wrong rather than merely unverified. Only B1d's kernel refusal kept it from doing
+     * visible damage.
+     */
+    private static final int VALUE_UNREADABLE = -1;
 
     private final MixerControls mixer;
     private final int captureDevice;
@@ -67,13 +75,17 @@ public class QualcommAudioProfile implements AudioProfile {
 
     /** Visible for testing: inject a fake mixer backend. */
     QualcommAudioProfile(Context context, GatewayConfig config, MixerControls mixer) {
-        Context appContext = context.getApplicationContext();
+        // context unused since the tinymix reader went away (B1e); kept for signature
+        // symmetry with MediaTekAudioProfile and AudioProfileFactory.
         this.captureDevice = config.getCaptureDevice();
         this.playbackDevice = config.getPlaybackDevice();
         this.multimediaRoute = config.getMultimediaRoute();
         this.micMuteControls =
                 Collections.unmodifiableList(new ArrayList<>(config.getAllMuteControls()));
-        this.mixer = mixer != null ? mixer : new TinymixControls(appContext);
+        // Reads and writes both go through the tinyalsa JNI bridge. They used to split:
+        // writes native, reads through a private TinymixControls that shelled out to a
+        // `tinymix` binary present on neither test device (AUDIT B1e).
+        this.mixer = mixer != null ? mixer : MixerControls.NATIVE;
     }
 
     @Override public String name() { return "Qualcomm"; }
@@ -116,21 +128,50 @@ public class QualcommAudioProfile implements AudioProfile {
             // Mute ALL configured controls (microphone DECs + speaker EAR_S/SPK)
             // Different devices use different DECs, so we mute ALL of them
             // Types: Volume controls (INT), MUX controls (ENUM), Speaker controls (ENUM)
+            //
+            // A control whose original cannot be read is left alone. Muting something that
+            // cannot be restored is exactly how AUDIT B1c bricked the microphone, and it is
+            // the policy DeviceMuteManager already applies (its muteInt/muteEnum are called
+            // with requireRead=true everywhere). Skipping it costs at worst some local mic
+            // bleed onto the GSM leg for one call; the alternative costs the mic until
+            // reboot.
+            //
+            // enforceMixer() still re-asserts the whole static list every 2 s and does not
+            // know about this skip - by contract it reads only the static control lists.
+            // That is sound here because the two failure modes coincide: the native getter
+            // fails when the mixer cannot be opened or the control does not exist, and in
+            // both of those cases the corresponding native *write* fails too, so enforce's
+            // re-assert is a logged no-op rather than an unrestorable mute.
             Map<String, Integer> originalValues = new LinkedHashMap<>();
             Map<String, String> originalEnumValues = new LinkedHashMap<>();
             for (String decControl : micMuteControls) {
                 if (decControl.contains(" Volume")) {
-                    int originalValue = mixer.getValue(card, decControl, VOLUME_READ_FALLBACK);
+                    int originalValue = mixer.getValue(card, decControl, VALUE_UNREADABLE);
+                    if (originalValue < 0) {
+                        Log.w(TAG, "Not muting '" + decControl + "': its current value could "
+                                + "not be read, so it could not be restored");
+                        continue;
+                    }
                     originalValues.put(decControl, originalValue);
                     mixer.setValue(card, decControl, 0);
                     Log.d(TAG, "Muted: " + decControl + " = 0 (original=" + originalValue + ")");
                 } else if (decControl.contains(" MUX")) {
                     String originalValue = mixer.getEnum(card, decControl);
+                    if (originalValue == null || originalValue.isEmpty()) {
+                        Log.w(TAG, "Not muting '" + decControl + "': its current value could "
+                                + "not be read, so it could not be restored");
+                        continue;
+                    }
                     originalEnumValues.put(decControl, originalValue);
                     mixer.setEnum(card, decControl, "ZERO");
                     Log.d(TAG, "Muted: " + decControl + " = ZERO (original=" + originalValue + ")");
                 } else if (decControl.equals("EAR_S") || decControl.equals("SPK")) {
                     String originalValue = mixer.getEnum(card, decControl);
+                    if (originalValue == null || originalValue.isEmpty()) {
+                        Log.w(TAG, "Not muting speaker '" + decControl + "': its current value "
+                                + "could not be read, so it could not be restored");
+                        continue;
+                    }
                     originalEnumValues.put(decControl, originalValue);
                     mixer.setEnum(card, decControl, "ZERO");
                     Log.d(TAG, "Speaker muted: " + decControl + " = ZERO (original="
@@ -215,71 +256,12 @@ public class QualcommAudioProfile implements AudioProfile {
         }
     }
 
-    /**
-     * Production backend for this profile: writes go through the tinyalsa JNI
-     * bridge, reads go through tinymix — INT via {@code su -c tinymix}, ENUM via
-     * the tinymix binary extracted into the app's files dir. Lifted verbatim out
-     * of the profile so the state handling above can be unit-tested.
-     */
-    private static final class TinymixControls implements MixerControls {
-        private final Context context;
-
-        TinymixControls(Context context) {
-            this.context = context;
-        }
-
-        @Override
-        public boolean setValue(int card, String control, int value) {
-            return MixerControls.NATIVE.setValue(card, control, value);
-        }
-
-        @Override
-        public boolean setEnum(int card, String control, String value) {
-            return MixerControls.NATIVE.setEnum(card, control, value);
-        }
-
-        /** Read current INT mixer control value via tinymix. */
-        @Override
-        public int getValue(int card, String control, int fallback) {
-            try {
-                Process p = Runtime.getRuntime().exec(new String[]{
-                    "su", "-c", "tinymix -D " + card + " get \"" + control + "\""
-                });
-                BufferedReader reader =
-                        new BufferedReader(new InputStreamReader(p.getInputStream()));
-                String line = reader.readLine();
-                p.waitFor();
-                if (line != null) {
-                    String[] parts = line.trim().split("\\s+");
-                    if (parts.length > 0) {
-                        return Integer.parseInt(parts[0]);
-                    }
-                }
-            } catch (Exception e) {
-                Log.e(TAG, "Failed to read mixer control " + control + ": " + e.getMessage());
-            }
-            return fallback;
-        }
-
-        /** Read current ENUM mixer control value via the extracted tinymix binary. */
-        @Override
-        public String getEnum(int card, String control) {
-            try {
-                File tinymixFile = new File(context.getFilesDir(), "tinymix");
-                Process p = Runtime.getRuntime().exec(new String[]{
-                    tinymixFile.getAbsolutePath(), "-D", String.valueOf(card), "get", control
-                });
-                BufferedReader reader =
-                        new BufferedReader(new InputStreamReader(p.getInputStream()));
-                String line = reader.readLine();
-                p.waitFor();
-                if (line != null) {
-                    return line.trim();
-                }
-            } catch (Exception e) {
-                Log.e(TAG, "Failed to read mixer control ENUM " + control + ": " + e.getMessage());
-            }
-            return "";
-        }
-    }
+    // The private TinymixControls backend that used to live here is gone (AUDIT B1e).
+    // It is not "dead code GW-31 will sweep" - it is the defect: its getValue shelled out
+    // to `su -c 'tinymix -D 0 get "DEC1 Volume"'` on devices with no tinymix at all
+    // (exit 127, stdout empty, readLine() null, fallback returned), and its getEnum exec'd
+    // filesDir/tinymix, which QualcommAudioProfile never extracted - only the UI-path
+    // ui/TinymixManager does. Both readers were dead, neither drained stderr, and both
+    // p.waitFor() calls were unbounded. Everything they did is now one JNI ioctl through
+    // MixerControls.NATIVE.
 }

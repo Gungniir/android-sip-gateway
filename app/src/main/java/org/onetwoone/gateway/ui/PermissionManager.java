@@ -7,6 +7,8 @@ import android.util.Log;
 import androidx.lifecycle.LiveData;
 import androidx.lifecycle.MutableLiveData;
 
+import org.onetwoone.gateway.RootHelper;
+
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
@@ -118,30 +120,32 @@ public class PermissionManager {
         });
     }
 
+    // All three root paths below went through a bare Runtime.exec + unbounded waitFor(),
+    // with neither pipe drained: a hung `su` blocked this executor for good, and a chatty
+    // command could deadlock it (GW-20 §4 / AUDIT H1). They also logged unconditional
+    // success. RootHelper bounds, drains and reports the exit code.
+
     private void grantPermissionsViaRoot() {
         for (String perm : REQUIRED_PERMISSIONS) {
-            try {
-                Process p = Runtime.getRuntime().exec(new String[]{
-                    "su", "-c", "pm grant " + packageName + " " + perm
-                });
-                p.waitFor();
+            RootHelper.RootResult result = RootHelper.run("pm grant " + packageName + " " + perm);
+            if (result.success()) {
                 Log.d(TAG, "Granted via root: " + perm);
-            } catch (Exception e) {
-                Log.e(TAG, "Failed to grant " + perm + ": " + e.getMessage());
+            } else {
+                Log.e(TAG, "Failed to grant " + perm + " (exit " + result.exitCode() + "): "
+                        + result.stderr());
             }
         }
     }
 
     private void setDefaultDialerViaRoot() {
-        try {
-            // Use RoleManager via cmd role - required for InCallService binding
-            Process p = Runtime.getRuntime().exec(new String[]{
-                "su", "-c", "cmd role add-role-holder android.app.role.DIALER " + packageName
-            });
-            p.waitFor();
+        // Use RoleManager via cmd role - required for InCallService binding
+        RootHelper.RootResult result = RootHelper.run(
+                "cmd role add-role-holder android.app.role.DIALER " + packageName);
+        if (result.success()) {
             Log.d(TAG, "Set as default dialer via cmd role");
-        } catch (Exception e) {
-            Log.e(TAG, "Failed to set default dialer: " + e.getMessage());
+        } else {
+            Log.e(TAG, "Failed to set default dialer (exit " + result.exitCode() + "): "
+                    + result.stderr());
         }
     }
 
@@ -151,14 +155,13 @@ public class PermissionManager {
      */
     public void disableBatteryOptimizationAsync() {
         executor.execute(() -> {
-            try {
-                Process p = Runtime.getRuntime().exec(new String[]{
-                    "su", "-c", "dumpsys deviceidle whitelist +" + packageName
-                });
-                p.waitFor();
+            RootHelper.RootResult result =
+                    RootHelper.run("dumpsys deviceidle whitelist +" + packageName);
+            if (result.success()) {
                 Log.d(TAG, "Disabled battery optimization via root");
-            } catch (Exception e) {
-                Log.e(TAG, "Failed to disable battery optimization: " + e.getMessage());
+            } else {
+                Log.e(TAG, "Failed to disable battery optimization (exit " + result.exitCode()
+                        + "): " + result.stderr());
             }
         });
     }
