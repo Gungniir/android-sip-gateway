@@ -10,8 +10,7 @@
   produced. That distinction is the single most useful signal on a diagnostic screen -
   monospace means "this is the device talking, not us".
 -->
-<resources xmlns:tools="http://schemas.android.com/tools"
-           tools:ignore="UnusedResources">
+<resources xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Screen title. One per screen. -->
     <style name="TextAppearance.Gateway.Display" parent="TextAppearance.MaterialComponents.Headline5">

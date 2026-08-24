@@ -7,6 +7,9 @@
   blindness" failure class PHASE-4-VALIDATION section 0 names: a spinner that renders its
   text in a colour inherited from somewhere other than the app's palette, and so goes
   invisible in exactly one theme. Naming the token here removes the indirection.
+
+  paddingStart is 0 on purpose: the Spinner's own background already insets its content on
+  that side. It is stated rather than omitted so the start/end pair reads as deliberate.
 -->
 <TextView xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@android:id/text1"
@@ -16,7 +19,7 @@
     android:gravity="center_vertical"
     android:paddingTop="@dimen/gw_space_sm"
     android:paddingBottom="@dimen/gw_space_sm"
-    android:paddingRight="@dimen/gw_space_lg"
+    android:paddingStart="0dp"
     android:paddingEnd="@dimen/gw_space_lg"
     android:textAppearance="@style/TextAppearance.Gateway.Body"
     android:textColor="@color/gw_on_surface"

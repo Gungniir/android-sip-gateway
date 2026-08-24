@@ -115,8 +115,7 @@
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:orientation="vertical"
-                android:layout_marginEnd="@dimen/gw_space_sm"
-                android:layout_marginRight="@dimen/gw_space_sm">
+                android:layout_marginEnd="@dimen/gw_space_sm">
 
                 <TextView
                     style="@style/Widget.Gateway.Label"
@@ -212,7 +211,7 @@
 
         <LinearLayout
             style="@style/Widget.Gateway.ButtonBar"
-            android:layout_marginTop="@dimen/gw_space_md">
+            android:layout_marginTop="@dimen/gw_space_xl">
 
             <Button
                 android:id="@+id/saveAudioButton"
@@ -229,7 +228,6 @@
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:layout_marginStart="@dimen/gw_space_sm"
-                android:layout_marginLeft="@dimen/gw_space_sm"
                 android:text="@string/action_restart"/>
         </LinearLayout>
 

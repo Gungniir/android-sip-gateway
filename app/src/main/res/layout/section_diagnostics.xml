@@ -56,13 +56,12 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:layout_marginStart="@dimen/gw_space_sm"
-                android:layout_marginLeft="@dimen/gw_space_sm"/>
+                android:layout_marginStart="@dimen/gw_space_sm"/>
         </LinearLayout>
 
         <LinearLayout
             style="@style/Widget.Gateway.ButtonBar"
-            android:layout_marginTop="@dimen/gw_space_sm">
+            android:layout_marginTop="@dimen/gw_row_gap">
 
             <Button
                 android:id="@+id/testCallButton"
@@ -79,7 +78,6 @@
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:layout_marginStart="@dimen/gw_space_sm"
-                android:layout_marginLeft="@dimen/gw_space_sm"
                 android:text="@string/action_hang_up"/>
         </LinearLayout>
 

@@ -105,7 +105,6 @@
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:layout_marginStart="@dimen/gw_space_sm"
-                android:layout_marginLeft="@dimen/gw_space_sm"
                 android:hint="@string/hint_sim2_destination"
                 android:inputType="text"
                 android:importantForAutofill="no"/>
@@ -141,7 +140,7 @@
 
         <LinearLayout
             style="@style/Widget.Gateway.ButtonBar"
-            android:layout_marginTop="@dimen/gw_space_sm">
+            android:layout_marginTop="@dimen/gw_row_gap">
 
             <Button
                 android:id="@+id/saveButton"
@@ -158,7 +157,6 @@
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:layout_marginStart="@dimen/gw_space_sm"
-                android:layout_marginLeft="@dimen/gw_space_sm"
                 android:text="@string/action_connect"/>
 
             <Button
@@ -168,7 +166,6 @@
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:layout_marginStart="@dimen/gw_space_sm"
-                android:layout_marginLeft="@dimen/gw_space_sm"
                 android:text="@string/action_disconnect"/>
         </LinearLayout>
 

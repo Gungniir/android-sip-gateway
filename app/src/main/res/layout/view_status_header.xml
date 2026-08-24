@@ -21,6 +21,11 @@
     android:id="@+id/statusHeader"
     style="@style/Widget.Gateway.Panel">
 
+    <TextView
+        style="@style/Widget.Gateway.SectionHeader"
+        android:paddingTop="0dp"
+        android:text="@string/label_status"/>
+
     <!-- Chip row: SIP state, call state, grace marker, and the running call duration. -->
     <LinearLayout
         android:layout_width="match_parent"
@@ -38,14 +43,12 @@
             android:id="@+id/callChip"
             style="@style/Widget.Gateway.StatusChip.Idle"
             android:layout_marginStart="@dimen/gw_space_xs"
-            android:layout_marginLeft="@dimen/gw_space_xs"
             android:text="@string/label_status_call"/>
 
         <TextView
             android:id="@+id/graceChip"
             style="@style/Widget.Gateway.StatusChip.Warn"
             android:layout_marginStart="@dimen/gw_space_xs"
-            android:layout_marginLeft="@dimen/gw_space_xs"
             android:text="@string/chip_grace"
             android:visibility="gone"/>
 

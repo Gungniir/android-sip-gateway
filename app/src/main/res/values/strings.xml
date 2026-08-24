@@ -200,7 +200,7 @@
     <!-- Call-object counters (GW-22). "alive" is callsCreated - callsDeleted and is the
          number that must settle at 0 or 1; a climbing value means CallGraveyard is leaking
          pjsua2 Call objects to the finalizer. -->
-    <string name="status_call_objects">pjsua2 calls: %1$d alive · %2$d created · %3$d deleted</string>
+    <string name="status_call_objects">pjsua2 calls — alive %1$d · created %2$d · deleted %3$d</string>
 
     <!--
       The watchdog block (GW-25).
@@ -214,7 +214,7 @@
     -->
     <string name="label_status_watchdog">Watchdog</string>
     <string name="status_watchdog_clean">No findings</string>
-    <string name="status_watchdog_counts">%1$d terminated · %2$d silent bridge</string>
+    <string name="status_watchdog_counts">terminated %1$d · silent bridge %2$d</string>
     <string name="status_watchdog_last">Last: %1$s (%2$s)</string>
 
     <!-- Relative ages, for the last watchdog finding. Kept as three resources rather than
