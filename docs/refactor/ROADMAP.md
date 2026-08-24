@@ -123,6 +123,7 @@ assertion armed.
 | [GW-24](issues/GW-24-config-consistency.md) | H4 — key mismatch, atomic prefs writes |
 | [GW-25](issues/GW-25-watchdog-invariants.md) | H9 — both orphan directions + fail-safe deadlines |
 | [GW-26](issues/GW-26-service-lifecycle.md) | G2, H8 — non-blocking shutdown, guarded teardown |
+| [GW-27](issues/GW-27-sms-duplicate-suppression.md) | H13 — the whole inbox is re-forwarded on every restart |
 
 ### Phase 3 — Hardening
 
@@ -178,6 +179,7 @@ Phase 1:  GW-10 ──┬─→ GW-11 ─┐
 
 Phase 2:  GW-20, GW-21, GW-22, GW-23, GW-24 — independent, parallel
           GW-25, GW-26 — after GW-10
+          GW-27 — after GW-20 (consumes its execRoot result contract)
 
 Phase 3:  GW-30, GW-31 — anytime
           GW-32 — after Phase 1

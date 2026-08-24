@@ -1006,6 +1006,56 @@ not the reload's.
 
 ---
 
+#### H13. Every forwarded SMS is re-forwarded after a restart — NEW, P1, user-visible
+Reported from the field (13:04 on merlinx) and reproduced from the device log in the same
+session. Three independent defects stack into one symptom: **the gateway re-sends the entire
+inbox to the PBX every time the process restarts.**
+
+1. **The app is not the default SMS app**, so `SmsHandler.markAsRead`'s
+   `ContentResolver.update(content://sms/<id>, read=1)` is refused and returns 0. The log
+   line is `Normal update failed for SMS id=N, trying root`.
+2. **The root fallback runs a binary that does not exist.** `markAsReadWithRoot` shells out
+   to `sqlite3 <mmssms.db> "UPDATE sms SET read=1 ..."`. There is no `sqlite3` on either test
+   device — `su -c 'which sqlite3'` fails, and running the app's exact command returns
+   `/system/bin/sh: sqlite3: inaccessible or not found`, **exit 127**.
+3. **`RootHelper.execRoot` reports that failure as success.** It logs the non-zero exit code
+   and then returns `output.toString().trim()` regardless — an empty string, never `null`.
+   `markAsReadWithRoot`'s `if (result != null)` is therefore always true, so it logs
+   `Marked SMS id=N as read (root sqlite3)` for a command that did nothing. The false success
+   is why this went unnoticed: the logs claim the inbox is being drained.
+
+The read flag is consequently never written. The **only** thing preventing re-delivery is
+`SmsHandler.processedSmsIds`, an in-memory `HashSet` (see H12) that starts empty on every
+process start, while `processInbox`'s `selection = "read = 0"` still matches every message
+ever received. The device log shows the closed loop exactly:
+
+```
+13:04:25  [1] processInbox START, processedIds=[]        <- fresh process
+13:04:25  [1] Found 9 unread SMS                          <- all 9 re-forwarded
+13:04:27  Marked SMS id=8 as read (root sqlite3)          <- false success, x9
+13:04:27  [2] Found 9 unread SMS                          <- count never drops
+13:09:21  [3] Found 9 unread SMS
+13:14:15  [4] Found 9 unread SMS
+```
+
+**A working mechanism exists on-device and was verified:** `/system/bin/content` is present,
+and `su -c 'content update --uri content://sms/1 --bind read:i:1'` returns exit 0 and the row
+flips to `read=1`. That is the natural replacement for the `sqlite3` path.
+
+**But the read flag must not be the only defence.** It is provider state the app cannot be
+sure of writing on an arbitrary device or Android version. `processedSmsIds` must be
+persisted (and pruned by date) so that duplicate suppression survives a restart even when the
+flag write fails. Fixing only the flag would leave the same class of bug one OEM away.
+
+Also note the blast radius grows with `processInbox`'s trigger set: it runs on the
+`ContentObserver`, at `start()`, and on every SIP re-registration
+(`PjsipSipService`'s registration handler), so a flapping registration replays the burst
+without any process restart at all.
+
+→ New issue **GW-27**. Related: **H12** (same set, threading), **H1** / **GW-20**
+(`execRoot`'s return contract is the root cause of defect 3, and it is not SMS-specific —
+*every* caller that tests `execRoot(...) != null` for success is equally blind).
+
 ### P2 — security posture
 
 #### S1. Exported control receiver with no permission
