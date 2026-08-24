@@ -97,7 +97,33 @@ public class PjsipSipService extends Service implements SipCallService {
     // Telephony
     private TelephonyManager telephonyManager;
     private PhoneStateListener phoneStateListener;
+
+    /**
+     * The modem's process-wide call state, as last reported by {@link #phoneStateListener}.
+     *
+     * <p>Since GW-13 this is <b>observational only</b>. It drives nothing: it is compared
+     * against the Telecom-tracked leg in {@link #handlePhoneState(int, String)} so a
+     * discrepancy between the two sources is visible in the log, and that is all it does.
+     */
+    @ControlThread
     private int lastPhoneState = TelephonyManager.CALL_STATE_IDLE;
+
+    /**
+     * The GSM leg this service is bridging, or {@link GatewayInCallService#NO_GSM_CALL}
+     * (GW-13). Adopted when Telecom reports the leg ACTIVE and cleared when its end is
+     * processed; confined to the control thread.
+     */
+    @ControlThread
+    private long currentGsmCallId = GatewayInCallService.NO_GSM_CALL;
+
+    /**
+     * The last GSM leg whose end was processed. Together with {@link #currentGsmCallId} this
+     * makes teardown exactly-once per leg: the {@code DISCONNECTED} callback and the
+     * {@code onCallRemoved} backstop both name the same id, so the second one to arrive is a
+     * logged no-op rather than a second {@code stopAudioStreams()}.
+     */
+    @ControlThread
+    private long lastEndedGsmCallId = GatewayInCallService.NO_GSM_CALL;
 
     /**
      * The {@link DeviceMuteManager} lease held by the GSM call that is currently up, or
@@ -751,52 +777,70 @@ public class PjsipSipService extends Service implements SipCallService {
         telephonyManager.listen(phoneStateListener, PhoneStateListener.LISTEN_CALL_STATE);
     }
 
+    /**
+     * <b>Cross-check only since GW-13.</b> This used to be the second, competing driver of the
+     * GSM transitions: it called {@code startAudioStreams()}/{@code onGsmCallConnected()} on
+     * OFFHOOK and the stop pair on IDLE, racing the Telecom {@code Call.Callback} path with no
+     * ordering guarantee between them (AUDIT D3). It now mutates nothing.
+     *
+     * <p>It is kept rather than deleted because the modem's own view is the only independent
+     * witness to a GSM leg the {@code InCallService} never told us about, and the experiment
+     * that would retire that risk - a logging-only build run for a day, per the issue's
+     * §Risk - has not been run. A discrepancy here is logged loudly and is a finding, not a
+     * repair: repairing from this path is exactly what GW-13 removed.
+     */
     @ControlThread
     private void handlePhoneState(int state, String phoneNumber) {
         control.assertOnControlThread("handlePhoneState");
         Log.d(TAG, "Phone state: " + state);
 
-        if (state == TelephonyManager.CALL_STATE_OFFHOOK && lastPhoneState != TelephonyManager.CALL_STATE_OFFHOOK) {
-            // GSM call active
-            audioBridge.startAudioStreams();
-            callManager.onGsmCallConnected();
-        }
-
-        if (state == TelephonyManager.CALL_STATE_IDLE && lastPhoneState != TelephonyManager.CALL_STATE_IDLE) {
-            // GSM call ended. Always stop the audio streams so the mixer routing
-            // is torn down even for calls that never reached the BRIDGED state
-            // (otherwise the enforce thread would keep the local mic muted).
-            audioBridge.stopAudioStreams();
-            callManager.onGsmCallEnded();
+        if (state != lastPhoneState) {
+            boolean telecomLegUp = currentGsmCallId != GatewayInCallService.NO_GSM_CALL;
+            if (state == TelephonyManager.CALL_STATE_OFFHOOK && !telecomLegUp) {
+                Log.w(TAG, "GSM source cross-check: modem is OFFHOOK but Telecom has not"
+                        + " reported an active leg - InCallService may have missed a call");
+            } else if (state == TelephonyManager.CALL_STATE_IDLE && telecomLegUp) {
+                Log.w(TAG, "GSM source cross-check: modem is IDLE but GSM leg "
+                        + currentGsmCallId + " is still tracked - a DISCONNECTED may have"
+                        + " been missed, and the audio streams are still up");
+            }
         }
 
         lastPhoneState = state;
-        publishStatus();
     }
 
     /** Called from {@code GatewayInCallService} on main. */
-    public void onIncomingGsmCall(String callerNumber, int simSlot) {
-        control.runOrPost(() -> handleIncomingGsmCall(callerNumber, simSlot));
+    public void onIncomingGsmCall(String callerNumber, int simSlot, long gsmCallId) {
+        control.runOrPost(() -> handleIncomingGsmCall(callerNumber, simSlot, gsmCallId));
     }
 
     @ControlThread
-    private void handleIncomingGsmCall(String callerNumber, int simSlot) {
+    private void handleIncomingGsmCall(String callerNumber, int simSlot, long gsmCallId) {
         control.assertOnControlThread("handleIncomingGsmCall");
         powerController.wakeScreen();
         // Ends up in makeSipCallWithCallerId via the listener, which asserts it is on this
         // thread - the dial and the DISCONNECTED it can provoke must share one queue.
-        callManager.onIncomingGsmCall(callerNumber, simSlot);
+        callManager.onIncomingGsmCall(callerNumber, simSlot, gsmCallId);
         publishStatus();
     }
 
     /**
      * Called from {@code GatewayInCallService}'s Telecom callback, on main.
      *
+     * <p><b>Since GW-13 this is the single source of truth for the GSM leg.</b> The
+     * {@code PhoneStateListener} path no longer drives anything (see
+     * {@link #handlePhoneState(int, String)}); this one does, because it is the only one that
+     * carries call identity and therefore the only one that can tell a late event for a
+     * finished call apart from a live event for the current one.
+     *
      * <p>The incoming-timeout cancel stays on main deliberately:
      * {@code GatewayInCallService}'s timeout state is main-owned and asserts it. Everything
      * that touches the bridge, the state machine or the mute lease is posted.
+     *
+     * @param gsmCallId the leg's identity, or {@link GatewayInCallService#NO_GSM_CALL} when
+     *                  the callback belongs to a call the InCallService no longer tracks
      */
-    public void onGsmCallStateChanged(android.telecom.Call call, int state) {
+    public void onGsmCallStateChanged(android.telecom.Call call, long gsmCallId, int state) {
         if (state == android.telecom.Call.STATE_ACTIVE) {
             // Cancel incoming timeout - call is now bridged
             GatewayInCallService inCallService = GatewayInCallService.getInstance();
@@ -804,49 +848,142 @@ public class PjsipSipService extends Service implements SipCallService {
                 inCallService.cancelIncomingTimeout();
             }
         }
-        control.post(() -> handleGsmCallState(state));
+        control.post(() -> handleGsmCallState(gsmCallId, state));
     }
 
-    @ControlThread
-    private void handleGsmCallState(int state) {
-        control.assertOnControlThread("handleGsmCallState");
-        if (state == android.telecom.Call.STATE_ACTIVE) {
-            // Start audio immediately (don't wait for mute)
-            audioBridge.startAudioStreams();
-            callManager.onGsmCallConnected();
+    /**
+     * Telecom reported that the tracked GSM leg was removed. The {@code DISCONNECTED} state
+     * callback has normally already run the teardown, in which case this is a logged no-op;
+     * it exists as the plan §3d backstop for the case where that callback never arrives.
+     */
+    public void onGsmCallRemoved(long gsmCallId) {
+        control.post(() -> {
+            handleGsmCallEnded(gsmCallId, "call removed");
+            publishStatus();
+        });
+    }
 
-            // Mute device speaker/mic in background (takes ~6 seconds).
-            // Skipped when the SoC audio profile mutes the mic as part of its
-            // routing (e.g. MediaTek disables PCM_2_PB <- ADDA_UL in setupMixer).
-            if (!audioBridge.handlesMicMute()) {
-                // This call takes out a mute lease. acquire() returns immediately; the
-                // ~6 s of tinymix runs on DeviceMuteManager's own thread. If the call ends
-                // first, release() cancels it before or during the writes, so the mute can
-                // never land after the hangup and strand the mic (AUDIT B1).
-                DeviceMuteManager mute = DeviceMuteManager.getInstance(this);
-                long lease = mute.newLease();
-                long stale = muteLease.getAndSet(lease);
-                if (stale != DeviceMuteManager.NO_LEASE) {
-                    // No DISCONNECTED arrived for the previous call. Hand its controls back
-                    // before this lease reads them, or its originals are lost for good.
-                    Log.w(TAG, "GSM call became active while lease " + stale + " was still held");
-                    mute.release(stale);
-                }
-                mute.acquire(lease);
-            } else {
-                Log.d(TAG, "Mic mute handled by audio profile - skipping DeviceMuteManager");
-            }
+    /** Package-private rather than private so {@code GsmCallLifecycleTest} can drive it. */
+    @ControlThread
+    void handleGsmCallState(long gsmCallId, int state) {
+        control.assertOnControlThread("handleGsmCallState");
+
+        if (state == android.telecom.Call.STATE_ACTIVE) {
+            handleGsmCallConnected(gsmCallId);
         } else if (state == android.telecom.Call.STATE_DISCONNECTED) {
-            callManager.onGsmCallEnded();
-            // Restore device speaker/mic. Driven by the lease rather than by
-            // handlesMicMute(), so a profile that changed mid-call cannot strand a mute we
-            // took out earlier. Non-blocking: AUDIT H2c, this path must not grow.
-            long lease = muteLease.getAndSet(DeviceMuteManager.NO_LEASE);
-            if (lease != DeviceMuteManager.NO_LEASE) {
-                DeviceMuteManager.getInstance(this).release(lease);
-            }
+            handleGsmCallEnded(gsmCallId, "disconnected");
         }
         publishStatus();
+    }
+
+    /**
+     * Idempotent per leg (GW-13 §4): the second ACTIVE for a leg already up does nothing, so
+     * the audio streams are started once and exactly one {@link DeviceMuteManager} lease is
+     * taken out per call.
+     */
+    @ControlThread
+    private void handleGsmCallConnected(long gsmCallId) {
+        if (gsmCallId == GatewayInCallService.NO_GSM_CALL) {
+            Log.w(TAG, "GSM ACTIVE for a call the InCallService is not tracking - ignoring");
+            return;
+        }
+        if (gsmCallId == currentGsmCallId) {
+            Log.d(TAG, "GSM call " + gsmCallId + " is already active - ignoring duplicate");
+            return;
+        }
+        if (gsmCallId == lastEndedGsmCallId) {
+            Log.w(TAG, "GSM ACTIVE for call " + gsmCallId + " which has already ended - ignoring");
+            return;
+        }
+        if (currentGsmCallId != GatewayInCallService.NO_GSM_CALL) {
+            // The previous leg never reported its end. Its teardown is now unreachable by id,
+            // so say so rather than let it look like a clean handover.
+            Log.w(TAG, "GSM call " + gsmCallId + " became active while " + currentGsmCallId
+                    + " was still tracked");
+        }
+        currentGsmCallId = gsmCallId;
+
+        // Start audio immediately (don't wait for mute)
+        audioBridge.startAudioStreams();
+        callManager.onGsmCallConnected(gsmCallId);
+
+        // Mute device speaker/mic in background (takes ~6 seconds).
+        // Skipped when the SoC audio profile mutes the mic as part of its
+        // routing (e.g. MediaTek disables PCM_2_PB <- ADDA_UL in setupMixer).
+        if (!audioBridge.handlesMicMute()) {
+            // This call takes out a mute lease. acquire() returns immediately; the
+            // ~6 s of tinymix runs on DeviceMuteManager's own thread. If the call ends
+            // first, release() cancels it before or during the writes, so the mute can
+            // never land after the hangup and strand the mic (AUDIT B1).
+            DeviceMuteManager mute = DeviceMuteManager.getInstance(this);
+            long lease = mute.newLease();
+            long stale = muteLease.getAndSet(lease);
+            if (stale != DeviceMuteManager.NO_LEASE) {
+                // No DISCONNECTED arrived for the previous call. Hand its controls back
+                // before this lease reads them, or its originals are lost for good.
+                Log.w(TAG, "GSM call became active while lease " + stale + " was still held");
+                mute.release(stale);
+            }
+            mute.acquire(lease);
+        } else {
+            Log.d(TAG, "Mic mute handled by audio profile - skipping DeviceMuteManager");
+        }
+    }
+
+    /**
+     * The one GSM teardown path (GW-13 §1, plan §3d).
+     *
+     * <p>Before GW-13 this work was split: {@code handlePhoneState}'s IDLE branch stopped the
+     * audio streams <em>unconditionally</em>, while this Telecom path only told
+     * {@code CallManager}. That mattered because GW-11 made {@code terminateAllCalls()} return
+     * early when the machine is already {@code IDLE} - so for a leg that never reached
+     * {@code BRIDGED} (the SIP leg refused, or the GSM leg hung up during ring, or a modem
+     * that goes ACTIVE for a moment after the session was already torn down)
+     * {@code onCallsTerminated()} never fires and never stops the streams. Deleting the
+     * listener's branch without moving that call here would leave such a leg with no teardown
+     * at all, and the symptom is the one GW-08 was written to kill: an orphaned
+     * {@code MixerEnforce} thread re-asserting the call routing and the mic mute every 2 s
+     * with no PCM and no call - a phone with a dead microphone until reboot.
+     *
+     * <p>So {@code AudioBridgeManager.stopAudioStreams()} runs here <b>independently of
+     * {@code CallManager}'s state</b>. The only thing that can suppress it is identity: an end
+     * naming a leg while a <em>different</em> leg is current is the stale-stop scenario
+     * (call 1's teardown arriving after call 2 connected) and must not tear down the live
+     * call's audio. An end for a leg already torn down is a no-op, which is what keeps it to
+     * exactly one {@code Audio streams stopped} per call even with the {@code onCallRemoved}
+     * backstop wired in.
+     */
+    @ControlThread
+    private void handleGsmCallEnded(long gsmCallId, String reason) {
+        control.assertOnControlThread("handleGsmCallEnded");
+
+        if (gsmCallId != GatewayInCallService.NO_GSM_CALL && gsmCallId == lastEndedGsmCallId) {
+            Log.d(TAG, "GSM call " + gsmCallId + " already ended (" + reason + ") - ignoring");
+            return;
+        }
+        if (currentGsmCallId != GatewayInCallService.NO_GSM_CALL
+                && gsmCallId != currentGsmCallId) {
+            Log.w(TAG, "GSM end for call " + gsmCallId + " (" + reason + ") while "
+                    + currentGsmCallId + " is the current leg - ignoring, it would tear down"
+                    + " the live call's audio");
+            return;
+        }
+
+        Log.d(TAG, "GSM call " + gsmCallId + " ended (" + reason + ")");
+        lastEndedGsmCallId = gsmCallId;
+        currentGsmCallId = GatewayInCallService.NO_GSM_CALL;
+
+        // Unconditional, and before the state machine is told: see the note above.
+        audioBridge.stopAudioStreams();
+        callManager.onGsmCallEnded(gsmCallId);
+
+        // Restore device speaker/mic. Driven by the lease rather than by
+        // handlesMicMute(), so a profile that changed mid-call cannot strand a mute we
+        // took out earlier. Non-blocking: AUDIT H2c, this path must not grow.
+        long lease = muteLease.getAndSet(DeviceMuteManager.NO_LEASE);
+        if (lease != DeviceMuteManager.NO_LEASE) {
+            DeviceMuteManager.getInstance(this).release(lease);
+        }
     }
 
     // ========== SMS Handling ==========
@@ -979,9 +1116,8 @@ public class PjsipSipService extends Service implements SipCallService {
 
     /**
      * The watchdog tick. Since GW-15 the timer fires on the control looper as well, so this is
-     * the timer action itself rather than a hop off main - which matters because it reads
-     * {@link #lastPhoneState} and can terminate calls, and is now ordered against every other
-     * event that touches them.
+     * the timer action itself rather than a hop off main - which matters because it can
+     * terminate calls, and is now ordered against every other event that touches them.
      *
      * <p>Doubles as the backstop that keeps {@link #status} from going stale between call
      * events.
@@ -994,14 +1130,34 @@ public class PjsipSipService extends Service implements SipCallService {
         if (!callManager.hasActiveCall()) return;
         if (callManager.isInGracePeriod()) return;
 
-        // Check if GSM call exists
-        if (lastPhoneState == TelephonyManager.CALL_STATE_IDLE) {
+        // Check if GSM call exists. Since GW-13 this asks Telecom about the leg it is
+        // tracking rather than reading the PhoneStateListener's process-wide lastPhoneState:
+        // that field said "some call is up somewhere", never "*this* call is up", and it is
+        // now observational only.
+        if (!isGsmLegLive()) {
             GatewayCall sipCall = callManager.getCurrentSipCall();
             if (sipCall != null) {
                 Log.w(TAG, "Orphaned SIP call detected, terminating");
                 callManager.terminateAllCalls();
             }
         }
+    }
+
+    /**
+     * Whether Telecom still has a GSM leg that has not begun going away.
+     *
+     * <p>No {@code InCallService} bound means no GSM leg - the gateway only ever sees GSM
+     * calls through it, so this matches the old {@code lastPhoneState == IDLE} default while
+     * being about the tracked call rather than about the modem.
+     */
+    @ControlThread
+    private boolean isGsmLegLive() {
+        GatewayInCallService inCallService = GatewayInCallService.getInstance();
+        if (inCallService == null) {
+            Log.d(TAG, "No InCallService bound - treating the GSM leg as gone");
+            return false;
+        }
+        return inCallService.hasLiveGsmCall();
     }
 
     // ========== Public API ==========

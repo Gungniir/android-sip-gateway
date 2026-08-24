@@ -189,11 +189,11 @@ public class CallManagerTest {
         // Test state transitions via public methods
 
         // After onGsmCallConnected (without active call, should stay IDLE)
-        callManager.onGsmCallConnected();
+        callManager.onGsmCallConnected(1L);
         // State depends on previous state, in IDLE it should remain
 
         // After onGsmCallEnded
-        callManager.onGsmCallEnded();
+        callManager.onGsmCallEnded(1L);
         assertEquals("Should be IDLE after GSM call ended", CallManager.CallState.IDLE, callManager.getState());
     }
 
@@ -689,7 +689,7 @@ public class CallManagerTest {
         GatewayConfig.getInstance().setSim1Destination("2001");
         RecordingListener listener = listen();
 
-        callManager.onIncomingGsmCall("+79161234567", 1);
+        callManager.onIncomingGsmCall("+79161234567", 1, 1L);
 
         assertEquals(CallManager.CallState.GSM_INCOMING, callManager.getState());
         assertEquals("Incoming GSM call", callManager.getStatusString());
@@ -701,14 +701,14 @@ public class CallManagerTest {
     @Test
     public void dialingTheSipLegOfAnInboundGsmCallReachesSipDialingThenBridged() {
         GatewayConfig.getInstance().setSim1Destination("2001");
-        callManager.onIncomingGsmCall("+79161234567", 1);
+        callManager.onIncomingGsmCall("+79161234567", 1, 2L);
 
         assertTrue(callManager.placeOutgoingSipCall(fakeCall(), c -> { }));
         assertEquals(CallManager.CallState.SIP_DIALING, callManager.getState());
         assertEquals("Dialing SIP...", callManager.getStatusString());
 
         // The GSM leg is answered once the PBX picks up.
-        callManager.onGsmCallConnected();
+        callManager.onGsmCallConnected(2L);
         assertEquals(CallManager.CallState.BRIDGED, callManager.getState());
         assertEquals("Call bridged", callManager.getStatusString());
     }
@@ -722,7 +722,7 @@ public class CallManagerTest {
         forceState(CallManager.CallState.GSM_DIALING);
         assertEquals("GSM connecting...", callManager.getStatusString());
 
-        callManager.onGsmCallConnected();
+        callManager.onGsmCallConnected(3L);
         assertEquals(CallManager.CallState.BRIDGED, callManager.getState());
     }
 
@@ -756,16 +756,16 @@ public class CallManagerTest {
         ShadowLog.clear();
 
         // 1. GSM→SIP, answered, then hung up from the GSM side.
-        callManager.onIncomingGsmCall("+79161234567", 1);
+        callManager.onIncomingGsmCall("+79161234567", 1, 101L);
         assertTrue(callManager.placeOutgoingSipCall(fakeCall(), c -> { }));
-        callManager.onGsmCallConnected();
+        callManager.onGsmCallConnected(101L);
         callManager.onSipDtmf("1");
-        callManager.onGsmCallEnded();
+        callManager.onGsmCallEnded(101L);
         assertEquals("GSM-side hangup returns to IDLE",
                 CallManager.CallState.IDLE, callManager.getState());
 
         // 2. GSM→SIP where the PBX refuses the INVITE inline.
-        callManager.onIncomingGsmCall("+79161234567", 1);
+        callManager.onIncomingGsmCall("+79161234567", 1, 102L);
         callManager.placeOutgoingSipCall(fakeCall(), c -> {
             c.dispose();
             callManager.onSipCallState(c, pjsip_inv_state.PJSIP_INV_STATE_DISCONNECTED);
@@ -773,16 +773,16 @@ public class CallManagerTest {
         assertEquals(CallManager.CallState.IDLE, callManager.getState());
 
         // 3. GSM→SIP where the GSM caller gives up while the INVITE is still out.
-        callManager.onIncomingGsmCall("+79161234567", 1);
+        callManager.onIncomingGsmCall("+79161234567", 1, 103L);
         callManager.placeOutgoingSipCall(fakeCall(), c -> { });
-        callManager.onGsmCallEnded();
+        callManager.onGsmCallEnded(103L);
         assertEquals(CallManager.CallState.IDLE, callManager.getState());
 
         // 4. GSM→SIP torn down from the SIP side once bridged.
-        callManager.onIncomingGsmCall("+79161234567", 1);
+        callManager.onIncomingGsmCall("+79161234567", 1, 104L);
         GatewayCall bridged = fakeCall();
         callManager.placeOutgoingSipCall(bridged, c -> { });
-        callManager.onGsmCallConnected();
+        callManager.onGsmCallConnected(104L);
         bridged.dispose();
         callManager.onSipCallState(bridged, pjsip_inv_state.PJSIP_INV_STATE_DISCONNECTED);
         assertEquals(CallManager.CallState.IDLE, callManager.getState());
@@ -792,13 +792,13 @@ public class CallManagerTest {
         //    asserts only that neither is an illegal transition.
         forceState(CallManager.CallState.SIP_ANSWERED);
         callManager.placeGsmCall("+79161234567", 1);
-        callManager.onGsmCallConnected();
-        callManager.onGsmCallEnded();
+        callManager.onGsmCallConnected(105L);
+        callManager.onGsmCallEnded(105L);
         assertEquals(CallManager.CallState.IDLE, callManager.getState());
 
         // 6. An INVITE arriving while a call is already up is rejected, not transitioned.
         forceState(CallManager.CallState.BRIDGED);
-        callManager.onIncomingGsmCall("+79161234567", 1);
+        callManager.onIncomingGsmCall("+79161234567", 1, 106L);
         assertEquals("a second inbound GSM call must not move the machine",
                 CallManager.CallState.BRIDGED, callManager.getState());
 
