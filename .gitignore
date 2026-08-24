@@ -23,6 +23,12 @@ crash.log
 *.log
 *.jpg
 *.png
+# ...except app resources. The blanket *.png above is aimed at device screenshots, but it
+# also swallowed the launcher icons: minSdkVersion 23 needs rasterised mipmap-*dpi buckets
+# for API 23-25, which never load the adaptive mipmap-anydpi-v26 variant. Both test devices
+# are API 26+, so a silently un-added bucket is invisible here and shows up as a missing
+# launcher icon on someone's Android 6 or 7 phone. (GW-44)
+!app/src/main/res/**/*.png
 
 # Documentation (keep only README.md and Claude Code files)
 *.md

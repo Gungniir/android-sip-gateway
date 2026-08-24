@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GW-44 - adaptive launcher icon, background layer.
+
+  Full-bleed 108x108dp. The adaptive-icon spec reserves the outer 18dp on every side for the
+  launcher's own masking and parallax, so this layer must cover the whole canvas: any
+  transparent edge shows through as a notch when a launcher shifts the layers apart.
+
+  The colour is @color/ic_launcher_background, which GW-40 defines in values/colors.xml and
+  DELIBERATELY does not define in values-night - a launcher icon does not follow the app's
+  night mode. Do not add a night variant of that colour to "fix" this file.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="@color/ic_launcher_background"
+        android:pathData="M0,0h108v108h-108z" />
+</vector>

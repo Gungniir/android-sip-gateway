@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GW-44 - adaptive launcher icon, foreground layer: a broadcast mast.
+
+  The mark is a mast (tip, column, base plate) radiating two pairs of arcs - the GSM leg of
+  the gateway, which is the half of the app a phone in a drawer is doing. The same mark,
+  simplified for 24dp, is drawable/ic_notification_gateway.xml, so the status bar and the
+  launcher read as one app.
+
+  GEOMETRY IS LOAD-BEARING. The canvas is 108x108dp; a launcher may mask it to any shape, and
+  only the centre 66dp circle - radius 33 from (54,54) - is guaranteed to survive. Every
+  extremity here was placed against that circle:
+
+      outer arc endpoints (35.3, 33.2) / (72.7, 33.2)   r = 28.0 (+2.5 half-stroke = 30.5)
+      base-plate corners  (43, 78) / (65, 78)           r = 26.4
+
+  If you move anything, re-check its distance from (54,54). Content outside r=33 is clipped
+  on some launchers and not others, which is exactly the kind of defect that only shows up
+  on someone else's phone.
+
+  The colour is @color/ic_launcher_foreground (GW-40, day-only by design - see the
+  background layer's note).
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Mast tip. -->
+    <path
+        android:fillColor="@color/ic_launcher_foreground"
+        android:pathData="M54,36a5.5,5.5 0 1 1 0,11a5.5,5.5 0 1 1 0,-11z" />
+
+    <!-- Mast column. -->
+    <path
+        android:fillColor="@color/ic_launcher_foreground"
+        android:pathData="M51.2,45.5h5.6v26.5h-5.6z" />
+
+    <!-- Base plate. -->
+    <path
+        android:fillColor="@color/ic_launcher_foreground"
+        android:pathData="M45.5,71h17a2.5,2.5 0 0 1 2.5,2.5v2a2.5,2.5 0 0 1 -2.5,2.5h-17a2.5,2.5 0 0 1 -2.5,-2.5v-2a2.5,2.5 0 0 1 2.5,-2.5z" />
+
+    <!-- Radiated arcs, centred on the mast tip (54, 41.5): r=13 inner, r=20.5 outer. -->
+    <path
+        android:strokeColor="@color/ic_launcher_foreground"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:pathData="M42.124,46.787a13,13 0 0 1 0,-10.574" />
+    <path
+        android:strokeColor="@color/ic_launcher_foreground"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:pathData="M35.273,49.837a20.5,20.5 0 0 1 0,-16.674" />
+    <path
+        android:strokeColor="@color/ic_launcher_foreground"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:pathData="M65.876,46.787a13,13 0 0 0 0,-10.574" />
+    <path
+        android:strokeColor="@color/ic_launcher_foreground"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:pathData="M72.727,49.837a20.5,20.5 0 0 0 0,-16.674" />
+</vector>
