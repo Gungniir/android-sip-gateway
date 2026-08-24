@@ -201,6 +201,11 @@ the only test*.
 | `phase-4-wave-1` | GW-40, GW-45 | 361 → 385 | `wave-1-ebf8eee.apk` |
 | `phase-4-wave-2` | GW-41, GW-44 | 385 → 410 | `wave-2-91a8573.apk` |
 | `phase-4-wave-3` | GW-42 | 410 → **468** | `wave-3-597c252.apk` |
+| `phase-4-wave-3b` | *(post-wave)* the status header scrolls instead of being pinned | 468 → **469** | `wave-3b-b40e111.apk` |
+
+`phase-4-wave-3b` is not a wave. It is one owner-requested change made after wave 3 was
+tagged, kept as its own tag so the wave-3 record stays what was actually reviewed and merged.
+It is the build on both handsets.
 
 Findings raised *during* Phase 4, none of them fixed: **H17** (the SMS send outcome has no
 single thread — `SmsHandler:1127` is on the control thread while `:1210`/`:1224`/`:1229` are on
