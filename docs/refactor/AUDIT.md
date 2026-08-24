@@ -1566,7 +1566,7 @@ Taken by GW-26 per PHASE-2-PLAN §6, and it stayed the promised one line:
 
 ---
 
-#### H13. Every forwarded SMS is re-forwarded after a restart — NEW, P1, user-visible
+#### H13. Every forwarded SMS is re-forwarded after a restart — NEW, P1, user-visible — ✅ FIXED (GW-20 + GW-27)
 Reported from the field (13:04 on merlinx) and reproduced from the device log in the same
 session. Three independent defects stack into one symptom: **the gateway re-sends the entire
 inbox to the PBX every time the process restarts.**
