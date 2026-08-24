@@ -5,7 +5,8 @@ Every wave is tagged (`phase-2-wave-N`) and a debug APK is kept in
 or by flashing its APK — so a regression is attributable to one wave rather than to the
 whole phase.
 
-**Nothing below has been run.** All of it needs a human on the handsets.
+**Wave 3 is partly validated — see Results below.** The idle, SMS and lifecycle paths
+passed on both handsets on 2026-08-24; everything that needs a call placed is still open.
 
 Devices: **merlinx** = Redmi Note 9, MT6768, debug build, assertions armed, `055f14050405`.
 **lavender** = Redmi Note 7, SDM660, release build, `c31adecd`.
@@ -14,10 +15,83 @@ Standing hazards while testing:
 - **Never read `/proc/asound/*/status` during a call on merlinx** — kernel panic. `tinymix`
   and `hw_params` are safe.
 - **Do not clear the SMS fixture on merlinx**: 8 unread messages, `_id` 3/4/5/6/8/10/11/12.
-  They are the GW-27 reproduction. They re-forward on every restart until GW-27 lands —
-  that is expected, not a new bug.
+  They are the GW-27 reproduction, and they are **reusable** — restore them to `read=0`
+  rather than leaving them consumed. Since GW-27 landed they must NOT re-forward on a
+  restart; if they do, that is a regression.
 - Use the SDK's `adb` (`~/Android/Sdk/platform-tools/adb`). Broadcasts need
   `-p org.onetwoone.gateway`, and `-f 0x00000020` after a `force-stop`.
+
+---
+
+## Results — wave 3, 2026-08-24
+
+Validated **top-down from `phase-2-wave-3`**: wave 3 contains waves 1 and 2, so a green
+wave 3 clears all three. The per-wave tags stay useful only for bisecting a *failure*.
+
+Builds under test, both from commit `d94363e`:
+
+| Device | Build | APK |
+|---|---|---|
+| merlinx (MT6768, assertions armed) | debug | `wave-3-d94363e.apk` |
+| lavender (SDM660, Qualcomm) | **release** | `wave-3-d94363e-RELEASE.apk` |
+
+The lavender release APK was built for this run because the debug key does not match what
+lavender already carries, and `adb install -r` across signatures would have wiped its config.
+A release build from the same commit installs over it cleanly.
+
+### Passed on hardware
+
+- **GW-27 / AUDIT H13 — the headline, tested against the real failing state.** First start
+  forwarded all 8 fixture messages exactly once (`sendSipMessage SUCCESS` ×8, `confirmed=8`,
+  `inFlight=[]`). The fixture was then **restored to `read=0`** and the app restarted twice:
+  both times `Loaded 8 persisted SMS ids` → `Found 8 unread SMS` → `SKIP id=N (already
+  forwarded)` ×8 → **zero** `sendSipMessage`. That is the exact shape of the 13:04 field
+  report, and the persisted record carried it alone.
+- **GW-20 / AUDIT B1e — on the Qualcomm device.** `B1e native-vs-tinymix: 12 agreed,
+  0 mismatched, 0 unreadable, of 12 control(s) on card 0`. Trigger it with
+  `GET /api/mixer-controls`; no call required.
+- **GW-20's root contract, incidentally.** merlinx now logs `Marked SMS id=N as read (root
+  content update, verified)`. The old `sqlite3` path (absent, exit 127) used to report
+  success because `execRoot` returned trimmed output rather than null. Both halves fixed.
+- **GW-26 — service lifecycle.** `Service destroyed in 38 ms on main`, `user_stopped=true`
+  latched, **zero** restarts in 15 s, latch cleared to `false` on the next START. No
+  `unregisterReceiver` / `ContentObserver` leak warnings.
+- **GW-21 — the parts hardware can settle without a burst.** Every `SmsHandler` line ran on
+  the `GatewayControl` tid. Teardown split exactly as specified: `Stopping SMS handler` on
+  main, `SMS handler stopped` on `GatewayControl`. No `Skipped … frames`. Debounce visible:
+  the 8 marked-read writes produced 8 observer notifications that coalesced into **one** scan
+  (7 × `coalesced into the pending scan`).
+- **GW-25 — no idle false positives.** `grep -c INVARIANT` = 0 on both devices. The guard
+  line `No InCallService bound - skipping the orphan rules this tick` was observed doing its
+  job (InCallService binds only while a call exists; both devices do hold `ROLE_DIALER`).
+- Both devices register over TLS with SRTP mandatory; zero crashes, zero tombstones, zero
+  app-level `E`/`W` beyond the guard line above.
+
+### NOT covered — still needs a human placing calls
+
+Everything above is idle-path and SMS-path. **No call was placed**, so these remain open:
+
+- **GW-23a** — `bulkCopy=true` (logged by `GsmAudioPort` at stream open) and audio quality.
+- **GW-25** — the 30-call false-positive run, ≥10 of them `MODE_ANSWER_FIRST`. Note both
+  devices are currently `incoming_call_mode=0` (**SIP_FIRST**); the dangerous shape needs
+  it set to `1` explicitly.
+- **GW-22** — the call soak / graveyard behaviour.
+- **GW-21** — the 20-SMS burst, SMS during a bridged call, PBX-down backoff.
+
+### Notes for re-running
+
+- **The SMS fixture is reusable, not single-use.** Restore it with
+  `content update --uri content://sms/inbox --bind read:i:0 --where "_id=N"` for
+  `3 4 5 6 8 10 11 12`. It was left restored (`read=0`) after this run. Because the read flag
+  now genuinely works, a plain restart passes *trivially* — the fixture must be restored to
+  unread for the test to mean anything.
+- `sub_id=2` (t2) maps to `sim_id=-1`: that SIM is physically absent, so its historical
+  messages route to SIM1's destination via the documented `default to SIM1` fallback. Not a
+  bug, but it is a silent fallback.
+- A fresh agent worktree has **no `local.properties`**, so a Gradle build there fails with
+  "SDK location not found". Copy it (and `keystore.properties` for a release build) from the
+  main checkout. This is the second worktree trap after the `origin/main` base — the worktree
+  for this run did start at `7cbd7fd`, as GW-23b §8 warned.
 
 ---
 
