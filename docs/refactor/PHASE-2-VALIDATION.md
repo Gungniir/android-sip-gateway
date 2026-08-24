@@ -109,6 +109,30 @@ Will be filled in when the wave lands. Expected headline checks:
 - **GW-24 + GW-20 together** — select mute controls in the web UI, place a call, confirm
   those controls are actually muted, then confirm the mic is live afterwards via a normal
   call. This is the first time the Qualcomm mute path executes at all.
+
+  GW-24 has landed; the procedure, in order, on a device that has used the web UI before:
+  1. **Back up first** —
+     `adb shell su -c 'cp -r /data/data/org.onetwoone.gateway/shared_prefs /sdcard/prefs-backup'`.
+  2. **Migration.** Confirm the legacy key is present *before* the upgrade:
+     `adb shell su -c 'grep -c mic_mute_controls /data/data/org.onetwoone.gateway/shared_prefs/gsm_audio_config.xml'`.
+     Install, launch, then confirm `mic_mute_decs` holds the same names as a `<string>` and
+     `mic_mute_controls` is gone. `logcat -s GatewayConfig` must show
+     `Migrated mute controls to mic_mute_decs: '…'` and **no** `ClassCastException` anywhere.
+     Relaunch twice more and confirm the value does not drift (the migration is idempotent,
+     but only the device proves the read-back path).
+  3. **The mute itself** (the loop that has never executed). Custom preset, one known DEC
+     selected, place a GSM call: `tinymix -D 0 get "DEC1 Volume"` must read **0** during the
+     call and its pre-call value after it. Any `Not muting '…'` line in logcat must name a
+     control that genuinely does not exist on that device — if it names one that does, the
+     native read is the problem, not the config (that is B1e's outstanding
+     `verifyNativeReads()` check, which should be run first).
+  4. **Reloadability (H4b).** With the gateway running, change the multimedia route or the
+     mute list from the web UI and place a call **without restarting**: the new values must
+     appear in the `Setting up mixer for … (N mute control(s))` line. Then change the sound
+     *card* and confirm it does **not** take effect until a restart — that residual is
+     deliberate and the toast promises it.
+  5. **Web UI defaults.** On a device with SIP unconfigured, the page must show empty
+     server/user/password and realm `*` — never `192.168.5.95` / `gateway123` / `101`.
 - **GW-22** — 500-cycle soak, `callsCreated - callsDeleted` equal to active calls at the end,
   zero tombstones. A premature `Call` delete presents as a native crash, so the soak is also
   the safety test.

@@ -1,7 +1,6 @@
 package org.onetwoone.gateway;
 
 import android.content.Context;
-import android.content.SharedPreferences;
 import android.content.res.AssetManager;
 import android.os.Handler;
 import android.os.Looper;
@@ -9,13 +8,14 @@ import android.util.Log;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
+import org.onetwoone.gateway.config.GatewayConfig;
 import org.onetwoone.gateway.ui.TinymixManager;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.HashMap;
-import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -120,30 +120,34 @@ public class WebConfigServer extends NanoHTTPD {
         try {
             JSONObject json = new JSONObject();
 
-            // SIP settings
-            SharedPreferences sipPrefs = context.getSharedPreferences("gateway_prefs", Context.MODE_PRIVATE);
-            json.put("sip_server", sipPrefs.getString("sip_server", "192.168.5.95"));
-            json.put("sip_port", sipPrefs.getInt("sip_port", 5060));
-            json.put("sip_user", sipPrefs.getString("sip_user", "gateway"));
-            json.put("sip_password", sipPrefs.getString("sip_password", "gateway123"));
-            json.put("use_tls", sipPrefs.getBoolean("use_tls", false));
-            json.put("sip_realm", sipPrefs.getString("sip_realm", ""));
-            json.put("sim1_destination", sipPrefs.getString("sim1_destination", "101"));
-            json.put("sim2_destination", sipPrefs.getString("sim2_destination", ""));
+            GatewayConfig config = GatewayConfig.from(context);
+
+            // SIP settings. Rendered from GatewayConfig, which owns the defaults: this used
+            // to open "gateway_prefs" itself and fall back to a hardcoded 192.168.5.95 /
+            // gateway / gateway123 / 101, none of which the app would ever have used - so an
+            // unconfigured gateway showed a working-looking configuration that was fiction,
+            // and the page (served without auth, GW-30) published a credential that was not
+            // even real.
+            json.put("sip_server", config.getSipServer());
+            json.put("sip_port", config.getSipPort());
+            json.put("sip_user", config.getSipUser());
+            json.put("sip_password", config.getSipPassword());
+            json.put("use_tls", config.isUseTls());
+            json.put("sip_realm", config.getSipRealm());
+            json.put("sim1_destination", config.getSim1Destination());
+            json.put("sim2_destination", config.getSim2Destination());
 
             // Audio settings
-            SharedPreferences audioPrefs = context.getSharedPreferences("gsm_audio_config", Context.MODE_PRIVATE);
-            json.put("audio_profile", audioPrefs.getString("audio_profile", "auto"));
-            json.put("audio_card", audioPrefs.getInt("card", 0));
-            json.put("audio_route", audioPrefs.getString("multimedia_route", "MultiMedia1"));
+            json.put("audio_profile", config.getAudioProfile());
+            json.put("audio_card", config.getAudioCard());
+            json.put("audio_route", config.getMultimediaRoute());
 
             // Audio gain (dB)
-            json.put("tx_gain", audioPrefs.getFloat("tx_gain", 0.0f));  // GSM→SIP
-            json.put("rx_gain", audioPrefs.getFloat("rx_gain", 0.0f));  // SIP→GSM
+            json.put("tx_gain", config.getTxGain());  // GSM→SIP
+            json.put("rx_gain", config.getRxGain());  // SIP→GSM
 
             // Mute preset
-            SharedPreferences mutePrefs = context.getSharedPreferences("device_mute_prefs", Context.MODE_PRIVATE);
-            json.put("mute_preset", mutePrefs.getString("mute_preset", DeviceMuteManager.PRESET_REDMI_NOTE_7));
+            json.put("mute_preset", config.getMutePreset());
 
             // Available presets
             JSONArray presetsArray = new JSONArray();
@@ -152,16 +156,17 @@ public class WebConfigServer extends NanoHTTPD {
             }
             json.put("available_presets", presetsArray);
 
-            // Selected mute controls (for custom preset)
-            Set<String> selectedControls = audioPrefs.getStringSet("mic_mute_controls", new HashSet<>());
+            // Selected mute controls (for custom preset). The wire format stays an array -
+            // that is the page's contract - but it is now the same stored list the mixer
+            // reads, not a private "mic_mute_controls" StringSet nothing consumed (AUDIT H4).
             JSONArray selectedArray = new JSONArray();
-            for (String ctrl : selectedControls) {
+            for (String ctrl : config.getMicMuteControls()) {
                 selectedArray.put(ctrl);
             }
             json.put("selected_mute_controls", selectedArray);
 
             // Manual mute controls
-            json.put("manual_mute_controls", audioPrefs.getString("manual_mute_controls", ""));
+            json.put("manual_mute_controls", config.getManualMuteControls());
 
             return newFixedLengthResponse(Response.Status.OK, "application/json", json.toString());
         } catch (Exception e) {
@@ -184,8 +189,7 @@ public class WebConfigServer extends NanoHTTPD {
                 } catch (NumberFormatException ignored) {}
             } else {
                 // Use saved card
-                SharedPreferences audioPrefs = context.getSharedPreferences("gsm_audio_config", Context.MODE_PRIVATE);
-                soundCard = audioPrefs.getInt("card", 0);
+                soundCard = GatewayConfig.from(context).getAudioCard();
             }
 
             // Detect controls
@@ -229,50 +233,51 @@ public class WebConfigServer extends NanoHTTPD {
 
             JSONObject json = new JSONObject(postData);
 
-            // Save SIP settings
-            SharedPreferences.Editor sipEditor = context.getSharedPreferences("gateway_prefs", Context.MODE_PRIVATE).edit();
-            if (json.has("sip_server")) sipEditor.putString("sip_server", json.getString("sip_server"));
-            if (json.has("sip_port")) sipEditor.putInt("sip_port", json.getInt("sip_port"));
-            if (json.has("sip_user")) sipEditor.putString("sip_user", json.getString("sip_user"));
-            if (json.has("sip_password")) sipEditor.putString("sip_password", json.getString("sip_password"));
-            if (json.has("use_tls")) sipEditor.putBoolean("use_tls", json.getBoolean("use_tls"));
-            if (json.has("sip_realm")) sipEditor.putString("sip_realm", json.getString("sip_realm"));
-            if (json.has("sim1_destination")) sipEditor.putString("sim1_destination", json.getString("sim1_destination"));
-            if (json.has("sim2_destination")) sipEditor.putString("sim2_destination", json.getString("sim2_destination"));
-            sipEditor.apply();
+            // One batch for the whole request. GatewayConfig.Editor keeps at most one
+            // SharedPreferences.Editor per preference file and applies each exactly once, at
+            // the end. This method used to call apply() up to five times across three
+            // editors - three of them on the audio editor alone - so a reader that landed
+            // between two of them saw a half-saved configuration (AUDIT H4).
+            GatewayConfig config = GatewayConfig.from(context);
+            GatewayConfig.Editor edit = config.edit();
 
-            // Save audio settings
-            SharedPreferences.Editor audioEditor = context.getSharedPreferences("gsm_audio_config", Context.MODE_PRIVATE).edit();
-            if (json.has("audio_profile")) audioEditor.putString("audio_profile", json.getString("audio_profile"));
-            if (json.has("audio_card")) audioEditor.putInt("card", json.getInt("audio_card"));
-            if (json.has("audio_route")) audioEditor.putString("multimedia_route", json.getString("audio_route"));
-            if (json.has("tx_gain")) audioEditor.putFloat("tx_gain", (float) json.getDouble("tx_gain"));
-            if (json.has("rx_gain")) audioEditor.putFloat("rx_gain", (float) json.getDouble("rx_gain"));
-            audioEditor.apply();
+            // SIP settings
+            if (json.has("sip_server")) edit.setSipServer(json.getString("sip_server"));
+            if (json.has("sip_port")) edit.setSipPort(json.getInt("sip_port"));
+            if (json.has("sip_user")) edit.setSipUser(json.getString("sip_user"));
+            if (json.has("sip_password")) edit.setSipPassword(json.getString("sip_password"));
+            if (json.has("use_tls")) edit.setUseTls(json.getBoolean("use_tls"));
+            if (json.has("sip_realm")) edit.setSipRealm(json.getString("sip_realm"));
+            if (json.has("sim1_destination")) edit.setSim1Destination(json.getString("sim1_destination"));
+            if (json.has("sim2_destination")) edit.setSim2Destination(json.getString("sim2_destination"));
 
-            // Save mute preset
-            if (json.has("mute_preset")) {
-                SharedPreferences.Editor muteEditor = context.getSharedPreferences("device_mute_prefs", Context.MODE_PRIVATE).edit();
-                muteEditor.putString("mute_preset", json.getString("mute_preset"));
-                muteEditor.apply();
-            }
+            // Audio settings
+            if (json.has("audio_profile")) edit.setAudioProfile(json.getString("audio_profile"));
+            if (json.has("audio_card")) edit.setAudioCard(json.getInt("audio_card"));
+            if (json.has("audio_route")) edit.setMultimediaRoute(json.getString("audio_route"));
+            if (json.has("tx_gain")) edit.setTxGain((float) json.getDouble("tx_gain"));
+            if (json.has("rx_gain")) edit.setRxGain((float) json.getDouble("rx_gain"));
 
-            // Save selected mute controls (for custom preset)
+            // Mute preset. Was written before the guarded pair below and applied on its own,
+            // so a request that changed nothing else still wrote it.
+            if (json.has("mute_preset")) edit.setMutePreset(json.getString("mute_preset"));
+
+            // Selected mute controls (for custom preset)
             if (json.has("selected_mute_controls")) {
                 JSONArray selectedArray = json.getJSONArray("selected_mute_controls");
-                Set<String> selectedSet = new HashSet<>();
+                Set<String> selectedSet = new LinkedHashSet<>();
                 for (int i = 0; i < selectedArray.length(); i++) {
                     selectedSet.add(selectedArray.getString(i));
                 }
-                audioEditor.putStringSet("mic_mute_controls", selectedSet);
-                audioEditor.apply();
+                edit.setMicMuteControls(selectedSet);
             }
 
-            // Save manual mute controls
+            // Manual mute controls
             if (json.has("manual_mute_controls")) {
-                audioEditor.putString("manual_mute_controls", json.getString("manual_mute_controls"));
-                audioEditor.apply();
+                edit.setManualMuteControls(json.getString("manual_mute_controls"));
             }
+
+            edit.apply();
 
             Log.i(TAG, "Configuration saved, reloading...");
 
@@ -296,9 +301,7 @@ public class WebConfigServer extends NanoHTTPD {
         Log.i(TAG, "Disabling web interface...");
 
         // Save preference
-        SharedPreferences.Editor editor = context.getSharedPreferences("gateway_prefs", Context.MODE_PRIVATE).edit();
-        editor.putBoolean("web_interface_enabled", false);
-        editor.apply();
+        GatewayConfig.from(context).setWebInterfaceEnabled(false);
 
         // Schedule stop after response is sent
         mainHandler.postDelayed(() -> {

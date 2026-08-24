@@ -670,7 +670,7 @@ samples = 960 on the MediaTek path), borrowed through GW-01's `io_ref`, and free
 **MediaTek-only.** Qualcomm has `capture_rate == playback_rate` and never enters the
 branch, so this can only be validated on merlinx.
 
-#### H4. Web UI writes a preference key nothing reads
+#### H4. Web UI writes a preference key nothing reads — P1 — ✅ FIXED (GW-24), on-device check outstanding
 `WebConfigServer.java:156` reads and `:267` writes `mic_mute_controls` as a **StringSet**;
 `GatewayConfig.KEY_MIC_MUTE_CONTROLS` (`:70`) is `"mic_mute_decs"` read as a **String**.
 The in-app UI (`MainViewModel.java:404`, `:517`) uses `GatewayConfig` and is correct — only
@@ -678,7 +678,55 @@ the web interface is disconnected, so its mute-control selection is silently dis
 `postConfig` also calls `audioEditor.apply()` three times (`:251`, `:268`, `:274`) →
 partially-applied config.
 
-#### H4b. Mute-control config is captured once and never refreshed
+**Fixed by GW-24.** One key, one type: the canonical `mic_mute_decs` comma-separated
+String, with a one-shot migration in `GatewayConfig.init` that folds the legacy StringSet
+in and removes it only after committing the new value and reading it back. Values are read
+through `getAll()` and type-checked, so the both-keys-with-mismatched-types device — the
+one that would have thrown `ClassCastException` inside `PjsipSipService.onCreate` — is
+handled, and `getMicMuteControls()` itself can no longer throw even if the migration could
+not write. Conflict rule: the in-app list wins, because it is the one that has actually
+been reaching the mixer.
+
+The migration is only sound if nothing reads preferences ahead of it, so `GatewayConfig.init`
+now runs in **`GatewayApplication.onCreate`** (it was called from three components only,
+while five others read the same files by raw name and could run first), *and* every one of
+those five now goes through `GatewayConfig` — `WebConfigServer`, `GatewayControlReceiver`,
+`DeviceMuteManager`, `BootReceiver`, `BatteryLimitService`. Entry points that can start a
+process use `GatewayConfig.from(context)`, which cannot bypass `init`. Nothing outside
+`config/` names a preference file or key any more, which is what makes the drift structural
+rather than fixed once.
+
+Writes are batched through `GatewayConfig.Editor`: one `SharedPreferences.Editor` per
+preference file, one `apply()` each, at the end of the request. `postConfig` was up to five
+applies across three editors; `GatewayControlReceiver.configure` was three, with the mute
+preset applied outside the `changed` guard the other two obeyed.
+
+`WebConfigServer`'s hardcoded defaults (`192.168.5.95`, `gateway`, `gateway123`, `101`, and
+an empty realm where `GatewayConfig` uses `*`) are gone — it renders `GatewayConfig`'s. That
+also shrinks GW-30's blast radius: the page is served without authentication and was
+publishing a credential that was not even the real one.
+
+Regression tests: `MicMuteControlMigrationTest` (11), `WebConfigRoutingTest` (8),
+`MuteConfigLivenessTest` (4), plus 4 in `GatewayConfigTest` for the batch semantics and the
+single source of defaults.
+
+> **⚠️ This is the change that arms `QualcommAudioProfile`'s mute loop.** See B1e: the loop
+> over `config.getAllMuteControls()` has never executed on a real device, because the list
+> was always empty *because of this bug*. GW-20 prepared the landing (an unreadable control
+> is skipped rather than muted against a fabricated original), and
+> `QualcommConfigReloadTest.unreadableControlIsStillSkippedNotMuted` pins that, but the
+> first real execution is on hardware. **Verify before trusting it:** with the custom preset
+> and a control selected, place a GSM call and check `tinymix -D 0 get "DEC1 Volume"` reads
+> 0 during the call and its pre-call value after it, and that `Not muting '…'` in logcat
+> only ever names controls that genuinely do not exist on the device.
+
+**Also found in the same area** (Phase 2 plan §2.5, fixed here): `DeviceMuteManager` read
+`currentPreset` once in its constructor and `savePreset` had no callers, so a preset change
+from either UI wrote preferences the live singleton never re-read — switching *to* `custom`
+did nothing until the process restarted. `refreshSoundCard()` is now `refreshFromConfig()`
+and re-reads the preset as well as the card before every mute.
+
+#### H4b. Mute-control config is captured once and never refreshed — P2 — ✅ FIXED (GW-24) for everything but the sound card
 `QualcommAudioProfile` copies `config.getAllMuteControls()` into a final list **in its
 constructor** (`:48`). The profile is built by `GsmAudioPort`'s constructor (`:75`), which
 runs once from `AudioBridgeManager.initialize()` (`:68`) — and `gsmAudioPort` is `static`
@@ -686,6 +734,33 @@ runs once from `AudioBridgeManager.initialize()` (`:68`) — and `gsmAudioPort` 
 effect until the **process** restarts, even though the UI reports the change as saved and
 `reloadConfig` claims to have applied it. Same shape for `captureDevice`, `playbackDevice`
 and `multimediaRoute` (`:45-47`).
+
+**Narrower than first written.** Gains were never affected — `AudioBridgeManager` re-reads
+`getTxGain()/getRxGain()` on every `startBridge`. `MediaTekAudioProfile` takes no
+`GatewayConfig` at all, only compile-time constants. And since GW-12 the port is not a bare
+`static` field but lives in the process-scoped `AudioBridgeManager.Wiring` holder — same
+lifetime, different shape.
+
+**Fixed by GW-24** by re-reading in `setupMixer`, which runs per call, rather than by
+rebuilding the port. Rebuilding was rejected: `Wiring.port` is documented "never replaced
+once published", so a rebuild would have to deal with a live call holding the old port
+*and* the `MixerEnforce` thread it started — the orphaned-enforce-thread failure GW-08
+exists to prevent. `doReloadConfig` does not rebuild it either, and `audioBridge.initialize()`
+would early-return.
+
+The four values are one immutable `Session` object behind one volatile reference, not four
+fields, because teardown and enforce **must** use the values setup used: restoring against a
+control list the operator edited mid-call would leave a muted control with nobody left to
+unmute it (the shape of B1c/B2). A config change therefore lands at the next `setupMixer`,
+never mid-call.
+
+**Residual, deliberate:** the sound *card* still needs a process restart. `GsmAudioPort`
+snapshots `config.getAudioCard()` in its own constructor (`:227`) and passes it into
+`setupMixer(card)`; that file is out of GW-24's scope and changing it runs into the same
+port-lifetime problem. So does the SoC profile selector (`AudioProfileFactory.select` runs
+once). `MainViewModel`'s toast says exactly this instead of the old flat "Restart to apply",
+which now under-claims: *"Route, devices and mute controls apply on the next call; sound
+card and SoC profile need a restart."*
 
 #### H5. `GatewayConfig` singleton is unsafely published
 `GatewayConfig.java:97` — non-volatile static, `init` is `synchronized` but
@@ -922,6 +997,13 @@ Regression tests: `QualcommMixerReadTest` (8) — an unreadable control is neith
 fabricated, `84` is never written again, `0` round-trips as a real reading, the production
 backend is asserted to be `MixerControls.NATIVE`, and `NATIVE.getEnum` is asserted to reach
 JNI rather than return a constant.
+
+**GW-24 has now landed, so the loop is armed.** The mute list is no longer empty on a
+configured device: the web UI's selection is migrated to the key the profile reads, and
+`setupMixer` re-reads it per call (H4, H4b). The first execution of this loop on real
+hardware is therefore the next call placed on a device with the custom preset selected —
+which makes the check below not merely outstanding but the gate on trusting the saved
+originals at all.
 
 > **⚠️ Still outstanding — the on-device value-by-value check.** GW-20's Risk section is
 > explicit that a native getter returning a different representation than `tinymix` would

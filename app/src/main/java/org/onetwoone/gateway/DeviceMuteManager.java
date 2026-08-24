@@ -1,7 +1,6 @@
 package org.onetwoone.gateway;
 
 import android.content.Context;
-import android.content.SharedPreferences;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
@@ -67,8 +66,9 @@ import java.util.concurrent.TimeUnit;
  */
 public class DeviceMuteManager {
     private static final String TAG = "DeviceMute";
-    private static final String PREFS_NAME = "device_mute_prefs";
-    private static final String PREF_PRESET = "mute_preset";
+    // The "device_mute_prefs" / "mute_preset" names that used to live here are gone: this
+    // class reads and writes the preset through GatewayConfig, which is the only place a
+    // preference file or key may be named (AUDIT H4).
 
     /** "No lease is held." Lease ids issued by {@link #newLease()} start at 1. */
     public static final long NO_LEASE = 0L;
@@ -357,6 +357,16 @@ public class DeviceMuteManager {
         return m;
     }
 
+    /**
+     * Context-bearing twin of {@link #forTesting(String, int, MixerBackend)}: real
+     * preferences, still no {@code su} and no JNI. Needed to exercise
+     * {@link #refreshFromConfig()}, which the context-free instance skips — the preset and
+     * card come from {@link GatewayConfig} rather than being set directly.
+     */
+    static DeviceMuteManager forTesting(Context context, MixerBackend mixer) {
+        return new DeviceMuteManager(context, mixer);
+    }
+
     /** Test-only: shrink the fail-safe deadline. */
     void setMuteMaxHoldMsForTest(long ms) {
         this.muteMaxHoldMs = ms;
@@ -373,38 +383,44 @@ public class DeviceMuteManager {
     }
 
     /**
-     * Load saved preset from SharedPreferences
+     * Load the saved preset and sound card, through {@link GatewayConfig} rather than by
+     * opening {@code device_mute_prefs} / {@code gsm_audio_config} by name (AUDIT H4).
+     *
+     * <p>This is the initial load only. What matters at mute time is
+     * {@link #refreshFromConfig()}, which re-reads both before every acquire.
      */
     private void loadPreset() {
-        SharedPreferences prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-        currentPreset = prefs.getString(PREF_PRESET, PRESET_REDMI_NOTE_7);  // Default
-
-        // Read sound card from gsm_audio_config (same as GsmAudioPort uses)
-        SharedPreferences audioPrefs = context.getSharedPreferences("gsm_audio_config", Context.MODE_PRIVATE);
-        soundCard = audioPrefs.getInt("card", 0);
-
+        refreshFromConfig();
         Log.d(TAG, "Loaded preset: " + currentPreset + ", card: " + soundCard);
     }
 
     /**
-     * Save current preset to SharedPreferences
+     * Persist a preset and adopt it immediately.
+     *
+     * <p>Kept for callers that hold the manager; the UI and the web interface write through
+     * {@link GatewayConfig#setMutePreset(String)} instead, and {@link #refreshFromConfig()}
+     * is what makes those writes reach this object.
      */
     public void savePreset(String presetName) {
         currentPreset = presetName;
-        SharedPreferences.Editor editor = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit();
-        editor.putString(PREF_PRESET, presetName);
-        editor.apply();
+        if (context != null) {
+            GatewayConfig.from(context).setMutePreset(presetName);
+        }
         Log.d(TAG, "Saved preset: " + presetName);
     }
 
     /**
-     * Set sound card number
+     * Set sound card number.
+     *
+     * <p>NOTE: the persisted half of this is dead. It writes {@code "sound_card"} into
+     * {@code device_mute_prefs}, a key nothing has ever read — the card actually used comes
+     * from {@code gsm_audio_config}'s {@code "card"} via {@link GatewayConfig#getAudioCard()}
+     * and is re-read by {@link #refreshFromConfig()}. The method itself has no callers.
+     * Left in place for <b>GW-31</b>'s dead-code sweep rather than deleted here; the write is
+     * removed so it can no longer look like configuration.
      */
     public void setSoundCard(int card) {
         this.soundCard = card;
-        SharedPreferences.Editor editor = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).edit();
-        editor.putInt("sound_card", card);
-        editor.apply();
     }
 
     // Ordered list of preset keys to ensure consistent iteration
@@ -596,7 +612,7 @@ public class DeviceMuteManager {
             restoreHeld("superseded");
         }
 
-        refreshSoundCard();
+        refreshFromConfig();
 
         int card = soundCard;
         String preset = currentPreset;
@@ -882,17 +898,33 @@ public class DeviceMuteManager {
     }
 
     /**
-     * Refresh sound card setting from SharedPreferences
+     * Re-read the sound card <em>and the preset</em> from {@link GatewayConfig}, so that a
+     * change made since this singleton was built takes effect on the next call.
+     *
+     * <p>Only the card used to be refreshed. {@code currentPreset} was read once in the
+     * constructor and {@link #savePreset(String)} had no callers, so a preset change from the
+     * in-app UI ({@code MainViewModel.selectMutePreset}) or the web interface — both of which
+     * write through {@code GatewayConfig} — updated the stored value and nothing else. The
+     * live manager kept muting with the preset the process started with, and switching
+     * <em>to</em> {@code custom} did nothing at all until the process was restarted (Phase 2
+     * plan §2.5).
      */
-    private void refreshSoundCard() {
+    private void refreshFromConfig() {
         if (context == null) {
-            return;
+            return;   // forTesting(): no preferences, the fields are set directly
         }
-        SharedPreferences audioPrefs = context.getSharedPreferences("gsm_audio_config", Context.MODE_PRIVATE);
-        int newCard = audioPrefs.getInt("card", 0);
+        GatewayConfig config = GatewayConfig.from(context);
+
+        int newCard = config.getAudioCard();
         if (newCard != soundCard) {
             Log.d(TAG, "Sound card changed: " + soundCard + " -> " + newCard);
             soundCard = newCard;
+        }
+
+        String newPreset = config.getMutePreset();
+        if (!newPreset.equals(currentPreset)) {
+            Log.i(TAG, "Mute preset changed: " + currentPreset + " -> " + newPreset);
+            currentPreset = newPreset;
         }
     }
 

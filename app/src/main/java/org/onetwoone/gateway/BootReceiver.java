@@ -3,9 +3,10 @@ package org.onetwoone.gateway;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
-import android.content.SharedPreferences;
 import android.os.Build;
 import android.util.Log;
+
+import org.onetwoone.gateway.config.GatewayConfig;
 
 /**
  * Автозапуск GSM-SIP шлюза при загрузке системы
@@ -30,9 +31,11 @@ public class BootReceiver extends BroadcastReceiver {
             }
             Log.i(TAG, "SIP service started");
 
-            // Start Battery Limit service with saved limit
-            SharedPreferences prefs = context.getSharedPreferences("gateway_prefs", Context.MODE_PRIVATE);
-            int batteryLimit = prefs.getInt("battery_limit", 60);
+            // Start Battery Limit service with saved limit. Through GatewayConfig, not a raw
+            // "gateway_prefs"/"battery_limit" read: at boot this receiver is often the first
+            // thing in the process, so a raw read here would be the one that outran
+            // GatewayConfig.init() and its migration (AUDIT H4).
+            int batteryLimit = GatewayConfig.from(context).getBatteryLimit();
             Intent batteryIntent = new Intent(context, BatteryLimitService.class);
             batteryIntent.putExtra("limit", batteryLimit);
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

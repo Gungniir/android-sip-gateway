@@ -432,6 +432,22 @@ public class MainViewModel extends AndroidViewModel {
         Log.d(TAG, "SIP config saved: " + user + "@" + server);
     }
 
+    /**
+     * What an audio save actually promises, stated precisely (AUDIT H4b).
+     *
+     * <p>It used to be a flat "Restart to apply", which was honest when the profile
+     * snapshotted its whole configuration in its constructor. Now the route, the capture and
+     * playback devices and the mute-control list are re-read by
+     * {@code QualcommAudioProfile.setupMixer} on every call, so they take effect on the next
+     * one. Two things still do not, because {@code GsmAudioPort} reads them once and its port
+     * is never replaced ({@code AudioBridgeManager.Wiring}): the sound card, and which SoC
+     * profile is selected. Saying "restart" for everything would now under-claim; saying
+     * "applied" for everything would over-claim, which is the failure H4b is about.
+     */
+    static final String AUDIO_SAVED_TOAST =
+            "Audio settings saved. Route, devices and mute controls apply on the next call; "
+            + "sound card and SoC profile need a restart.";
+
     public void saveAudioConfig(int card, int capture, int playback, String route,
                                 float txGain, float rxGain, Set<String> muteControls,
                                 String manualControls) {
@@ -443,7 +459,7 @@ public class MainViewModel extends AndroidViewModel {
         config.setManualMuteControls(manualControls);
 
         loadConfig();
-        toastMessage.setValue("Audio settings saved. Restart to apply.");
+        toastMessage.setValue(AUDIO_SAVED_TOAST);
         Log.d(TAG, "Audio config saved: card=" + card + ", capture=" + capture +
               ", playback=" + playback + ", route=" + route +
               ", txGain=" + txGain + ", rxGain=" + rxGain +
@@ -457,7 +473,7 @@ public class MainViewModel extends AndroidViewModel {
         GatewayConfig config = GatewayConfig.getInstance();
         config.updateAudioConfig(card, capture, playback, route);
         loadConfig();
-        toastMessage.setValue("Audio settings saved. Restart to apply.");
+        toastMessage.setValue(AUDIO_SAVED_TOAST);
     }
 
     private void applySavedConfig() {
@@ -522,6 +538,12 @@ public class MainViewModel extends AndroidViewModel {
 
     /**
      * Select a mute preset and save it.
+     *
+     * <p>Writing it through {@code GatewayConfig} is now enough: {@code DeviceMuteManager}
+     * re-reads the preset from config before every mute (its {@code refreshFromConfig}), so
+     * the change reaches the live singleton on the next call. It did not before — the
+     * manager read the preset once at construction and {@code savePreset} had no callers, so
+     * selecting {@code custom} here did nothing until the process restarted.
      *
      * @param preset The preset name (e.g., "redmi_note_7", "custom")
      */
