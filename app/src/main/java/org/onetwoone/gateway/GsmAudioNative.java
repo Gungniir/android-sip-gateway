@@ -72,11 +72,17 @@ public class GsmAudioNative {
      * <p>Same contract as {@link #readFrame}: no {@link #isOpen()} pre-check, and a
      * closed device is reported as {@code 0}, not as a failure.
      *
+     * <p>{@code length} is explicit and mandatory. The caller's buffer is sized for the
+     * largest frame the port can carry, and pjmedia is allowed to deliver a shorter one;
+     * this method used to take the whole array, so a short frame pushed the untouched
+     * tail of the <em>previous</em> frame back out to the modem (AUDIT H2e).
+     *
      * @param buffer Byte array with PCM data
+     * @param length How many bytes of {@code buffer} belong to this frame
      * @return Number of bytes accepted; {@code 0} if the device is closed; {@code -1} if
-     *         the ALSA write itself failed
+     *         the ALSA write failed or {@code length} is out of range
      */
-    public static native int writeFrame(byte[] buffer);
+    public static native int writeFrame(byte[] buffer, int length);
 
     /**
      * Set mixer control value.

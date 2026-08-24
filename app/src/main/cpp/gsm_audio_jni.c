@@ -503,15 +503,27 @@ Java_org_onetwoone_gateway_GsmAudioNative_readFrame(
  *
  * Like readFrame(), this is the only open check the caller needs (AUDIT H2b).
  *
+ * `length` is explicit because the caller's buffer is sized for the largest possible frame
+ * and pjmedia may hand it a shorter one. Using GetArrayLength() here instead - as this
+ * function used to - writes the untouched tail of the previous frame back out to the
+ * modem (AUDIT H2e).
+ *
  * @param buffer Byte array with PCM data
+ * @param length How many bytes of `buffer` are this frame; must be 0..buffer.length
  * @return Number of bytes accepted; 0 if the device is closed (NOT an error); -1 if
- *         pcm_write() itself failed or the frame does not fit the upsample scratch.
+ *         pcm_write() itself failed, the length is out of range, or the frame does not
+ *         fit the upsample scratch.
  */
 JNIEXPORT jint JNICALL
 Java_org_onetwoone_gateway_GsmAudioNative_writeFrame(
-        JNIEnv *env, jclass clazz, jbyteArray buffer) {
+        JNIEnv *env, jclass clazz, jbyteArray buffer, jint length) {
 
-    jsize len = (*env)->GetArrayLength(env, buffer);
+    jsize capacity = (*env)->GetArrayLength(env, buffer);
+    if (length < 0 || length > capacity) {
+        LOGE("writeFrame: length %d out of range for a %d-byte buffer", length, capacity);
+        return -1;
+    }
+    jsize len = (jsize)length;
     jbyte *buf = (*env)->GetByteArrayElements(env, buffer, NULL);
     if (!buf) {
         LOGE("Failed to get byte array elements");

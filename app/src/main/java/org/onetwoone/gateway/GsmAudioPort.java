@@ -184,7 +184,7 @@ public class GsmAudioPort extends AudioMediaPort {
         this.sampleRate = profile.captureSampleRate();
         this.channels = profile.captureChannels();
         this.periodSize = sampleRate * FRAME_TIME_MS / 1000;
-        this.frameSize = sampleRate * (BITS / 8) * channels * FRAME_TIME_MS / 1000;
+        this.frameSize = frameSizeBytes(sampleRate, BITS, channels);
         this.playbackRate = profile.playbackSampleRate();
         this.playbackChannels = profile.playbackChannels();
         this.playbackPeriod = playbackRate * FRAME_TIME_MS / 1000;
@@ -314,16 +314,18 @@ public class GsmAudioPort extends AudioMediaPort {
             }
 
             ByteVector buf = frame.getBuf();
-            long size = frame.getSize();
+            final int size = usableFrameBytes(frame.getSize(), frameSize);
 
-            if (buf != null && size > 0 && size <= frameSize) {
+            if (buf != null && size > 0) {
                 // Convert ByteVector to byte[]
                 for (int i = 0; i < size; i++) {
                     playbackBuffer[i] = (byte) (buf.get(i) & 0xFF);
                 }
 
-                // Write to native ALSA
-                int bytesWritten = GsmAudioNative.writeFrame(playbackBuffer);
+                // Write to native ALSA. The length is explicit: playbackBuffer is sized
+                // for a full frame and is reused, so handing the whole array over would
+                // append the tail of the PREVIOUS frame to a short one (AUDIT H2e).
+                int bytesWritten = GsmAudioNative.writeFrame(playbackBuffer, size);
                 if (bytesWritten < 0) {
                     playbackErrors.incrementAndGet();
                 }
@@ -336,6 +338,37 @@ public class GsmAudioPort extends AudioMediaPort {
         } catch (Exception e) {
             Log.e(TAG, "Error in onFrameReceived: " + e.getMessage());
         }
+    }
+
+    /**
+     * Bytes in one {@link #FRAME_TIME_MS} ms PCM frame at the given format.
+     *
+     * <p>Package-visible and static so the arithmetic can be tested without a live pjsua2
+     * endpoint. For the gateway's 8 kHz / 16-bit / mono port this is <b>320</b> bytes, not
+     * 160: the count is bytes, not samples, which is why the per-element JNI loops this
+     * ticket removed ran 320 times and not 160.
+     */
+    static int frameSizeBytes(int sampleRate, int bits, int channels) {
+        return sampleRate * (bits / 8) * channels * FRAME_TIME_MS / 1000;
+    }
+
+    /**
+     * How many bytes of a received {@link MediaFrame} are usable audio, given the
+     * capacity of the reusable playback buffer.
+     *
+     * <p>Returns 0 for "drop this frame": a non-positive size, or one larger than the
+     * buffer can hold (which would mean the negotiated format changed under us). The
+     * non-zero result is the length that MUST be handed to
+     * {@link GsmAudioNative#writeFrame} - the buffer is reused, so anything past it is
+     * the previous frame (AUDIT H2e).
+     *
+     * <p>Package-visible and static purely so it is testable.
+     */
+    static int usableFrameBytes(long reportedSize, int bufferCapacity) {
+        if (reportedSize <= 0 || reportedSize > bufferCapacity) {
+            return 0;
+        }
+        return (int) reportedSize;
     }
 
     /**

@@ -1102,6 +1102,25 @@ without any process restart at all.
 (`execRoot`'s return contract is the root cause of defect 3, and it is not SMS-specific —
 *every* caller that tests `execRoot(...) != null` for success is equally blind).
 
+#### H2e. A short SIP frame replays the tail of the previous one to the modem — NEW, P2 — ✅ FIXED (GW-23a)
+Found during GW-23a recon, in neither brief. `GsmAudioPort.onFrameReceived` admitted any
+frame with `0 < size <= frameSize` and copied exactly `size` bytes into the **reused**
+`playbackBuffer` — then passed the *whole array* to `GsmAudioNative.writeFrame`, which
+sized the write with `GetArrayLength` and so always wrote **320 bytes**. For a frame
+shorter than 320 bytes the last `320 - size` bytes handed to the modem were stale audio
+left over from the previous frame.
+
+Latent today, not live: `pjmedia_conf`'s `write_port` always calls `put_frame` with
+`cport->samples_per_frame * BYTES_PER_SAMPLE`, so `size` is invariably the full 320. It
+becomes reachable the moment anything upstream delivers a partial frame — a different
+conference frame length, a codec with a shorter last packet, or a future ring buffer
+draining a partial period (**GW-23b**).
+
+Fixed by making the length explicit: `writeFrame(byte[] buffer, int length)` on both sides
+of the JNI boundary, with the length taken from the frame and range-checked natively. The
+selection rule is now the pure, tested `GsmAudioPort.usableFrameBytes(reportedSize,
+capacity)`. Dropping (not clamping) an oversized frame is preserved deliberately.
+
 ### P2 — security posture
 
 #### S1. Exported control receiver with no permission
