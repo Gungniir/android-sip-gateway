@@ -128,7 +128,7 @@ implemented as written.
 | GW-23b | **E5 (P0)** — dedicated I/O thread + ring buffer. **Gated**, see PHASE-2-PLAN §2.4 |
 | [GW-24](issues/GW-24-config-consistency.md) | H4 — key mismatch, atomic prefs writes |
 | [GW-25](issues/GW-25-watchdog-invariants.md) | H9 — both orphan directions + fail-safe deadlines |
-| [GW-26](issues/GW-26-service-lifecycle.md) | G2, H8 — non-blocking shutdown, guarded teardown |
+| [GW-26](issues/GW-26-service-lifecycle.md) | ✅ G2, H8, H8c, H11, F6c, H15 — cancellable shutdown, guarded teardown, deliberate restart |
 | [GW-27](issues/GW-27-sms-duplicate-suppression.md) | H13 — the whole inbox is re-forwarded on every restart |
 
 ### Phase 3 — Hardening
@@ -136,6 +136,7 @@ implemented as written.
 | Issue | Fixes |
 |---|---|
 | [GW-30](issues/GW-30-exported-surface.md) | S1, S2 — permission-gate the control receiver, auth the web server |
+| [GW-28](issues/GW-28-reload-gives-up-permanently.md) | H14 — a reload with no endpoint stops the gateway for good |
 | [GW-31](issues/GW-31-remove-footguns.md) | E3, H10 — delete dead code that violates project rules |
 | [GW-32](issues/GW-32-concurrency-tests.md) | Regression harness for the state machine and the native layer |
 
