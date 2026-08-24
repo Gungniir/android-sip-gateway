@@ -18,6 +18,50 @@ import java.util.concurrent.atomic.AtomicInteger;
  * SoC-specific routing (which mixer controls tap the modem voice path, and which
  * PCM devices carry it) is delegated to an {@link AudioProfile} chosen at runtime
  * by {@link AudioProfileFactory}. This class stays SoC-agnostic.
+ *
+ * <h3>Threading, and the two workers GW-12 decided to keep</h3>
+ * {@code startCapture()} / {@code stopCapture()} are reached only from
+ * {@code AudioBridgeManager}, which asserts the GatewayControl thread. The two background
+ * workers below are <em>not</em> folded into it. GW-12 §7 asked for both; the plan (§2.1)
+ * left the decision here, and the answer for both is no.
+ *
+ * <h4>Why {@code GsmAudioOpen} stays its own thread</h4>
+ * <ul>
+ *   <li><b>It would make its own cancellation undeliverable.</b> The retry loop is bounded by
+ *       {@code stopCapture()} advancing {@link #sessionId}, and {@code stopCapture()} is a
+ *       control-thread operation. Run the loop on that same thread and the cancel sits in the
+ *       queue behind the loop it is meant to cancel: the GW-08 generation machinery becomes
+ *       dead code and the ~10 s window becomes genuinely uninterruptible.</li>
+ *   <li><b>It blocks for up to ~10 s</b> (20 attempts × 500 ms), plus a native
+ *       {@code GsmAudioNative.open()} that is not interruptible and routinely outlives even
+ *       the 1 s join in {@code stopCapture()}. Ten seconds with no call teardown, no
+ *       {@code stopBridge}, no phone-state handling and no reconnection is not acceptable on
+ *       the thread every lifecycle event is serialised through - and a SIP-first incoming
+ *       call, where the caller hangs up mid-retry, is precisely when it happens.</li>
+ *   <li><b>{@code profile.setupMixer(card)} shells out to {@code su}</b> once per saved
+ *       control to read the originals back (Qualcomm), which is unbounded process-spawn
+ *       latency (plan §3c). That is the same reason plan §2.1 keeps {@code MuteControls} and
+ *       {@code BatteryOptDisable} off the control thread.</li>
+ * </ul>
+ * GW-08's generation check is therefore not "defence in depth" here - it remains the primary
+ * and only cancellation mechanism.
+ *
+ * <h4>Why {@code MixerEnforce} stays its own thread</h4>
+ * <ul>
+ *   <li><b>A {@code postDelayed} loop would self-deadlock.</b> {@link #stopEnforceThread()}
+ *       cancels with {@code interrupt()} + {@code join(ENFORCE_JOIN_MS)} <em>while
+ *       {@link #stateLock} is held</em>, and it is reached from the open worker
+ *       ({@link #startEnforceThread(int)}) as well as from {@code stopCapture()}. Turn the
+ *       tick into a control-thread task and "join the in-flight tick" becomes "wait for the
+ *       control thread" - while the control thread's own {@code startCapture}/
+ *       {@code stopCapture} are blocked on the {@code stateLock} the waiter is holding.</li>
+ *   <li><b>Its cadence must not be perturbed by lifecycle work.</b> The whole job is to fight
+ *       the audio HAL re-asserting its routing on a fixed 2 s beat. The control thread blocks
+ *       for 30 s in {@code createEndpoint}'s latch and ~600 ms in a config reload; the mic
+ *       would come back un-muted mid-call in exactly those windows.</li>
+ *   <li>It is cheap and it takes no locks: {@code enforceMixer()} is a handful of native JNI
+ *       mixer writes and touches no saved state, by {@link AudioProfile} contract.</li>
+ * </ul>
  */
 public class GsmAudioPort extends AudioMediaPort {
     private static final String TAG = "GsmAudioPort";
@@ -291,10 +335,13 @@ public class GsmAudioPort extends AudioMediaPort {
             mySession = current + 1;            // odd => a session is current
             sessionId.set(mySession);
 
-            // Run open on a background thread: the modem voice memif may not accept
-            // the PCM params for the first few seconds after a call connects
-            // (especially incoming/SIP-first calls), so we retry with backoff. Doing
-            // this off the caller (main) thread avoids blocking the call lifecycle.
+            // Run open on a background thread. GW-12 §7 proposed folding this onto the
+            // GatewayControl thread now that the caller can block; that was rejected, and
+            // deliberately - see the "Why GsmAudioOpen stays its own thread" note on this
+            // class. In short: the retry window is up to ~10 s, setupMixer() shells out to
+            // `su` an unbounded number of times, and the cancel that bounds all of it is
+            // stopCapture(), which is itself a control-thread operation - so on one thread
+            // the cancel could never be delivered while the loop it cancels was running.
             Thread worker = new Thread(() -> openWithRetry(mySession), "GsmAudioOpen-" + mySession);
             openThread = worker;
             worker.start();

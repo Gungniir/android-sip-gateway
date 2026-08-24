@@ -222,14 +222,16 @@ public class PjsipSipService extends Service implements SipCallService {
         // the one CallManager method that does not assert the control thread. See its javadoc.
         callManager.setListener(callListener);
 
-        // Audio bridge
-        audioBridge = new AudioBridgeManager(this, config);
+        // Audio bridge. Owned by the control thread since GW-12 - it takes the thread so it
+        // can assert that on every state-mutating entry point.
+        audioBridge = new AudioBridgeManager(this, config, control);
 
         // Diagnostic SIP test call (no GSM leg) - see SipTestCallManager. Still main-bound:
         // its internals call pjsua2 from the main looper, which SIP init registers with
         // pjlib. GW-10 changes only who demuxes its callbacks, not where they are handled.
+        // It takes the control thread only to hand the audio bridge back to its owner.
         testCall = new SipTestCallManager(this, config, accountManager, audioBridge,
-                this, mainHandler);
+                this, mainHandler, control);
 
         // Reconnection strategy. GW-15 moved its timer onto the control looper, so the action
         // runs there directly - attemptReconnect() needs that thread anyway, and the hop that
@@ -315,6 +317,14 @@ public class PjsipSipService extends Service implements SipCallService {
         }
 
         stopWebServer();
+
+        // Unwire the audio bridge on the thread that owns it (GW-12). This used to run
+        // inline in shutdownSip() below, on main, while a queued teardown could be running
+        // the very same code on the control thread - and the failure mode of two threads in
+        // unwireBridge() is a pjmedia abort(), not an exception. Queued here rather than
+        // called: quitSafely() drains what is already queued, so this runs on the owning
+        // thread, behind everything else, and is done before the join returns.
+        control.post(this::stopAudioBridge);
 
         // Retire the control thread BEFORE tearing SIP down, so nothing still queued there
         // runs against an endpoint this thread is about to shut down. quitSafely() drains
@@ -421,13 +431,28 @@ public class PjsipSipService extends Service implements SipCallService {
         publishStatus();
     }
 
+    /**
+     * Tear the audio bridge down. Posted from {@code onDestroy} so it runs on the thread that
+     * owns the wiring; see the comment there.
+     */
+    @ControlThread
+    private void stopAudioBridge() {
+        control.assertOnControlThread("stopAudioBridge");
+        audioBridge.stopBridge(AudioBridgeManager.ANY_GENERATION);
+        audioBridge.stopAudioStreams();
+    }
+
+    /**
+     * Still on main, as before - it calls pjsua2 and main is registered with pjlib. Moving it
+     * off main is AUDIT G2, owned by GW-26.
+     *
+     * <p>The audio bridge is <em>not</em> torn down here: that belongs to the control thread
+     * and {@code onDestroy} queues {@link #stopAudioBridge()} ahead of {@code quitSafely()}.
+     * The port itself is deliberately never deleted - GW-12 removed the {@code release()}
+     * that would have, because it nulled a port the pjmedia RT thread can still be inside.
+     */
     private void shutdownSip() {
         Log.d(TAG, "Shutting down SIP...");
-
-        // Stop audio bridge and streams, but DON'T release (keep port alive)
-        // Releasing while PJSIP still running causes NullPointerException in onFrameReceived
-        audioBridge.stopBridge();
-        audioBridge.stopAudioStreams();
 
         // Delete account
         accountManager.deleteAccount();
@@ -590,7 +615,7 @@ public class PjsipSipService extends Service implements SipCallService {
 
         @Override
         public void onCallsTerminated() {
-            audioBridge.stopBridge();
+            audioBridge.stopBridge(AudioBridgeManager.ANY_GENERATION);
             audioBridge.stopAudioStreams();
             updateNotification(accountManager.isRegistered() ? "Registered" : "Not registered");
             publishStatus();
@@ -1183,7 +1208,7 @@ public class PjsipSipService extends Service implements SipCallService {
             Thread.sleep(100);
 
             // 3. Stop audio streams (but keep port alive)
-            audioBridge.stopBridge();
+            audioBridge.stopBridge(AudioBridgeManager.ANY_GENERATION);
             audioBridge.stopAudioStreams();
 
             // 4. Delete old account

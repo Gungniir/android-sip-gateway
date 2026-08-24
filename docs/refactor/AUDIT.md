@@ -887,6 +887,28 @@ a brick. It disappears when **GW-14** removes the sleeps from the reload pipelin
 which `CLAUDE.md` explicitly forbids ("it breaks the `Incall_Music` playback path").
 Currently unreferenced — a trap for the next contributor.
 
+#### H11. `onDestroy` can still overlap main with an abandoned control thread — P2
+Found while landing GW-12. `PjsipSipService.onDestroy` queues the audio-bridge teardown,
+then calls `control.quitSafely(1500 ms)`, then runs `shutdownSip()` on main. `quitSafely`'s
+join is deliberately bounded and, when it expires, the control thread is *abandoned*
+(`GatewayControlThread.quitSafely` logs exactly that) — so main can enter
+`accountManager.deleteAccount()` while the control thread is still inside `stopBridge()`.
+Deleting the account destroys the call's conference port, which is precisely what
+`unwireBridge()`'s liveness check must not race.
+
+The window is narrow: it needs the control thread to be busy for ~1.5 s and then to reach
+the teardown at the instant main gives up. If it is busy *longer* (the 30 s
+`createEndpoint` latch), the teardown never runs at all and there is no overlap — the
+wiring is simply left marked active, which E2's process-scoped holder now makes harmless
+(the next `startBridge`/`stopBridge` finds dead ports and clears them).
+
+This is not new in kind — before GW-12, `shutdownSip()` ran `stopBridge()` on main against
+the same abandoned thread, which was strictly worse. It is recorded because GW-12's whole
+argument is that liveness-check and `stopTransmit` are adjacent *on one thread*, and this
+is the one path where that can still be violated. The clean fix is to move `shutdownSip()`
+itself onto the control thread — **AUDIT G2, owned by GW-26** — after which nothing on main
+touches pjsua2 at destroy and the bound can go away.
+
 ---
 
 ### P2 — security posture

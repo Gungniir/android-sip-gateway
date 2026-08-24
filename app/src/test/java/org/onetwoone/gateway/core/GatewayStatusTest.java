@@ -57,7 +57,8 @@ public class GatewayStatusTest {
         callManager = new CallManager(app, config,
                 new GatewayControlThread(Looper.getMainLooper(), null));
         accountManager = new SipAccountManager(config, new SipEndpointManager(config));
-        audioBridge = new AudioBridgeManager(app, config);
+        audioBridge = new AudioBridgeManager(app, config,
+                new GatewayControlThread(Looper.getMainLooper(), null));
     }
 
     @Test
