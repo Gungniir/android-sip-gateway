@@ -112,7 +112,34 @@ The structural work. Land GW-10 first; the rest are mechanical once it exists.
 state-mutating method, and the full Phase 0 call-cycle suite still green with the
 assertion armed.
 
-### Phase 2 — Correctness & resource hygiene
+### Phase 2 — Correctness & resource hygiene — ⚠️ 8 of 9 LANDED, PARTLY VALIDATED, **NOT DONE**
+
+**361 tests, 0 failures; `assembleDebug` + `lintDebug` green.** Eight issues merged across
+three tags (`phase-2-wave-1/2/3`) and validated on both handsets over 12 real calls —
+results in [PHASE-2-VALIDATION.md](PHASE-2-VALIDATION.md).
+
+**Phase 2 is not done, for two independent reasons:**
+
+1. **GW-23b has not started.** It is the phase's only P0 — E5 burns real GSM minutes on
+   every SIP-side hangup, re-measured at up to **52.12 s** during validation. It is gated on
+   two hardware gates that have not been attempted.
+2. **Four exit criteria are unmet or partial** (§5 of the plan): GW-22's 500-cycle soak has
+   not been run at all (12 calls, not 500); GW-24's mute-selection path is untested; GW-25's
+   false-positive run was deliberately cut from 30 calls to 12; B1e passed its native-read
+   cross-check but not with a populated custom mute list, and the "mic verifiably live after
+   the call" half was never checked.
+
+What **is** settled on hardware: GW-27 against the real 8-message fixture (zero re-forwards
+across two restarts), GW-23a on **both** SoCs (`bulkCopy=true`, two-way audio confirmed by
+the operator, `captureErr=0/playbackErr=0`), GW-26's teardown and user-stop latch, GW-21's
+thread ownership and debounce, and zero `ILLEGAL TRANSITION` / assertion failures /
+tombstones across every run.
+
+Two new findings came out of the validation, both false positives that inflate
+`watchdog_terminations` — **H18** (silent-bridge fires on any SIP leg ringing >12 s) and
+**H19** (D6 fires inside the `DISCONNECTING` window). Neither harms a call today; together
+they corrupt the counter that is supposed to decide whether the watchdog may ever act
+automatically.
 
 **Execution plan: [PHASE-2-PLAN.md](PHASE-2-PLAN.md)** — it overrides the briefs below
 wherever they disagree. Roughly a third of their required-change items are already done,
@@ -121,15 +148,15 @@ implemented as written.
 
 | Issue | Fixes |
 |---|---|
-| [GW-20](issues/GW-20-root-helper.md) | H1 — serialized root shell, safe output capture |
+| [GW-20](issues/GW-20-root-helper.md) | ✅ H1 — serialized root shell, safe output capture |
 | [GW-21](issues/GW-21-sms-off-main.md) | ✅ G1, H12 — SMS pipeline off the main thread, one owner for the suppression state |
-| [GW-22](issues/GW-22-pjsip-object-lifetime.md) | H7 — deletion policy for pjsua2 objects |
-| [GW-23a](issues/GW-23-rt-audio-path.md) | H2, H3 — bulk JNI copy, no per-frame allocation |
+| [GW-22](issues/GW-22-pjsip-object-lifetime.md) | ✅ H7 — deletion policy for pjsua2 objects |
+| [GW-23a](issues/GW-23-rt-audio-path.md) | ✅ H2, H3 — bulk JNI copy, no per-frame allocation |
 | [GW-23b](issues/GW-23b-e5-io-thread.md) | **E5 (P0)** — dedicated I/O thread + ring buffer. **Gated on G1/G2**, see that issue §3 |
-| [GW-24](issues/GW-24-config-consistency.md) | H4 — key mismatch, atomic prefs writes |
-| [GW-25](issues/GW-25-watchdog-invariants.md) | H9 — both orphan directions + fail-safe deadlines |
+| [GW-24](issues/GW-24-config-consistency.md) | ✅ H4 — key mismatch, atomic prefs writes |
+| [GW-25](issues/GW-25-watchdog-invariants.md) | ✅ H9 — both orphan directions + fail-safe deadlines |
 | [GW-26](issues/GW-26-service-lifecycle.md) | ✅ G2, H8, H8c, H11, F6c, H15 — cancellable shutdown, guarded teardown, deliberate restart |
-| [GW-27](issues/GW-27-sms-duplicate-suppression.md) | H13 — the whole inbox is re-forwarded on every restart |
+| [GW-27](issues/GW-27-sms-duplicate-suppression.md) | ✅ H13 — the whole inbox is re-forwarded on every restart |
 
 ### Phase 3 — Hardening
 
@@ -139,6 +166,7 @@ implemented as written.
 | [GW-28](issues/GW-28-reload-gives-up-permanently.md) | H14 — a reload with no endpoint stops the gateway for good |
 | [GW-31](issues/GW-31-remove-footguns.md) | E3, H10 — delete dead code that violates project rules |
 | [GW-32](issues/GW-32-concurrency-tests.md) | Regression harness for the state machine and the native layer |
+| *(unfiled)* | **H18, H19** — two watchdog false positives found during Phase 2 validation. Both cosmetic today; both inflate `watchdog_terminations`, so fix them **before** any decision to let a watchdog rule auto-terminate |
 
 ---
 
