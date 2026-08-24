@@ -196,7 +196,121 @@ The surface is not rendered yet, so this is a no-regression check only.
 
 ## Wave 2 — `phase-4-wave-2` (GW-41, GW-44)
 
-*To be completed when the wave lands.*
+410 tests, 0 failures, lint green (`Autofill`, `ButtonStyle`, `SmallSp`, `UseSwitchCompat`,
+`DisableBaselineAlignment`, `SetTextI18n` all now vanished from the baseline),
+`assembleDebug` green. Nothing on hardware.
+
+**This is the wave that can break the gateway invisibly.** Wave 1 changed how things looked;
+this one rewrote the screen those 25 controls are wired to. Budget real time for §2 below.
+
+### 1. The two wave-1 artefacts must now be gone
+
+Both were expected in wave 1 and are regressions if they survive:
+
+- Light-grey blocks on a dark surface in night mode — the layout's hardcoded `#f0f0f0` /
+  `#666666` / `#999999` should be gone.
+- All seven buttons rendering as identical filled primary — Save / Connect / Disconnect /
+  Restart should now differ.
+
+### 2. The 26-control round-trip — the one that matters
+
+§0 lists 25 controls; GW-41 adds the SoC audio profile, making **26**. A unit test enumerates
+them by id, which proves they *exist*. It cannot prove they still reach the right preference.
+
+For each: **set a non-default value → Save → `force-stop` → relaunch → confirm it survived.**
+
+```
+adb -s <dev> shell am force-stop org.onetwoone.gateway
+adb -s <dev> shell am start -n org.onetwoone.gateway/.MainActivity
+```
+
+Reading the value back on the same screen without the force-stop proves nothing — it may be
+reading the in-memory field it just wrote.
+
+Two save buttons cover different sets (Save Settings vs Save Audio) and six controls write
+through on change with no Save at all — incoming call mode, battery limit, verbose PJSIP log,
+DTMF relay, web interface, mute preset. Exercise all three paths.
+
+### 3. H-b — the guard, with a real web save
+
+The one hazard whose fix cannot be proven in a JVM. GW-41 chose dirty-tracking over a plain
+`hasFocus()` check, and this is the scenario that justified it:
+
+1. On the phone, type new values into **SIP server, port and username**. Do not save.
+2. Tap into the **password** field, so focus is elsewhere.
+3. From a browser, open `http://<device-ip>:8080`, change something, and Apply.
+4. Within a second or two, look at the phone.
+
+**The three fields you typed must still hold your values.** Under the old code they were
+silently replaced and would then have been persisted by your own Save. A plain focus check
+would have protected only the password.
+
+Then press Save and confirm the guard *releases*: change the same field from the browser
+again and it should now repaint, since what is on screen is what is persisted.
+
+### 4. The status header against a real call
+
+All header logic was tested with synthetic snapshots. **The watchdog block has never been
+rendered from a real finding.**
+
+1. Place a call. The duration must **advance once a second** — if it freezes at a value, a
+   derived clock read has been cached, which is the exact failure GW-45's design forbids.
+2. Watch the grace marker appear and clear on an outbound GSM leg.
+3. Confirm SIP / Call / Audio show as three separate lines with their own state colours.
+4. Let the watchdog find something — the easiest is a SIP-side hangup that leaves the GSM leg
+   up. The watchdog block should appear with a termination count and the finding text.
+   Cross-check against `adb logcat | grep INVARIANT`; the screen and the log must agree.
+5. Stop the gateway: the header must show the disconnected state, not stale values.
+
+### 5. The SoC profile spinner — both devices, explicitly
+
+This is the only new control with a path into the audio bridge, and picking wrong drives the
+wrong ALSA mixer controls entirely.
+
+On **merlinx** set it to MediaTek, on **lavender** to Qualcomm, restart the gateway, and
+confirm from logcat that the expected profile loaded:
+
+```
+adb -s <dev> logcat -d | grep -E 'Audio profile (forced|auto-detected)'
+```
+
+Then set both back to `auto` and confirm auto-detection still picks correctly. Place one call
+on each afterwards to confirm the audio bridge still works — a wrong profile is silent
+breakage, not a crash.
+
+### 6. Icons (GW-44)
+
+- **Launcher icon** on both devices: home screen, app drawer, recents, and Settings → Apps.
+- **Notification icons** — the failure mode is specific: a **solid white blob** in the status
+  bar means the alpha-mask rule was got wrong. Check *both* the collapsed status-bar icon and
+  the expanded shade, for both the gateway notification and the battery-limit one. They should
+  be distinguishable from each other.
+- The battery notification icon deliberately no longer says "low battery" — that service caps
+  charging, it does not report a low cell.
+
+### 7. Interaction checks that only a hand can make
+
+- **Collapsible sections**: are four collapsed rows readable as navigable, or do they look
+  dead? The chevrons are text glyphs (`▾`/`▸`), not drawables — legible?
+- **Header height** on the smaller screen, and at maximum font scale
+  (Settings → Display → Font size). The header is ~8 rows and is pinned; if it eats the
+  screen on a 5-inch device, say so.
+- **Keyboard**: expand a section, tap its last field, and check the keyboard does not cover
+  the Save button.
+- **Spinner popups in dark mode** — GW-41 wrote new item layouts naming `gw_on_surface` on
+  `gw_surface_variant`. This is the "popup blindness" class from §0 and it is now in our own
+  code. Open every spinner in night mode.
+
+### 8. Still not verifiable here
+
+- **The whole API 23–25 launcher path.** Ten PNGs exist and are valid files; no device on the
+  bench will ever load one, because both are API 26+. Needs an Android 6/7 device or emulator.
+- **The adaptive icon under a real launcher mask** — circle, squircle, teardrop. The safe-zone
+  maths says nothing clips; that is arithmetic, not observation.
+- **`android:roundIcon` actually being preferred** by an OEM launcher that reads it.
+- **`<monochrome>` / Android 13+ themed icons.** Reasoned safe to ignore below 13; never seen.
+- **Contrast and legibility at arm's length**, in both themes. The `gw_state_*` tokens are
+  tested for existence, never for readability.
 
 ## Wave 3 — `phase-4-wave-3` (GW-42)
 
