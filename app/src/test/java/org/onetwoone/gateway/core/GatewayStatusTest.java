@@ -6,6 +6,7 @@ import static org.junit.Assert.assertTrue;
 
 import android.app.Application;
 import android.os.Bundle;
+import android.os.Looper;
 
 import org.junit.Before;
 import org.junit.Test;
@@ -53,7 +54,8 @@ public class GatewayStatusTest {
         GatewayConfig config = GatewayConfig.getInstance();
         callManager = new CallManager(app, config);
         accountManager = new SipAccountManager(config, new SipEndpointManager(config));
-        audioBridge = new AudioBridgeManager(app, config);
+        audioBridge = new AudioBridgeManager(app, config,
+                new GatewayControlThread(Looper.getMainLooper(), null));
     }
 
     @Test

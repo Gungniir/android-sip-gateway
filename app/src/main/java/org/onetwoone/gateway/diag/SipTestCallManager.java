@@ -10,6 +10,7 @@ import org.onetwoone.gateway.GatewayCall;
 import org.onetwoone.gateway.SipCallService;
 import org.onetwoone.gateway.audio.AudioBridgeManager;
 import org.onetwoone.gateway.config.GatewayConfig;
+import org.onetwoone.gateway.core.GatewayControlThread;
 import org.onetwoone.gateway.sip.SipAccountManager;
 import org.pjsip.pjsua2.AudioMedia;
 import org.pjsip.pjsua2.AudioMediaRecorder;
@@ -86,6 +87,14 @@ public class SipTestCallManager {
     private final SipCallService callbackService;
     private final Handler mainHandler;
 
+    /**
+     * Only ever used to hand {@code AudioBridgeManager} work back to its owner. Since GW-12
+     * the bridge is control-thread state and asserts it, while this manager is main-bound, so
+     * the two BRIDGE-mode calls hop. Fire-and-forget in both directions: main must never
+     * block waiting on the control thread (plan §2.4).
+     */
+    private final GatewayControlThread control;
+
     private final StringBuilder report = new StringBuilder();
 
     /**
@@ -140,13 +149,15 @@ public class SipTestCallManager {
                               SipAccountManager accountManager,
                               AudioBridgeManager audioBridge,
                               SipCallService callbackService,
-                              Handler mainHandler) {
+                              Handler mainHandler,
+                              GatewayControlThread control) {
         this.context = context.getApplicationContext();
         this.config = config;
         this.accountManager = accountManager;
         this.audioBridge = audioBridge;
         this.callbackService = callbackService;
         this.mainHandler = mainHandler;
+        this.control = control;
     }
 
     // ========== Public API (any thread) ==========
@@ -314,9 +325,15 @@ public class SipTestCallManager {
                     append("wired loopback (peer hears itself)");
                     break;
                 case BRIDGE:
-                    audioBridge.startBridge(current);
-                    append("wired GSM bridge; audio streams "
-                            + (audioBridge.isAudioStreaming() ? "open" : "NOT open (no live GSM call?)"));
+                    // Hop to the bridge's owner (GW-12). append() is synchronized and is
+                    // already reached from foreign threads, so reporting from there is fine.
+                    final GatewayCall bridged = current;
+                    control.post(() -> {
+                        audioBridge.startBridge(bridged);
+                        append("wired GSM bridge; audio streams "
+                                + (audioBridge.isAudioStreaming()
+                                        ? "open" : "NOT open (no live GSM call?)"));
+                    });
                     break;
             }
         } catch (Exception e) {
@@ -509,7 +526,11 @@ public class SipTestCallManager {
         }
 
         if (mode == Mode.BRIDGE) {
-            audioBridge.stopBridge();
+            // Posted, so it runs on the bridge's owning thread. It may therefore land after
+            // the hangup below has destroyed the call's conference port - which is the
+            // ordinary case for the gateway path too, and exactly what unwireBridge()'s
+            // liveness check is there to survive.
+            control.post(audioBridge::stopBridge);
         }
 
         wiredCallMedia = null;

@@ -215,14 +215,16 @@ public class PjsipSipService extends Service implements SipCallService {
         callManager = new CallManager(this, config);
         callManager.setListener(callListener);
 
-        // Audio bridge
-        audioBridge = new AudioBridgeManager(this, config);
+        // Audio bridge. Owned by the control thread since GW-12 - it takes the thread so it
+        // can assert that on every state-mutating entry point.
+        audioBridge = new AudioBridgeManager(this, config, control);
 
         // Diagnostic SIP test call (no GSM leg) - see SipTestCallManager. Still main-bound:
         // its internals call pjsua2 from the main looper, which SIP init registers with
         // pjlib. GW-10 changes only who demuxes its callbacks, not where they are handled.
+        // It takes the control thread only to hand the audio bridge back to its owner.
         testCall = new SipTestCallManager(this, config, accountManager, audioBridge,
-                this, mainHandler);
+                this, mainHandler, control);
 
         // Reconnection strategy. Its timer still fires on main; the action hops to the
         // control thread, because attemptReconnect() runs initializeSip().
@@ -291,6 +293,14 @@ public class PjsipSipService extends Service implements SipCallService {
         }
 
         stopWebServer();
+
+        // Unwire the audio bridge on the thread that owns it (GW-12). This used to run
+        // inline in shutdownSip() below, on main, while a queued teardown could be running
+        // the very same code on the control thread - and the failure mode of two threads in
+        // unwireBridge() is a pjmedia abort(), not an exception. Queued here rather than
+        // called: quitSafely() drains what is already queued, so this runs on the owning
+        // thread, behind everything else, and is done before the join returns.
+        control.post(this::stopAudioBridge);
 
         // Retire the control thread BEFORE tearing SIP down, so nothing still queued there
         // runs against an endpoint this thread is about to shut down. quitSafely() drains
@@ -397,13 +407,28 @@ public class PjsipSipService extends Service implements SipCallService {
         publishStatus();
     }
 
-    private void shutdownSip() {
-        Log.d(TAG, "Shutting down SIP...");
-
-        // Stop audio bridge and streams, but DON'T release (keep port alive)
-        // Releasing while PJSIP still running causes NullPointerException in onFrameReceived
+    /**
+     * Tear the audio bridge down. Posted from {@code onDestroy} so it runs on the thread that
+     * owns the wiring; see the comment there.
+     */
+    @ControlThread
+    private void stopAudioBridge() {
+        control.assertOnControlThread("stopAudioBridge");
         audioBridge.stopBridge();
         audioBridge.stopAudioStreams();
+    }
+
+    /**
+     * Still on main, as before - it calls pjsua2 and main is registered with pjlib. Moving it
+     * off main is AUDIT G2, owned by GW-26.
+     *
+     * <p>The audio bridge is <em>not</em> torn down here: that belongs to the control thread
+     * and {@code onDestroy} queues {@link #stopAudioBridge()} ahead of {@code quitSafely()}.
+     * The port itself is deliberately never deleted - GW-12 removed the {@code release()}
+     * that would have, because it nulled a port the pjmedia RT thread can still be inside.
+     */
+    private void shutdownSip() {
+        Log.d(TAG, "Shutting down SIP...");
 
         // Delete account
         accountManager.deleteAccount();
