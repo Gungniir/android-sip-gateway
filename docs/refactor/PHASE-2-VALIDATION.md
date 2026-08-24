@@ -197,3 +197,31 @@ and the counters. The recipe is in the class javadoc and the commit body.
   (`gsmCallPlacedTime` is only set by `placeGsmCall`), and the inbound flow spends up to ~20 s
   ringing with `CallManager` at `IDLE`.
 - **GW-21**: 20 SMS in a burst, all forwarded exactly once, no `Skipped … frames`.
+
+### GW-21 — what only hardware can settle
+
+Everything below is **unmeasured** until it is run on a device. The JVM suite covers thread
+identity, cursor lifetime, the coalescing window and stop-during-a-scan; it cannot cover the
+real content provider, real `su`, or a real PBX.
+
+1. **The burst.** 20 SMS to the gateway SIM in a burst. Expect all 20 at the PBX **exactly
+   once**, and in `logcat -s SmsHandler` roughly one `processInbox START` per burst rather
+   than one per message — that is the debounce doing its job. Also expect **no**
+   `Skipped … frames` from the UI thread, which is the G1 acceptance signal.
+2. **The observer's thread.** Every `SmsHandler` line during a burst must be on
+   `GatewayControl`. `adb logcat -v thread -s SmsHandler` and check the tid against
+   `GwControlThread: Control thread started`. A line on main is the regression.
+3. **SMS during a bridged call.** Send an SMS while a call is bridged: call audio unaffected,
+   teardown not delayed. The blocking SIP send now shares a thread with call setup, so this is
+   the one behavioural risk the move creates — the send is bounded by the PBX's response, and
+   the batch is at most one inbox's worth per 250 ms window.
+4. **PBX down, then up.** With the PBX unreachable, send one SMS: bounded retries with visible
+   backoff in `logcat -s SmsHandler`, then a give-up line. Restore the PBX before the cap and
+   confirm delivery on a retry. This is GW-27's bound, re-checked single-threaded.
+5. **Destroy during a scan.** `am force-stop` / STOP broadcast while a burst is in flight:
+   expect `Stopping SMS handler` on main, `SMS handler stopped` on `GatewayControl`, no
+   `unregisterContentObserver` leak warning, and the undelivered messages forwarded (not
+   dropped, not duplicated) on the next start.
+
+**Do not clear the merlinx fixture** (8 unread SMS, `_id` 3/4/5/6/8/10/11/12) as part of any
+of this.

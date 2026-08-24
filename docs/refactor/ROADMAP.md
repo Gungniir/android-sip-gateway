@@ -122,7 +122,7 @@ implemented as written.
 | Issue | Fixes |
 |---|---|
 | [GW-20](issues/GW-20-root-helper.md) | H1 — serialized root shell, safe output capture |
-| [GW-21](issues/GW-21-sms-off-main.md) | G1 — SMS pipeline off the main thread |
+| [GW-21](issues/GW-21-sms-off-main.md) | ✅ G1, H12 — SMS pipeline off the main thread, one owner for the suppression state |
 | [GW-22](issues/GW-22-pjsip-object-lifetime.md) | H7 — deletion policy for pjsua2 objects |
 | [GW-23a](issues/GW-23-rt-audio-path.md) | H2, H3 — bulk JNI copy, no per-frame allocation |
 | GW-23b | **E5 (P0)** — dedicated I/O thread + ring buffer. **Gated**, see PHASE-2-PLAN §2.4 |
