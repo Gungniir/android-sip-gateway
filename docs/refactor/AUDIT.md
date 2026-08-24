@@ -619,14 +619,44 @@ carry `@Deprecated` naming GW-31. **H1b** (the `startRootShell` double-spawn) is
 *not* fixed — the API it lives in is scheduled for deletion, and the javadoc says so.
 Add to the GW-31 sweep alongside H7d/H7e and dead `deleteSms` / `setSoundCard`.
 
-#### H2. Per-frame JNI churn on the RT thread
-`GsmAudioPort.onFrameRequested:160-168` and `onFrameReceived:205-207` copy 160 samples
-one `ByteVector.add()` / `get()` at a time — ~8000 SWIG/JNI round-trips per second per
-direction. Any GC pause here is an audible dropout.
+#### H2. Per-frame JNI churn on the RT thread — ✅ FIXED (GW-23a)
+`GsmAudioPort.onFrameRequested:160-168` and `onFrameReceived:205-207` copied the frame
+one `ByteVector.add()` / `get()` at a time. Any GC pause here is an audible dropout.
 
-#### H3. Per-frame `malloc`/`free` in the resampler
-`cpp/gsm_audio_jni.c:304-319` allocates the upsample buffer on every frame (50 Hz) on the
-RT thread.
+**The original numbers were 2× low, and they were not the worst part.** `frameSize` is
+**320 bytes**, not 160 samples, and `ByteVector` is `std::vector<unsigned char>` — one
+element per byte. So the loops ran 320 times, i.e. **≈32 500 JNI transitions/s**, not
+16 000. Alongside that, per frame:
+- `add(Short)` / `get(int)→Short` **autobox**, and the values are `b & 0xFF` ∈ [0,255]
+  while `Short.valueOf` caches only −128…127 → **~4 000 allocations/s per direction on the
+  RT thread**;
+- `MediaFrame.getBuf()` returns `new ByteVector(cPtr, false)` — a fresh **finalizable**
+  wrapper, twice per frame → **100 finalizable objects/s** onto the finalizer queue;
+- repeated `push_back` into a fresh vector reallocates ~10 times per frame.
+
+The boxing and the finalizer pressure explain GC-pause dropouts far better than the
+transition count does.
+
+Fixed by moving both copies into C as a single `memcpy` each
+(`GsmAudioNative.pjBufRead/pjBufWrite`), reaching the vector's storage through the
+hand-written `org.pjsip.pjsua2.PjByteVectorAccess`. Java-side allocation on both callbacks
+is now zero. **This creates an ABI dependency** on `pj::ByteVector` being
+`std::vector<unsigned char>` and on libc++'s vector layout — verified by disassembling the
+vendored `libpjsua2.so`, and re-verified at runtime by `GsmAudioPort`'s constructor, which
+falls back to the old loops on any mismatch. See that class before rebuilding PJSIP.
+
+One C++ allocation per frame is irreducible from the app side: pjsua2's `get_frame`
+stack-constructs a fresh `MediaFrame` per tick, so its `buf` always starts empty.
+
+#### H3. Per-frame `malloc`/`free` in the resampler — ✅ FIXED (GW-23a)
+`cpp/gsm_audio_jni.c:304-319` allocated the upsample buffer on every frame (50 Hz) on the
+RT thread. Now allocated once in `open()` (`playback_rate / 50 * playback_channels`
+samples = 960 on the MediaTek path), borrowed through GW-01's `io_ref`, and freed in
+`close()` **after** the drain — the same lifetime discipline the PCM handles have.
+`writeFrame` bounds-checks against the capacity instead of trusting the arithmetic.
+
+**MediaTek-only.** Qualcomm has `capture_rate == playback_rate` and never enters the
+branch, so this can only be validated on merlinx.
 
 #### H4. Web UI writes a preference key nothing reads
 `WebConfigServer.java:156` reads and `:267` writes `mic_mute_controls` as a **StringSet**;
@@ -674,11 +704,19 @@ those is an NPE inside `onDestroy`.
 The reverse — a live GSM call with no SIP leg — is never detected, so a failed bridge can
 burn GSM minutes indefinitely.
 
-#### H2b. The Java-side `isOpen()` pre-check is now redundant overhead
-Post-GW-01, `readFrame`/`writeFrame` check `is_open` under the lock and return -1 safely.
-`GsmAudioPort.onFrameRequested` (`:155`) and `onFrameReceived` (`:196`) still call
-`GsmAudioNative.isOpen()` first, which is now a third lock acquisition per frame per
-direction for no benefit. Dropping it is a free win — fold into **GW-23**.
+#### H2b. The Java-side `isOpen()` pre-check is now redundant overhead — ✅ FIXED (GW-23a)
+Post-GW-01, `readFrame`/`writeFrame` check `is_open` under the lock and refuse safely.
+`GsmAudioPort.onFrameRequested` (`:155`) and `onFrameReceived` (`:196`) still called
+`GsmAudioNative.isOpen()` first — a third acquisition of the same native mutex per frame
+per direction, 100/s during a call, for no benefit.
+
+Removing it required one contract change, or the error counters would have got worse:
+`io_acquire()` failure and a real `pcm_read()` failure both reported `-1`, so every
+end-of-call teardown race would have been counted as a capture error. `readFrame` /
+`writeFrame` are now three-valued — *n* on success, **0 when the device is closed** (the
+ordinary race, not an error), `-1` only when ALSA itself failed — and
+`captureErrors`/`playbackErrors` count only the last, so they stay comparable against the
+pre-change baseline.
 
 #### H2c. `stopCapture()` worst case is now ~1.75 s, on the main thread — RAISED to P1
 After GW-01 and GW-08 landed, `GsmAudioPort.stopCapture()` can block its caller for the
@@ -1200,6 +1238,25 @@ without any process restart at all.
 → New issue **GW-27**. Related: **H12** (same set, threading), **H1** / **GW-20**
 (`execRoot`'s return contract is the root cause of defect 3, and it is not SMS-specific —
 *every* caller that tests `execRoot(...) != null` for success is equally blind).
+
+#### H2e. A short SIP frame replays the tail of the previous one to the modem — NEW, P2 — ✅ FIXED (GW-23a)
+Found during GW-23a recon, in neither brief. `GsmAudioPort.onFrameReceived` admitted any
+frame with `0 < size <= frameSize` and copied exactly `size` bytes into the **reused**
+`playbackBuffer` — then passed the *whole array* to `GsmAudioNative.writeFrame`, which
+sized the write with `GetArrayLength` and so always wrote **320 bytes**. For a frame
+shorter than 320 bytes the last `320 - size` bytes handed to the modem were stale audio
+left over from the previous frame.
+
+Latent today, not live: `pjmedia_conf`'s `write_port` always calls `put_frame` with
+`cport->samples_per_frame * BYTES_PER_SAMPLE`, so `size` is invariably the full 320. It
+becomes reachable the moment anything upstream delivers a partial frame — a different
+conference frame length, a codec with a shorter last packet, or a future ring buffer
+draining a partial period (**GW-23b**).
+
+Fixed by making the length explicit: `writeFrame(byte[] buffer, int length)` on both sides
+of the JNI boundary, with the length taken from the frame and range-checked natively. The
+selection rule is now the pure, tested `GsmAudioPort.usableFrameBytes(reportedSize,
+capacity)`. Dropping (not clamping) an oversized frame is preserved deliberately.
 
 ### P2 — security posture
 

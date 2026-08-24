@@ -4,6 +4,81 @@
 **Files** `GsmAudioPort.java`, `cpp/gsm_audio_jni.c`
 **Depends on** GW-01 · **Conflicts with** GW-01, GW-08, GW-12
 
+---
+
+## Status — split per PHASE-2-PLAN §2.4
+
+**GW-23a — code complete, on-device verification outstanding.** Closes AUDIT **H2**,
+**H2b**, **H3** and the newly filed **H2e**. Items §1–§5 of this brief are done; §5's
+prohibition was honoured — ALSA still runs inside the pjmedia conference callback.
+
+**GW-23b — not started, gated.** The E5 fix (dedicated I/O thread + ring buffer) is a
+separate ticket and does not begin until gates G1/G2 in PHASE-2-PLAN §4 pass.
+
+### What GW-23a actually changed
+
+| Brief item | Outcome |
+|---|---|
+| §1 bulk JNI copy | Option 1 taken — the copy is one `memcpy` in C. Needs a new hand-written class, `org.pjsip.pjsua2.PjByteVectorAccess`, to reach `protected static getCPtr`. **Creates an ABI dependency** — see below. |
+| §2 preallocated resample scratch | Allocated in `open()` (960 samples), borrowed through GW-01's `io_ref`, freed in `close()` after the drain. Bounds-checked. |
+| §3 hoist the silence frame | Fill removed entirely; `size = 0`, `type = NONE`. Confirmed against pjproject 2.14.1 `pjsua2/media.cpp:get_frame` and `pjmedia/conference.c`, not by reasoning. |
+| §4 cheap counters | `AtomicLong`, single writer, no lock. Read accessors added for GW-25. |
+| §4b drop `isOpen()` | Done. Required making `readFrame`/`writeFrame` three-valued (*n* / `0` closed / `-1` error) so the error counters stay comparable. |
+| §5 no new locks | Honoured. `io_acquire` remains the only critical section, per frame, never hoisted. |
+| — | **H2e**, new: `onFrameReceived` passed the whole reusable buffer to `writeFrame`, so a short frame replayed the previous frame's tail. `writeFrame` now takes an explicit length. |
+
+**The brief's numbers were wrong and are corrected in AUDIT H2.** `frameSize` is
+**320 bytes**, so the loops ran 320 times, not 160 — **≈32 500 JNI transitions/s**. And
+the transition count was never the main cost: ~4 000 `Short` boxes/s per direction plus
+100 finalizable `ByteVector` wrappers/s from `MediaFrame.getBuf()` explain GC-pause
+dropouts far better.
+
+### The ABI dependency, stated plainly
+
+`gsm_audio_jni.c` reads the first two pointer words of a `std::vector<unsigned char>` as
+`__begin_`/`__end_`. That binds this code to `pj::ByteVector` being
+`std::vector<unsigned char>` and to libc++'s vector layout. Verified by disassembling the
+vendored `libpjsua2.so` (`ByteVector_doSize` → `ldp x8, x9, [x2]; sub x8, x9, x8`) and by
+confirming it links `libc++_shared.so`, the same STL as `ANDROID_STL=c++_shared`.
+
+Nothing writes a vector's control block or resizes one — sizing stays with pjsua2 — and
+`GsmAudioPort`'s constructor cross-checks both copy directions against pjsua2's own
+generated accessors at startup, falling back to the old loops on mismatch. **After any
+PJSIP rebuild, check logcat for `bulk frame copy unavailable`.**
+
+### On-device verification still owed
+
+Nothing below has been run; all of it needs hardware.
+
+**merlinx (MediaTek Helio G85, debug, assertions armed) — the only device that can
+validate H3.** It is the only SoC where `capture_rate != playback_rate`, so it is the only
+one that enters the resampler at all.
+1. `GsmAudioPort` startup line must read `bulkCopy=true`. If it reads `false`, the ABI
+   self-check failed and everything below is measuring the fallback path.
+2. `Upsample scratch: 960 samples (1920 bytes)` must appear once per `open()`, and
+   **never** `writeFrame: N out samples exceed the 960-sample scratch`.
+3. Record both directions of a real GSM↔SIP call and compare against a pre-change
+   recording. A wrong scratch size or a wrong `out_n` sounds like **pitch/speed shift**
+   (chipmunk or slow-motion) or a **periodic 20 ms buzz** — not like dropouts.
+4. `captureErr` / `playbackErr` in the `Native audio stopped` line must not be worse than
+   baseline. They should now be *lower* at teardown: an end-of-call close is reported as 0
+   and no longer counted as an error.
+
+**lavender (Qualcomm, release).** Takes the no-resample fast path, so it validates
+everything except H3.
+1. `bulkCopy=true` at startup.
+2. Two-way audio on a real call, both directions, compared against a pre-change recording.
+   A wrong bulk copy sounds like **white noise, a constant tone, or silence** — the failure
+   mode is a wholesale wrong buffer, not a subtle artefact. Anything in between (occasional
+   clicks) points at the frame-length change instead.
+3. Confirm the mic is live after the call via a normal non-gateway call (the mute-lease
+   path is untouched but shares the teardown).
+
+**Both SoCs:** full call matrix, zero tombstones, zero `ILLEGAL TRANSITION`, and CPU during
+a call (`adb shell top -p $(pidof org.onetwoone.gateway)`) compared before/after — a
+measurable drop is expected. Do **not** read `/proc/asound/*/status` on merlinx during a
+call while profiling; it kernel-panics.
+
 ## Problem
 
 **H2 — per-sample JNI in the RT callbacks.**

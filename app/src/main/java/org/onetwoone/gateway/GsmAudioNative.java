@@ -53,24 +53,77 @@ public class GsmAudioNative {
     /**
      * Read audio frame from capture device (GSM -> SIP direction).
      *
-     * <p>Blocks for up to one ALSA period. Returns -1 (rather than crashing) if
-     * {@link #close} has run or runs concurrently.
+     * <p>Blocks for up to one ALSA period. Safe (rather than crashing) if {@link #close}
+     * has run or runs concurrently: the open check happens under the native lock, inside
+     * the same critical section that takes the in-flight I/O reference. Callers must NOT
+     * pre-check {@link #isOpen()} - that is a third acquisition of the same mutex per
+     * frame and it decides nothing this call does not decide (AUDIT H2b).
      *
      * @param buffer Byte array to fill with PCM data
-     * @return Number of bytes read, or -1 on error / device closed
+     * @return Number of bytes read; {@code 0} if the device is closed, which is the
+     *         ordinary race at end of call and <b>not</b> an error; {@code -1} if the
+     *         ALSA read itself failed
      */
     public static native int readFrame(byte[] buffer);
 
     /**
      * Write audio frame to playback device (SIP -> GSM direction).
      *
-     * <p>Returns -1 (rather than crashing) if {@link #close} has run or runs
-     * concurrently.
+     * <p>Same contract as {@link #readFrame}: no {@link #isOpen()} pre-check, and a
+     * closed device is reported as {@code 0}, not as a failure.
+     *
+     * <p>{@code length} is explicit and mandatory. The caller's buffer is sized for the
+     * largest frame the port can carry, and pjmedia is allowed to deliver a shorter one;
+     * this method used to take the whole array, so a short frame pushed the untouched
+     * tail of the <em>previous</em> frame back out to the modem (AUDIT H2e).
      *
      * @param buffer Byte array with PCM data
-     * @return Number of bytes written, or -1 on error / device closed
+     * @param length How many bytes of {@code buffer} belong to this frame
+     * @return Number of bytes accepted; {@code 0} if the device is closed; {@code -1} if
+     *         the ALSA write failed or {@code length} is out of range
      */
-    public static native int writeFrame(byte[] buffer);
+    public static native int writeFrame(byte[] buffer, int length);
+
+    // ============ pjsua2 ByteVector bulk access (AUDIT H2) ============
+    //
+    // These three move a whole audio frame between a byte[] and a pjsua2 ByteVector with
+    // one memcpy instead of ~320 SWIG per-element calls and ~160 Short allocations. They
+    // are the reason GsmAudioPort's RT callbacks no longer loop.
+    //
+    // The `handle` is a raw C++ address obtained from
+    // org.pjsip.pjsua2.PjByteVectorAccess — read that class and the matching block in
+    // gsm_audio_jni.c before touching any of this. It is an ABI dependency on libc++'s
+    // std::vector layout, deliberately taken, verified against the vendored
+    // libpjsua2.so, and re-checked at runtime by GsmAudioPort's constructor.
+    //
+    // Passing a handle that is not a live pj::ByteVector is undefined behaviour. Never
+    // cache one across callbacks: pjmedia's MediaFrame is stack-allocated per frame.
+
+    /**
+     * Elements currently held by the vector at {@code handle}, or -1 if it does not look
+     * like a live {@code std::vector<unsigned char>}.
+     */
+    static native int pjBufSize(long handle);
+
+    /**
+     * Bulk-copy {@code length} bytes out of the vector at {@code handle} into {@code dst}.
+     *
+     * @return {@code length} on success, -1 if the vector is shorter than {@code length},
+     *         the array is too small, or the handle is not usable
+     */
+    static native int pjBufRead(long handle, byte[] dst, int length);
+
+    /**
+     * Bulk-copy {@code length} bytes from {@code src} into the vector at {@code handle},
+     * in place.
+     *
+     * <p>The vector must already be exactly {@code length} elements long: this fills
+     * existing storage and never grows it, which is what keeps the vector's control block
+     * (and therefore its allocator) out of native hands.
+     *
+     * @return {@code length} on success, -1 on any size mismatch or unusable handle
+     */
+    static native int pjBufWrite(long handle, byte[] src, int length);
 
     /**
      * Set mixer control value.
@@ -127,9 +180,13 @@ public class GsmAudioNative {
     /**
      * Check if audio is open.
      *
-     * <p>Advisory only - the device may be closed the instant after this returns. It is
-     * safe to act on a stale {@code true}: {@link #readFrame} / {@link #writeFrame}
-     * re-check under the native lock and return -1 instead of touching a freed PCM.
+     * <p>Advisory only - the device may be closed the instant after this returns, so it
+     * can never make anything safe; {@link #readFrame} / {@link #writeFrame} re-check
+     * under the native lock and refuse instead of touching a freed PCM.
+     *
+     * <p><b>Do not call this on the per-frame path.</b> It takes the same native mutex
+     * {@code readFrame}/{@code writeFrame} already take, so at 50 frames/s in two
+     * directions it was 100 extra acquisitions per second buying nothing (AUDIT H2b).
      */
     public static native boolean isOpen();
 

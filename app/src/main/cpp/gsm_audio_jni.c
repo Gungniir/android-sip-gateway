@@ -30,6 +30,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <pthread.h>
 #include <errno.h>
 #include <time.h>
@@ -64,6 +66,13 @@ struct gsm_audio_ctx {
 
     int is_open;
     int active_io;              /* readers + writers currently inside pcm_read/pcm_write */
+
+    /* Upsample scratch for writeFrame()'s resample branch (AUDIT H3). Allocated once per
+     * open() and freed in close() AFTER the I/O drain, so a writer holding an io_ref can
+     * never be using it while it is freed - exactly the discipline the PCM handles get.
+     * Sized for the largest 20 ms frame the playback device can take. */
+    short *resample_buf;
+    unsigned int resample_samples;   /* capacity of resample_buf, in samples */
 
     pthread_mutex_t lock;
     pthread_cond_t io_drained;  /* broadcast when active_io falls to 0 */
@@ -109,6 +118,8 @@ struct io_ref {
     unsigned int capture_channels;
     unsigned int playback_rate;
     unsigned int playback_channels;
+    short       *resample_buf;      /* borrowed for as long as the reference is held */
+    unsigned int resample_samples;
 };
 
 /*
@@ -132,6 +143,8 @@ static int io_acquire(int capture, struct io_ref *out) {
     out->capture_channels  = g_ctx->capture_channels;
     out->playback_rate     = g_ctx->playback_rate;
     out->playback_channels = g_ctx->playback_channels;
+    out->resample_buf      = g_ctx->resample_buf;
+    out->resample_samples  = g_ctx->resample_samples;
     g_ctx->active_io++;
 
     pthread_mutex_unlock(&g_ctx->lock);
@@ -333,6 +346,29 @@ Java_org_onetwoone_gateway_GsmAudioNative_open(
     }
     LOGI("Capture PCM opened: %d:%d", card, captureDevice);
 
+    /* Upsample scratch (AUDIT H3). writeFrame() used to malloc()/free() this on every
+     * frame, 50x/second, on the pjmedia RT thread. A 20 ms frame can never produce more
+     * than playback_rate/50 samples per channel, and the PJSIP port format is fixed for
+     * the life of the port, so one allocation here covers every frame.
+     * Only the MediaTek profile (capture 8 kHz, playback 48 kHz) ever reads it; Qualcomm
+     * has capture_rate == playback_rate and takes the no-copy fast path. */
+    g_ctx->resample_samples = (unsigned int)(playbackRate / 50) * (unsigned int)playbackChannels;
+    if (g_ctx->resample_samples > 0) {
+        g_ctx->resample_buf = (short *)malloc((size_t)g_ctx->resample_samples * sizeof(short));
+        if (!g_ctx->resample_buf) {
+            LOGE("Failed to allocate %u-sample upsample scratch", g_ctx->resample_samples);
+            g_ctx->resample_samples = 0;
+            pcm_close(g_ctx->capture_pcm);
+            g_ctx->capture_pcm = NULL;
+            pcm_close(g_ctx->playback_pcm);
+            g_ctx->playback_pcm = NULL;
+            pthread_mutex_unlock(&g_ctx->lock);
+            return JNI_FALSE;
+        }
+        LOGI("Upsample scratch: %u samples (%u bytes)", g_ctx->resample_samples,
+             g_ctx->resample_samples * (unsigned int)sizeof(short));
+    }
+
     /* Open mixer */
     g_ctx->mixer = mixer_open(card);
     if (!g_ctx->mixer) {
@@ -401,6 +437,14 @@ Java_org_onetwoone_gateway_GsmAudioNative_close(JNIEnv *env, jclass clazz) {
         g_ctx->mixer = NULL;
     }
 
+    /* Freed here, after the drain, for the same reason the PCM handles are: a writer that
+     * took an io_ref borrowed this pointer and may still be interpolating into it. */
+    if (g_ctx->resample_buf) {
+        free(g_ctx->resample_buf);
+        g_ctx->resample_buf = NULL;
+    }
+    g_ctx->resample_samples = 0;
+
     pthread_mutex_unlock(&g_ctx->lock);
     LOGI("Audio closed");
 }
@@ -411,8 +455,13 @@ Java_org_onetwoone_gateway_GsmAudioNative_close(JNIEnv *env, jclass clazz) {
  * Runs on the pjmedia RT thread, 50x/second. Allocates nothing and holds no lock across
  * the blocking pcm_read(); the io_ref keeps the PCM alive for exactly that long.
  *
+ * This is the ONLY open check the caller needs (AUDIT H2b): is_open is tested inside
+ * io_acquire() under the lock, so a Java-side isOpen() pre-check was a third acquisition
+ * of the same mutex per frame per direction, deciding nothing this call does not decide.
+ *
  * @param buffer Byte array to fill with PCM data
- * @return Number of bytes read, or -1 on error
+ * @return Number of bytes read; 0 if the device is closed (NOT an error - it is the
+ *         normal race at end of call); -1 if pcm_read() itself failed.
  */
 JNIEXPORT jint JNICALL
 Java_org_onetwoone_gateway_GsmAudioNative_readFrame(
@@ -430,7 +479,7 @@ Java_org_onetwoone_gateway_GsmAudioNative_readFrame(
     struct io_ref io;
     if (!io_acquire(1, &io)) {
         (*env)->ReleaseByteArrayElements(env, buffer, buf, JNI_ABORT);
-        return -1;
+        return 0;                        /* closed, not broken - see the contract above */
     }
 
     int ret = pcm_read(io.pcm, buf, len);
@@ -451,16 +500,32 @@ Java_org_onetwoone_gateway_GsmAudioNative_readFrame(
  *
  * Runs on the pjmedia RT thread, 50x/second. Holds no lock across the blocking
  * pcm_write(); the io_ref keeps the PCM alive for exactly that long and carries the
- * rate/channel snapshot the resampler needs, so no g_ctx field is read unlocked.
+ * rate/channel snapshot and the preallocated upsample scratch the resampler needs, so no
+ * g_ctx field is read unlocked and nothing here allocates (AUDIT H3).
+ *
+ * Like readFrame(), this is the only open check the caller needs (AUDIT H2b).
+ *
+ * `length` is explicit because the caller's buffer is sized for the largest possible frame
+ * and pjmedia may hand it a shorter one. Using GetArrayLength() here instead - as this
+ * function used to - writes the untouched tail of the previous frame back out to the
+ * modem (AUDIT H2e).
  *
  * @param buffer Byte array with PCM data
- * @return Number of bytes written, or -1 on error
+ * @param length How many bytes of `buffer` are this frame; must be 0..buffer.length
+ * @return Number of bytes accepted; 0 if the device is closed (NOT an error); -1 if
+ *         pcm_write() itself failed, the length is out of range, or the frame does not
+ *         fit the upsample scratch.
  */
 JNIEXPORT jint JNICALL
 Java_org_onetwoone_gateway_GsmAudioNative_writeFrame(
-        JNIEnv *env, jclass clazz, jbyteArray buffer) {
+        JNIEnv *env, jclass clazz, jbyteArray buffer, jint length) {
 
-    jsize len = (*env)->GetArrayLength(env, buffer);
+    jsize capacity = (*env)->GetArrayLength(env, buffer);
+    if (length < 0 || length > capacity) {
+        LOGE("writeFrame: length %d out of range for a %d-byte buffer", length, capacity);
+        return -1;
+    }
+    jsize len = (jsize)length;
     jbyte *buf = (*env)->GetByteArrayElements(env, buffer, NULL);
     if (!buf) {
         LOGE("Failed to get byte array elements");
@@ -470,7 +535,7 @@ Java_org_onetwoone_gateway_GsmAudioNative_writeFrame(
     struct io_ref io;
     if (!io_acquire(0, &io)) {
         (*env)->ReleaseByteArrayElements(env, buffer, buf, JNI_ABORT);
-        return -1;
+        return 0;                        /* closed, not broken - see the contract above */
     }
 
     int ret;
@@ -482,15 +547,17 @@ Java_org_onetwoone_gateway_GsmAudioNative_writeFrame(
         /* Upsample mono captureRate -> mono playbackRate via linear interpolation.
          * (MediaTek: PJSIP delivers 8 kHz mono; the modem playback memif needs
          * 48 kHz.)
-         * NOTE: the per-frame malloc below is a known RT-path defect, tracked as GW-23. */
+         * The scratch buffer is preallocated in open() and borrowed through the io_ref -
+         * nothing on this path allocates (AUDIT H3). */
         const short *in = (const short *)buf;
         int in_n = len / 2;
         long out_n = (long)in_n * io.playback_rate / io.capture_rate;
-        short *out = (short *)malloc((size_t)out_n * 2);
-        if (!out) {
+        short *out = io.resample_buf;
+        if (!out || out_n <= 0 || out_n > (long)io.resample_samples) {
             io_release();
             (*env)->ReleaseByteArrayElements(env, buffer, buf, JNI_ABORT);
-            LOGE("writeFrame: malloc failed for %ld out samples", out_n);
+            LOGE("writeFrame: %ld out samples exceed the %u-sample scratch (in=%d bytes)",
+                 out_n, io.resample_samples, len);
             return -1;
         }
         double step = (double)io.capture_rate / (double)io.playback_rate;
@@ -502,7 +569,6 @@ Java_org_onetwoone_gateway_GsmAudioNative_writeFrame(
             out[j] = (short)(in[i0] * (1.0 - frac) + in[i1] * frac);
         }
         ret = pcm_write(io.pcm, out, (unsigned int)(out_n * 2));
-        free(out);
     } else {
         /* Unsupported channel conversion - write as-is (should not happen). */
         ret = pcm_write(io.pcm, buf, len);
@@ -518,6 +584,134 @@ Java_org_onetwoone_gateway_GsmAudioNative_writeFrame(
     (*env)->ReleaseByteArrayElements(env, buffer, buf, JNI_ABORT);
 
     return (ret != 0) ? -1 : (jint)len;
+}
+
+/* ---- pjsua2 ByteVector bulk access (AUDIT H2) -----------------------------
+ *
+ * *** ABI DEPENDENCY - READ THIS BEFORE REBUILDING PJSIP ***
+ *
+ * pjsua2 hands audio to the app as pj::ByteVector, which types.hpp defines as
+ * std::vector<unsigned char>. Moving a 320-byte frame through the SWIG per-element
+ * accessors costs ~320 JNI transitions and ~160 java.lang.Short allocations, per frame,
+ * per direction, on the pjmedia RT thread. These three functions do the same job as one
+ * memcpy each.
+ *
+ * That requires reaching into the vector, so this code assumes:
+ *
+ *   struct { unsigned char *__begin_; unsigned char *__end_; unsigned char *__end_cap_; }
+ *
+ * i.e. libc++'s std::vector layout, data pointer first, element size 1.
+ *
+ * Not assumed - VERIFIED against the vendored libpjsua2.so:
+ *   Java_org_pjsip_pjsua2_pjsua2JNI_ByteVector_1doSize
+ *       ldp x8, x9, [x2]        ; load the words at +0 and +8
+ *       sub x8, x9, x8          ; size = __end_ - __begin_
+ * and the library links libc++_shared.so, the same STL this build uses
+ * (ANDROID_STL=c++_shared in app/build.gradle).
+ *
+ * Constraints that keep a layout mismatch from becoming heap corruption:
+ *   - nothing here ever WRITES a vector's control block or resizes it; sizing stays with
+ *     pjsua2 (ByteVector(count,value) / MediaFrame::buf assignment), so no assumption is
+ *     made about which allocator owns the storage;
+ *   - every entry point re-derives the size from the pointers and refuses implausible
+ *     values;
+ *   - GsmAudioPort's constructor cross-checks BOTH directions against pjsua2's own
+ *     generated per-element accessors and falls back to the old loops on any mismatch.
+ *
+ * If you rebuild PJSIP, run the app once and check logcat for
+ * "bulk frame copy unavailable".
+ */
+
+/* Largest vector we will believe in. A 20 ms audio frame is 320-1920 bytes; anything in
+ * the megabytes means we are not looking at a vector at all. */
+#define PJ_VECTOR_SANITY_MAX (1 << 20)
+
+struct pj_byte_vector {
+    unsigned char *begin;
+    unsigned char *end;
+    unsigned char *end_cap;
+};
+
+/* Elements currently in the vector, or -1 if it does not look like one. */
+static long pj_vector_size(jlong handle) {
+    if (handle == 0) {
+        return -1;
+    }
+    const struct pj_byte_vector *v = (const struct pj_byte_vector *)(intptr_t)handle;
+    if (v->begin == NULL && v->end == NULL) {
+        return 0;                        /* legitimately empty */
+    }
+    if (v->begin == NULL || v->end == NULL || v->end < v->begin) {
+        return -1;
+    }
+    ptrdiff_t n = v->end - v->begin;
+    if (n > PJ_VECTOR_SANITY_MAX) {
+        return -1;
+    }
+    return (long)n;
+}
+
+JNIEXPORT jint JNICALL
+Java_org_onetwoone_gateway_GsmAudioNative_pjBufSize(
+        JNIEnv *env, jclass clazz, jlong handle) {
+    (void)env;
+    (void)clazz;
+    return (jint)pj_vector_size(handle);
+}
+
+/* Vector -> Java array. Reads only; the vector is pjmedia's and must not be disturbed. */
+JNIEXPORT jint JNICALL
+Java_org_onetwoone_gateway_GsmAudioNative_pjBufRead(
+        JNIEnv *env, jclass clazz, jlong handle, jbyteArray dst, jint length) {
+    (void)clazz;
+
+    if (!dst || length < 0) {
+        return -1;
+    }
+    long have = pj_vector_size(handle);
+    if (have < (long)length) {
+        return -1;
+    }
+    if ((*env)->GetArrayLength(env, dst) < length) {
+        return -1;
+    }
+    if (length == 0) {
+        return 0;                        /* begin may legitimately be NULL when empty */
+    }
+
+    const struct pj_byte_vector *v = (const struct pj_byte_vector *)(intptr_t)handle;
+    (*env)->SetByteArrayRegion(env, dst, 0, length, (const jbyte *)v->begin);
+    return length;
+}
+
+/*
+ * Java array -> vector, in place.
+ *
+ * The vector must ALREADY be exactly `length` elements long: this fills existing storage
+ * and never grows it, which is what keeps the control block untouched. The caller owns
+ * that vector and pre-sized it once at open time.
+ */
+JNIEXPORT jint JNICALL
+Java_org_onetwoone_gateway_GsmAudioNative_pjBufWrite(
+        JNIEnv *env, jclass clazz, jlong handle, jbyteArray src, jint length) {
+    (void)clazz;
+
+    if (!src || length < 0) {
+        return -1;
+    }
+    if (pj_vector_size(handle) != (long)length) {
+        return -1;                       /* wrong size => not ours, or resized behind us */
+    }
+    if ((*env)->GetArrayLength(env, src) < length) {
+        return -1;
+    }
+    if (length == 0) {
+        return 0;                        /* begin may legitimately be NULL when empty */
+    }
+
+    struct pj_byte_vector *v = (struct pj_byte_vector *)(intptr_t)handle;
+    (*env)->GetByteArrayRegion(env, src, 0, length, (jbyte *)v->begin);
+    return length;
 }
 
 /*

@@ -10,6 +10,7 @@ import org.pjsip.pjsua2.*;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Custom AudioMediaPort for bridging GSM call audio to SIP.
@@ -45,6 +46,29 @@ import java.util.concurrent.atomic.AtomicInteger;
  * </ul>
  * GW-08's generation check is therefore not "defence in depth" here - it remains the primary
  * and only cancellation mechanism.
+ *
+ * <h4>The two RT callbacks</h4>
+ * {@link #onFrameRequested} and {@link #onFrameReceived} run on the pjmedia conference
+ * clock thread, 50x/second each, <em>with {@code conf->mutex} held for their whole
+ * duration</em>. Three rules follow and none of them are negotiable:
+ * <ul>
+ *   <li><b>No blocking, no unbounded allocation, no lock the control thread can hold
+ *       across I/O.</b> GW-01's {@code io_acquire} is a short critical section; that is
+ *       the only acceptable shape. A lock here would park the RT thread behind
+ *       {@code close()}'s drain.</li>
+ *   <li><b>ALSA stays inside these callbacks</b> for now, and that is deliberate. Holding
+ *       {@code conf->mutex} across the {@code pcm_read} is what starves
+ *       {@code pjmedia_conf_remove_port} (AUDIT E5) - but it is also the happens-before
+ *       edge that proves our callback is not in flight when the port is removed, which is
+ *       what keeps AUDIT A1 latent. Moving ALSA to a dedicated I/O thread breaks that edge
+ *       and is <b>GW-23b</b>, which is gated on forcing GW-01's drain to actually execute
+ *       on hardware and on bounding tinyalsa's unbounded {@code EPIPE} restart.</li>
+ *   <li><b>Java-side allocation is zero.</b> GW-23a removed the per-element
+ *       {@code ByteVector} loops, the {@code Short} boxing they caused, and the
+ *       finalizable wrapper {@code MediaFrame.getBuf()} minted twice per frame. See
+ *       {@link org.pjsip.pjsua2.PjByteVectorAccess} for what that costs in ABI coupling
+ *       and how it is re-verified at runtime.</li>
+ * </ul>
  *
  * <h4>Why {@code MixerEnforce} stays its own thread</h4>
  * <ul>
@@ -157,11 +181,44 @@ public class GsmAudioPort extends AudioMediaPort {
     private final byte[] captureBuffer;
     private final byte[] playbackBuffer;
 
-    // Statistics
-    private long framesRequested = 0;
-    private long framesReceived = 0;
-    private long captureErrors = 0;
-    private long playbackErrors = 0;
+    /**
+     * Pre-sized frame buffer handed to pjmedia on the capture path, and its raw C++
+     * address. Allocated once here instead of being grown by {@code add()} 320 times per
+     * frame; {@code MediaFrame.setBuf} then copies it into the frame in a single call.
+     *
+     * <p>Touched only by {@link #onFrameRequested}, i.e. only by the pjmedia RT thread.
+     * Null when {@link #bulkFrameCopy} is false.
+     */
+    private final ByteVector txFrame;
+    private final long txFramePtr;
+
+    /**
+     * Whether the bulk JNI copy path is usable (AUDIT H2).
+     *
+     * <p>Proven at construction, not assumed: the constructor round-trips a pattern
+     * through both {@link GsmAudioNative#pjBufRead} / {@link GsmAudioNative#pjBufWrite}
+     * and pjsua2's own generated per-element accessors, and only sets this when they
+     * agree. A PJSIP rebuild that changed {@code std::vector}'s layout therefore costs
+     * performance (the old loops come back) rather than corrupting memory. See
+     * {@link org.pjsip.pjsua2.PjByteVectorAccess}.
+     */
+    private final boolean bulkFrameCopy;
+
+    /**
+     * Frame statistics. Written only by the pjmedia RT thread (once per frame per
+     * direction), read and reset by {@link #stopCapture()} on the GatewayControl thread,
+     * and readable at any time through the accessors below.
+     *
+     * <p>They were plain non-volatile {@code long}s, so the reset in {@code stopCapture()}
+     * and every off-thread read were unsafely published. {@link AtomicLong} fixes that
+     * without adding a lock: there is exactly ONE writer, the increments are uncontended,
+     * and nothing here can park the RT thread behind {@code close()}'s drain - which is
+     * what PHASE-1-PLAN §3b forbids and why GW-25 was told to stay out of this file.
+     */
+    private final AtomicLong framesRequested = new AtomicLong();
+    private final AtomicLong framesReceived = new AtomicLong();
+    private final AtomicLong captureErrors = new AtomicLong();
+    private final AtomicLong playbackErrors = new AtomicLong();
 
     public GsmAudioPort(Context context, GatewayConfig config) {
         super();
@@ -173,7 +230,7 @@ public class GsmAudioPort extends AudioMediaPort {
         this.sampleRate = profile.captureSampleRate();
         this.channels = profile.captureChannels();
         this.periodSize = sampleRate * FRAME_TIME_MS / 1000;
-        this.frameSize = sampleRate * (BITS / 8) * channels * FRAME_TIME_MS / 1000;
+        this.frameSize = frameSizeBytes(sampleRate, BITS, channels);
         this.playbackRate = profile.playbackSampleRate();
         this.playbackChannels = profile.playbackChannels();
         this.playbackPeriod = playbackRate * FRAME_TIME_MS / 1000;
@@ -181,10 +238,88 @@ public class GsmAudioPort extends AudioMediaPort {
         this.captureBuffer = new byte[frameSize];
         this.playbackBuffer = new byte[frameSize];
 
+        ByteVector tx = null;
+        long txPtr = 0;
+        boolean bulk = false;
+        try {
+            tx = PjByteVectorAccess.allocate(frameSize);
+            txPtr = PjByteVectorAccess.address(tx);
+            bulk = verifyBulkFrameCopy(tx, txPtr, frameSize);
+            if (!bulk) {
+                Log.e(TAG, "Bulk frame copy unavailable (ByteVector ABI check failed)"
+                        + " - falling back to per-element JNI. If PJSIP was rebuilt, see"
+                        + " org.pjsip.pjsua2.PjByteVectorAccess.");
+            }
+        } catch (RuntimeException | java.lang.Error e) {
+            // java.lang.Error is qualified: org.pjsip.pjsua2.* also exports "Error".
+            Log.e(TAG, "Bulk frame copy unavailable - falling back to per-element JNI", e);
+            bulk = false;
+        }
+        if (!bulk && tx != null) {
+            tx.delete();                    // owned native memory; do not defer to a finalizer
+        }
+        this.bulkFrameCopy = bulk;
+        this.txFrame = bulk ? tx : null;
+        this.txFramePtr = bulk ? txPtr : 0;
+
         Log.i(TAG, "Profile=" + profile.name() + " card=" + card
                 + " capture=" + profile.captureDevice() + "@" + sampleRate + "/" + channels + "ch"
                 + " playback=" + profile.playbackDevice() + "@" + playbackRate + "/" + playbackChannels + "ch"
-                + " frame=" + frameSize + "B");
+                + " frame=" + frameSize + "B"
+                + " bulkCopy=" + bulkFrameCopy);
+    }
+
+    /**
+     * Proves, on this device and against this build of {@code libpjsua2.so}, that the
+     * native bulk copy and pjsua2's own per-element accessors see the same bytes at the
+     * same offsets.
+     *
+     * <p>Runs once, off the RT thread, before any frame is moved. The order matters: the
+     * size gate comes first (a wrong layout will not report exactly {@code size}), then
+     * the read direction is validated against data written by pjsua2 itself, and only
+     * then is a native write attempted. That way the first thing a mismatched layout
+     * meets is a bounds-checked read, not a memcpy into an address we guessed.
+     *
+     * @return true if the bulk path may be used
+     */
+    private static boolean verifyBulkFrameCopy(ByteVector vec, long ptr, int size) {
+        if (vec == null || ptr == 0 || size <= 0) {
+            return false;
+        }
+        if (GsmAudioNative.pjBufSize(ptr) != size) {
+            return false;
+        }
+
+        // Seed through pjsua2's generated accessor - that is the ground truth.
+        for (int i = 0; i < size; i++) {
+            vec.set(i, (short) ((i * 31 + 7) & 0xFF));
+        }
+        byte[] readBack = new byte[size];
+        if (GsmAudioNative.pjBufRead(ptr, readBack, size) != size) {
+            return false;
+        }
+        for (int i = 0; i < size; i++) {
+            if ((readBack[i] & 0xFF) != ((i * 31 + 7) & 0xFF)) {
+                return false;
+            }
+        }
+
+        // Now the other direction: write natively, verify through pjsua2.
+        byte[] probe = new byte[size];
+        for (int i = 0; i < size; i++) {
+            probe[i] = (byte) ((i * 17 + 3) & 0xFF);
+        }
+        if (GsmAudioNative.pjBufWrite(ptr, probe, size) != size) {
+            return false;
+        }
+        for (int i = 0; i < size; i++) {
+            if (vec.get(i) != (short) ((i * 17 + 3) & 0xFF)) {
+                return false;
+            }
+        }
+
+        // Leave it silent rather than full of test pattern.
+        return GsmAudioNative.pjBufWrite(ptr, new byte[size], size) == size;
     }
 
     /** SoC audio profile in use (for callers that must adapt, e.g. mic-mute handling). */
@@ -239,42 +374,41 @@ public class GsmAudioPort extends AudioMediaPort {
 
     /**
      * PJSIP callback: Need audio to SEND to SIP peer (GSM → SIP direction)
+     *
+     * <p>Runs on the pjmedia conference clock thread, 50×/s, holding {@code conf->mutex}
+     * for its whole duration. Nothing here may block, allocate unboundedly, or take a
+     * lock the control thread can hold across I/O.
      */
     @Override
     public void onFrameRequested(MediaFrame frame) {
-        framesRequested++;
+        final long requested = framesRequested.incrementAndGet();
 
         try {
-            ByteVector buf = frame.getBuf();
-            buf.clear();
-
-            if (isCapturing.get() && GsmAudioNative.isOpen()) {
+            // No GsmAudioNative.isOpen() pre-check: readFrame() tests is_open under the
+            // native lock inside io_acquire() and returns 0 for "closed" (AUDIT H2b).
+            if (isCapturing.get()) {
                 // Read from native ALSA
                 int bytesRead = GsmAudioNative.readFrame(captureBuffer);
 
-                if (bytesRead == frameSize) {
-                    for (byte b : captureBuffer) {
-                        buf.add((short) (b & 0xFF));
-                    }
+                if (bytesRead == frameSize && publishCapturedFrame(frame)) {
                     frame.setSize(frameSize);
                     frame.setType(pjmedia_frame_type.PJMEDIA_FRAME_TYPE_AUDIO);
                 } else {
-                    captureErrors++;
-                    // Send silence on error
-                    for (int i = 0; i < frameSize; i++) buf.add((short) 0);
-                    frame.setSize(frameSize);
-                    frame.setType(pjmedia_frame_type.PJMEDIA_FRAME_TYPE_NONE);
+                    // 0 means the device closed under us - the ordinary end-of-call race,
+                    // which the old isOpen() pre-check used to swallow. Only a real ALSA
+                    // failure counts as an error, so the counter stays comparable.
+                    if (bytesRead != 0) {
+                        captureErrors.incrementAndGet();
+                    }
+                    noData(frame);
                 }
             } else {
-                // Not capturing - send silence
-                for (int i = 0; i < frameSize; i++) buf.add((short) 0);
-                frame.setSize(frameSize);
-                frame.setType(pjmedia_frame_type.PJMEDIA_FRAME_TYPE_NONE);
+                noData(frame);
             }
 
             // Log every 500 frames (~10 seconds)
-            if (framesRequested % 500 == 0) {
-                Log.d(TAG, "onFrameRequested: " + framesRequested + " frames, errors=" + captureErrors);
+            if (requested % 500 == 0) {
+                Log.d(TAG, "onFrameRequested: " + requested + " frames, errors=" + captureErrors.get());
             }
         } catch (Exception e) {
             Log.e(TAG, "Error in onFrameRequested: " + e.getMessage());
@@ -282,40 +416,169 @@ public class GsmAudioPort extends AudioMediaPort {
     }
 
     /**
+     * Hands {@link #captureBuffer} to pjmedia. Returns false if the copy failed, in which
+     * case the caller must send {@link #noData}.
+     *
+     * <p>Fast path: fill the pre-sized {@link #txFrame} with one memcpy and let
+     * {@code setBuf} assign it into the frame — 2 JNI calls where the loop below needs
+     * {@code frameSize}&nbsp;+&nbsp;2, plus ~160 {@code Short} boxes and ~10
+     * {@code std::vector} growth reallocations (AUDIT H2).
+     *
+     * <p>One C++ allocation per frame remains and cannot be removed from here:
+     * pjsua2's {@code get_frame} stack-constructs a fresh {@code MediaFrame} every tick,
+     * so its {@code buf} always starts empty and must acquire storage once, whether that
+     * comes from {@code setBuf}'s copy-assign or from a {@code reserve()}. Removing it
+     * would mean writing the vector's control block from C, which
+     * {@link org.pjsip.pjsua2.PjByteVectorAccess} deliberately refuses to do. Java-side
+     * allocation on this path is now zero, which is what the GC-pause dropouts were
+     * about.
+     */
+    private boolean publishCapturedFrame(MediaFrame frame) {
+        if (bulkFrameCopy) {
+            if (GsmAudioNative.pjBufWrite(txFramePtr, captureBuffer, frameSize) != frameSize) {
+                return false;
+            }
+            frame.setBuf(txFrame);
+            return true;
+        }
+        ByteVector buf = frame.getBuf();
+        if (buf == null) {
+            return false;
+        }
+        buf.clear();
+        for (byte b : captureBuffer) {
+            buf.add((short) (b & 0xFF));
+        }
+        return true;
+    }
+
+    /**
+     * Hand pjmedia an empty {@code PJMEDIA_FRAME_TYPE_NONE} frame: we have no audio this
+     * tick, either because capture is not running or because the ALSA read failed.
+     *
+     * <p>It used to write {@code frameSize} zero bytes into the frame buffer one boxed
+     * {@code Short} at a time and then declare {@code size = frameSize}. Every byte of
+     * that was dead work, and the claim was internally inconsistent. Confirmed against
+     * the sources this build actually links, pjproject <b>2.14.1</b>:
+     * <ul>
+     *   <li>{@code pjsua2/media.cpp:get_frame} sets
+     *       {@code frame->size = PJ_MIN(frame_.buf.size(), frame_.size)} and only then
+     *       memcpy's — so an empty vector yields a 0-byte copy no matter what
+     *       {@code setSize} said. Declaring 320 over a 0-length vector was never a read
+     *       of unset memory, but it was a lie the clamp happened to absorb.</li>
+     *   <li>{@code pjmedia/conference.c:get_frame} does
+     *       {@code if (frame_type != PJMEDIA_FRAME_TYPE_AUDIO) { rx_level = 0; continue; }}
+     *       on the direct path — the buffer is never read — and on the resampling path
+     *       {@code read_port} calls {@code pjmedia_zero_samples()} itself. Either way our
+     *       silence was overwritten or ignored.</li>
+     * </ul>
+     * So {@code size = 0} is both cheaper and the honest description. Do not re-add a
+     * {@code setSize(frameSize)} here without re-reading both of those functions: with a
+     * zero-length vector it would be a size that does not match its buffer, and only the
+     * {@code PJ_MIN} clamp stands between that and a bad copy.
+     */
+    private static void noData(MediaFrame frame) {
+        frame.setSize(0);
+        frame.setType(pjmedia_frame_type.PJMEDIA_FRAME_TYPE_NONE);
+    }
+
+    /**
      * PJSIP callback: RECEIVED audio from SIP peer (SIP → GSM direction)
+     *
+     * <p>Same RT constraints as {@link #onFrameRequested}.
      */
     @Override
     public void onFrameReceived(MediaFrame frame) {
-        framesReceived++;
+        final long received = framesReceived.incrementAndGet();
 
         try {
-            if (!isCapturing.get() || !GsmAudioNative.isOpen()) {
+            // No GsmAudioNative.isOpen() pre-check here either - writeFrame() reports a
+            // closed device as 0 and never touches a freed PCM (AUDIT H2b).
+            if (!isCapturing.get()) {
                 return;
             }
 
-            ByteVector buf = frame.getBuf();
-            long size = frame.getSize();
+            final int size = usableFrameBytes(frame.getSize(), frameSize);
 
-            if (buf != null && size > 0 && size <= frameSize) {
-                // Convert ByteVector to byte[]
-                for (int i = 0; i < size; i++) {
-                    playbackBuffer[i] = (byte) (buf.get(i) & 0xFF);
-                }
-
-                // Write to native ALSA
-                int bytesWritten = GsmAudioNative.writeFrame(playbackBuffer);
-                if (bytesWritten < 0) {
-                    playbackErrors++;
+            if (size > 0) {
+                if (fetchFrameBytes(frame, size)) {
+                    // Write to native ALSA. The length is explicit: playbackBuffer is
+                    // sized for a full frame and is reused, so handing the whole array
+                    // over would append the tail of the PREVIOUS frame to a short one
+                    // (AUDIT H2e).
+                    int bytesWritten = GsmAudioNative.writeFrame(playbackBuffer, size);
+                    if (bytesWritten < 0) {
+                        playbackErrors.incrementAndGet();
+                    }
+                } else {
+                    playbackErrors.incrementAndGet();
                 }
             }
 
             // Log every 500 frames (~10 seconds)
-            if (framesReceived % 500 == 0) {
-                Log.d(TAG, "onFrameReceived: " + framesReceived + " frames, errors=" + playbackErrors);
+            if (received % 500 == 0) {
+                Log.d(TAG, "onFrameReceived: " + received + " frames, errors=" + playbackErrors.get());
             }
         } catch (Exception e) {
             Log.e(TAG, "Error in onFrameReceived: " + e.getMessage());
         }
+    }
+
+    /**
+     * Copies the first {@code size} bytes of the frame into {@link #playbackBuffer}.
+     *
+     * <p>Fast path: one memcpy straight out of pjmedia's vector. It reads the frame's
+     * buffer address through the generated accessor rather than {@code frame.getBuf()},
+     * which would allocate a fresh <em>finalizable</em> {@code ByteVector} wrapper on the
+     * RT thread every single frame (AUDIT H2).
+     *
+     * @return false if the bytes could not be obtained; the caller counts that as an error
+     */
+    private boolean fetchFrameBytes(MediaFrame frame, int size) {
+        if (bulkFrameCopy) {
+            long bufPtr = PjByteVectorAccess.bufAddress(frame);
+            return bufPtr != 0
+                    && GsmAudioNative.pjBufRead(bufPtr, playbackBuffer, size) == size;
+        }
+        ByteVector buf = frame.getBuf();
+        if (buf == null) {
+            return false;
+        }
+        for (int i = 0; i < size; i++) {
+            playbackBuffer[i] = (byte) (buf.get(i) & 0xFF);
+        }
+        return true;
+    }
+
+    /**
+     * Bytes in one {@link #FRAME_TIME_MS} ms PCM frame at the given format.
+     *
+     * <p>Package-visible and static so the arithmetic can be tested without a live pjsua2
+     * endpoint. For the gateway's 8 kHz / 16-bit / mono port this is <b>320</b> bytes, not
+     * 160: the count is bytes, not samples, which is why the per-element JNI loops this
+     * ticket removed ran 320 times and not 160.
+     */
+    static int frameSizeBytes(int sampleRate, int bits, int channels) {
+        return sampleRate * (bits / 8) * channels * FRAME_TIME_MS / 1000;
+    }
+
+    /**
+     * How many bytes of a received {@link MediaFrame} are usable audio, given the
+     * capacity of the reusable playback buffer.
+     *
+     * <p>Returns 0 for "drop this frame": a non-positive size, or one larger than the
+     * buffer can hold (which would mean the negotiated format changed under us). The
+     * non-zero result is the length that MUST be handed to
+     * {@link GsmAudioNative#writeFrame} - the buffer is reused, so anything past it is
+     * the previous frame (AUDIT H2e).
+     *
+     * <p>Package-visible and static purely so it is testable.
+     */
+    static int usableFrameBytes(long reportedSize, int bufferCapacity) {
+        if (reportedSize <= 0 || reportedSize > bufferCapacity) {
+            return 0;
+        }
+        return (int) reportedSize;
     }
 
     /**
@@ -636,15 +899,12 @@ public class GsmAudioPort extends AudioMediaPort {
             releaseLocked(ended);
         }
 
-        Log.d(TAG, "Native audio stopped. Stats: requested=" + framesRequested +
-              ", received=" + framesReceived +
-              ", captureErr=" + captureErrors + ", playbackErr=" + playbackErrors);
-
-        // Reset statistics
-        framesRequested = 0;
-        framesReceived = 0;
-        captureErrors = 0;
-        playbackErrors = 0;
+        // Read and reset in one step so a frame delivered between the log and the reset
+        // is not silently discarded from the next session's counts.
+        Log.d(TAG, "Native audio stopped. Stats: requested=" + framesRequested.getAndSet(0) +
+              ", received=" + framesReceived.getAndSet(0) +
+              ", captureErr=" + captureErrors.getAndSet(0) +
+              ", playbackErr=" + playbackErrors.getAndSet(0));
     }
 
     public void stop() {
@@ -653,5 +913,32 @@ public class GsmAudioPort extends AudioMediaPort {
 
     public boolean isCapturing() {
         return isCapturing.get();
+    }
+
+    /**
+     * Frames pjmedia has asked us for in the current capture session (GSM&rarr;SIP).
+     *
+     * <p>Safe to call from any thread and cheap - a single volatile read, no lock. It is
+     * the "is the bridge actually moving audio" signal AUDIT D6 / GW-25 wanted; combined
+     * with {@link #isCapturing()} it distinguishes "streams running and pumping" from
+     * "streams running and silent". Reset to 0 by {@link #stopCapture()}.
+     */
+    public long getFramesRequested() {
+        return framesRequested.get();
+    }
+
+    /** Frames pjmedia has handed us in the current capture session (SIP&rarr;GSM). */
+    public long getFramesReceived() {
+        return framesReceived.get();
+    }
+
+    /** Failed native reads in the current capture session. */
+    public long getCaptureErrors() {
+        return captureErrors.get();
+    }
+
+    /** Failed native writes in the current capture session. */
+    public long getPlaybackErrors() {
+        return playbackErrors.get();
     }
 }
