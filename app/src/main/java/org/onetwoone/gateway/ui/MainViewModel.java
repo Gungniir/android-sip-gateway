@@ -29,13 +29,26 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * ViewModel for MainActivity.
- * Manages service connection, state, and configuration.
+ * Everything the main screen knows.
  *
- * Responsibilities:
- * - Service lifecycle (bind/unbind, start/stop)
- * - Status monitoring
- * - Configuration via GatewayConfig
+ * <p>Responsibilities:
+ * <ul>
+ *   <li>Service lifecycle - bind/unbind, start/stop/restart;
+ *   <li>the status surface: the whole immutable {@link GatewayStatus} the control thread
+ *       published, handed over verbatim (GW-45), plus whether there is a binding at all;
+ *   <li>configuration, through {@code GatewayConfig} and nothing else - this class is the
+ *       only owner of it on the UI path, and {@code MainActivity} reads no preferences;
+ *   <li><b>view state</b> - which audio card, capture device, playback device, mixer route
+ *       and SoC profile are selected but not yet saved, and which sections of the screen are
+ *       open (GW-41, plan §4 hazard H-d).
+ * </ul>
+ *
+ * <p>That last item is the one that changed in GW-41 and is worth stating as a rule. Selection
+ * state used to live in {@code MainActivity} as plain fields with an {@code isRefreshing}
+ * flag; it now lives here, and <b>every setter is idempotent</b>. That is not tidiness: it is
+ * the only defence that works against {@code Spinner.setSelection()}, which delivers
+ * {@code onItemSelected} asynchronously, so a repaint reaches the listener looking exactly
+ * like a choice long after any "I am repainting" flag has been cleared.
  */
 public class MainViewModel extends AndroidViewModel {
     private static final String TAG = "MainVM";
@@ -964,8 +977,9 @@ public class MainViewModel extends AndroidViewModel {
      * Runs asynchronously and updates availableControls LiveData.
      */
     public void detectMixerControls() {
-        AudioConfig audio = audioConfig.getValue();
-        int card = audio != null ? audio.card : 0;
+        // The card the operator has CHOSEN, not the one last saved: picking a different card
+        // and then asking what mixer controls it has should not scan the previous one.
+        final int card = intValue(selectedCard.getValue());
 
         new Thread(() -> {
             List<TinymixManager.MixerControl> controls = tinymixManager.detectControls(card);
@@ -977,9 +991,7 @@ public class MainViewModel extends AndroidViewModel {
      * Refresh audio device lists for the current card.
      */
     public void refreshAudioDevices() {
-        AudioConfig audio = audioConfig.getValue();
-        int card = audio != null ? audio.card : 0;
-        audioDeviceManager.refreshDevices(card);
+        audioDeviceManager.refreshDevices(intValue(selectedCard.getValue()));
     }
 
     /**

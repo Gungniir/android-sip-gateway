@@ -282,13 +282,23 @@ public class MainActivity extends AppCompatActivity {
         formGuard.watch(manualMuteControlsEdit);
         formGuard.watch(testDestinationEdit);
 
+        // TLS is the only one of the four that waits for the Save button, so it is the only
+        // one that stays dirty. The other three write through on change: the instant they
+        // have, there is no unsaved work to protect, and leaving them marked would mean a
+        // later change made on the web interface could never repaint them.
         formGuard.watch(useTlsCheckbox, null);
-        formGuard.watch(verboseSipLogCheckbox,
-                (button, checked) -> viewModel.setVerboseSipLog(checked));
-        formGuard.watch(dtmfRelayCheckbox,
-                (button, checked) -> viewModel.setDtmfRelay(checked));
-        formGuard.watch(webInterfaceSwitch,
-                (button, checked) -> viewModel.setWebInterfaceEnabled(checked));
+        formGuard.watch(verboseSipLogCheckbox, (button, checked) -> {
+            viewModel.setVerboseSipLog(checked);
+            formGuard.clean(button);
+        });
+        formGuard.watch(dtmfRelayCheckbox, (button, checked) -> {
+            viewModel.setDtmfRelay(checked);
+            formGuard.clean(button);
+        });
+        formGuard.watch(webInterfaceSwitch, (button, checked) -> {
+            viewModel.setWebInterfaceEnabled(checked);
+            formGuard.clean(button);
+        });
     }
 
     private void setupClickHandlers() {
@@ -298,9 +308,12 @@ public class MainActivity extends AppCompatActivity {
         saveAudioButton.setOnClickListener(v -> saveAudioConfig());
         restartButton.setOnClickListener(v -> viewModel.restartService());
 
-        testCallButton.setOnClickListener(v -> viewModel.startTestCall(
-                testDestinationEdit.getText().toString().trim(),
-                selectedTestMode()));
+        testCallButton.setOnClickListener(v -> {
+            viewModel.startTestCall(testDestinationEdit.getText().toString().trim(),
+                    selectedTestMode());
+            // Placing the call persists the destination, so it stops being unsaved work.
+            formGuard.clean(testDestinationEdit);
+        });
         testHangupButton.setOnClickListener(v -> viewModel.stopTestCall());
 
         // Both radio groups write straight through to config, so the binding window matters:
