@@ -1777,6 +1777,28 @@ locking. Both halves of that fail. The fix is to move the receivers onto the con
 first and *then* add plain confined counters — not to buy an `AtomicLong`. Full plan in
 [issues/GW-46-sms-status.md](issues/GW-46-sms-status.md).
 
+**Severity: latent, not a live race** — corrected after review with the Phase 2 session, and
+verified here. The sole production implementation of `onSmsSendStatus` is
+`PjsipSipService.initSmsHandler:1290`, a single `Log.d` touching no shared state, so nothing
+is read or written off-thread *today*. It becomes a real threading problem the moment anything
+publishes the outcome — which is precisely what a status surface does. The two-line Handler
+fix is therefore a **prerequisite of GW-46's publishing work, to land with the first real
+consumer**, not a separate precondition blocking anything else.
+
+**A second defect, found while confirming the first: the callback contract is
+thread-ambiguous.** `onSmsSendStatus` is invoked from *two different threads* depending on
+which way the send fails:
+
+- `SmsHandler:1127` — the synchronous `catch` in the send path, on the **control thread**.
+- `SmsHandler:1210`, `:1224`, `:1229` — the sent/delivered receivers, on **main**.
+
+So an implementer has no single thread to reason about, and the obvious defensive move —
+`assertOnControlThread` in the callback — would fire on the *working* path. That is worse
+than a callback that is simply always on main, because it cannot be discovered by testing one
+route. Passing a control-thread `Handler` to both `registerReceiver` calls collapses both
+sites onto one thread and makes the existing `@ControlThread` discipline cover the callback;
+until then, no implementation of this interface may touch shared state.
+
 ### P2 — security posture
 
 #### S1. Exported control receiver with no permission

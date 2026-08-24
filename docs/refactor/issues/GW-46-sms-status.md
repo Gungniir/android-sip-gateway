@@ -5,6 +5,23 @@
 **Depends on** GW-45 (the surface it would publish through — already landed)
 **Conflicts with** nothing currently assigned; `SmsHandler.java` was last touched by GW-21 and GW-27
 
+> **Severity note, added after review with the Phase 2 session.** The main-thread callback is
+> **latent, not a live race.** The sole production implementation of `onSmsSendStatus` is
+> `PjsipSipService:1290` — one `Log.d`, no shared state. Nothing is read or written
+> off-thread today; it becomes a real threading problem the moment anything *publishes* the
+> outcome, which is exactly what this issue does. So the `Handler` change below is a
+> **prerequisite of the publishing work and lands with it**, not a precondition that blocks
+> anything else in the meantime.
+>
+> **And the callback is invoked from two different threads**, which neither of us had noticed
+> at first: `SmsHandler:1127` (the synchronous `catch` in the send path) runs on the **control
+> thread**, while `:1210`, `:1224` and `:1229` (the sent/delivered receivers) run on **main**.
+> An implementer therefore has no single thread to reason about, and adding
+> `assertOnControlThread` to the callback would fire on the *working* path. That is worse than
+> "always main", because testing one route cannot reveal it. Until the `Handler` lands, **no
+> implementation of this interface may touch shared state** — the current `Log.d` is
+> conformant by accident, not by design.
+
 ## Problem
 
 Phase 4 plan §C9: nothing in either UI mentions SMS. It is half the gateway's job,
