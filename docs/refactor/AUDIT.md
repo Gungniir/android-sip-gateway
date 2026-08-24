@@ -541,11 +541,49 @@ reconnect it schedules calls `hasTransport()` on exactly that.
 
 ### P1 — main-thread blocking (ANR)
 
-#### G1. SMS forwarding runs entirely on the main thread
+#### G1. SMS forwarding runs entirely on the main thread — ✅ FIXED (GW-21)
 `SmsHandler.processInbox()` (`:149`) is invoked from a `ContentObserver` bound to the main
 handler (`:97`) and does a `ContentResolver.query` inline, then calls back into
 `PjsipSipService.handleIncomingGsmSms → sendSipMessage` (`:543`) which performs
 `buddy.sendInstantMessage` — network I/O — still on main.
+
+**Fixed by GW-21**, and by the time it got there most of the finding had already moved:
+GW-10/GW-14 put the SIP send *and* `markAsRead` (including its `su` fallback) on the control
+thread. What was left on main was exactly the `ContentObserver` and the `ContentResolver`
+query behind it. The observer is now built with `new Handler(control.getLooper())`, so
+`onChange → processInbox → send → markAsRead` share one thread and **no part of the inbound
+SMS path touches main any more**. `processInbox`, `markAsRead` and `unprocessSms` assert it.
+
+Three things had to come with it:
+
+- **The cursor.** `onIncomingSms` reaches the service through `control.runOrPost(...)`, which
+  dispatches *inline* when the caller is already the control thread — so once the observer
+  moved, the blocking SIP send would have run **inside the open `Cursor` loop on every path**,
+  not just on the post-registration retry where it already did. `processInbox` is now two
+  phases: `collectForwardable` reads the batch and closes the cursor, `forward` sends. The
+  add-then-send invariant is kept by moving the `inFlightIds.add` *earlier* — a row is marked
+  the moment it passes the suppression checks, while the cursor is still open — so the whole
+  batch is marked before any of it is sent. That can only over-suppress within a batch, never
+  under-suppress; the tail of a batch that is never handed over (stop mid-scan) is released in
+  a `finally`.
+- **Debounce.** Every `markAsRead` mutates the provider and re-triggers `onChange`, so each
+  forwarded message cost a redundant full inbox scan. Changes now coalesce into a 250 ms
+  window **anchored on the first change of a burst**, not restarted by each one, so a stream
+  of provider writes cannot starve the scan. The old "no debounce, race with MessagingApp"
+  comment named a real race — `read = 0` means a message another app marks read first is never
+  forwarded — but not one 250 ms changes: nothing marks a message read but a human opening the
+  conversation, and the path already carried seconds of latency (the post-REGISTER retry scan).
+- **Teardown.** Unregistering the observer from main while `onChange` runs on the control
+  thread is a race the pre-GW-21 code did not have. `stop()` latches a `volatile` flag on the
+  caller's thread — an in-flight scan sees it and stops handing messages over — and **posts**
+  the unregister to the control thread, where it cannot overlap a scan. `onDestroy` already
+  calls `stop()` before `control.quitSafely(...)` (GW-26), which drains what is queued, so it
+  still runs; main never waits for it.
+
+Verified by `SmsPipelineThreadingTest` (8 cases: the pipeline's thread identity, the observer's
+dispatch looper, no cursor open at callback time, the whole batch marked before the first send,
+stop-during-an-in-flight-scan, stop-before-start, burst coalescing, and no starvation) with
+GW-27's 14 `SmsDuplicateSuppressionTest` cases still green.
 
 #### G2. `shutdownSip()` blocks main — ✅ FIXED (GW-26)
 `PjsipSipService.onDestroy:196` → `shutdownSip:257` → `hangupAllCalls()` +
@@ -1365,7 +1403,7 @@ call is operator-initiated from the UI, so it does not overlap a web-interface c
 in normal use. The fix is the same one F4 got — run it on the control thread — and it
 belongs with whoever revisits `SipTestCallManager`.
 
-#### H12. `SmsHandler.processedSmsIds` is a plain `HashSet` mutated from two threads — P2
+#### H12. `SmsHandler.processedSmsIds` is a plain `HashSet` mutated from two threads — P2 — ✅ FIXED (GW-21)
 `SmsHandler.java:56` is a plain `HashSet<Long>`. `processInbox()` iterates and `add()`s to
 it, and it runs on **main** (the `ContentObserver` is constructed with the main handler,
 `:97`) *and* on the **control thread** (`handleRegistrationState` calls `processInbox()` on
@@ -1392,12 +1430,28 @@ now `ConcurrentHashMap`-backed and the persisted record's read-modify-write is b
 that is **never held across the callback** — main must not end up blocked behind the control
 thread's blocking SIP send. The `ConcurrentModificationException` is therefore gone.
 
-What is *not* fixed is the finding itself: `processInbox()` still runs on two threads, so the
-check-then-act between "is this id suppressed?" and "add it to in-flight" is still not atomic,
-and two concurrent scans can still both forward the same message. **GW-21 closes it** by
-giving the `ContentObserver` the control looper. When it does, the concurrent collections and
-the lock should go back to plain `HashMap`s with an `assertOnControlThread` — `SmsHandler`'s
-class javadoc says so, and nothing in GW-27 depends on the concurrency.
+**Closed by GW-21.** The `ContentObserver` is now constructed with
+`new Handler(control.getLooper())`, so `processInbox()` has exactly one owner and the
+check-then-act between "is this id suppressed?" and "mark it in flight" — several map
+operations, never atomic under `ConcurrentHashMap` — is atomic by confinement. That is the
+part GW-27 could not reach: it removed the `ConcurrentModificationException`, not the
+interleaving, and two concurrent scans could still both forward one message.
+
+The concurrent types went back with it, as GW-27's javadoc and this finding both said they
+should: `confirmedIds`, `inFlightIds`, `forwardAttempts` and `retryNotBefore` are plain
+`HashMap`/`HashSet` again, `rootFlagFailures` is an `int`, `rootFlagWriteGivenUp` and
+`readFlagWriteEnabled` are plain `boolean`s, and `persistLock` is gone — the persisted
+record's read-modify-write needs no lock on a single thread. Guarded by
+`control.assertOnControlThread(...)` on `processInbox`, `markAsRead` and `unprocessSms`;
+one mechanism, not two. One latent bug surfaced in the swap and was fixed with it:
+`pruneProcessedIds` removed from `confirmedIds` inside a for-each over its own `entrySet()`,
+which `ConcurrentHashMap` tolerates and `HashMap` answers with a
+`ConcurrentModificationException` — it now uses `Iterator.remove()`.
+
+Two fields are deliberately still `volatile`: `started` and `stopped`. `start()`/`stop()` are
+called from the service lifecycle on main and only latch a flag before handing the work to the
+control thread, and `stopped` is what lets a scan already in flight there stop handing
+messages over while main tears the service down. Neither is suppression state.
 
 #### F6c. `ReconnectionStrategy.onSuccess()` clears `pending` without cancelling the timer — P2 — ✅ FIXED (GW-26)
 `onSuccess()` (`:108-113`) sets `pending = false` but does not
