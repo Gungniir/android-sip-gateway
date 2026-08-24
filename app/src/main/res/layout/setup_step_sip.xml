@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GW-42 step 4 - the SIP account.
+
+  This is the step that can destroy a working gateway, so three things about it are deliberate:
+
+  1. Every box is pre-filled from GatewayConfig, and a blank box KEEPS what is stored. The
+     wizard never clears a value - see SetupViewModel.saveSipAccount.
+  2. The callout at the top names the account that is already there, so replacing it is
+     something the operator decided rather than something they discovered afterwards.
+  3. Skip writes nothing at all, and it is in the footer on this step like every other.
+
+  Outlined fields rather than the main screen's bare hints, using GW-40's
+  Widget.Gateway.TextInputLayout: every box here is pre-filled, and a hint that disappears the
+  moment a field has content is the wrong control for a form you are auditing rather than
+  filling in for the first time.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/setupStepSipBody"
+    style="@style/Widget.Gateway.Setup.Panel">
+
+    <TextView
+        android:id="@+id/setupSipExistingBanner"
+        style="@style/Widget.Gateway.Setup.Callout"
+        android:visibility="gone"
+        android:text="@string/setup_sip_existing_account" />
+
+    <TextView
+        style="@style/Widget.Gateway.Caption"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/setup_sip_blank_help" />
+
+    <com.google.android.material.textfield.TextInputLayout
+        style="@style/Widget.Gateway.Setup.Field"
+        android:hint="@string/hint_sip_server">
+
+        <com.google.android.material.textfield.TextInputEditText
+            android:id="@+id/setupSipServer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="textUri"
+            android:importantForAutofill="no" />
+    </com.google.android.material.textfield.TextInputLayout>
+
+    <com.google.android.material.textfield.TextInputLayout
+        style="@style/Widget.Gateway.Setup.Field"
+        android:hint="@string/hint_sip_port">
+
+        <com.google.android.material.textfield.TextInputEditText
+            android:id="@+id/setupSipPort"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="number"
+            android:importantForAutofill="no" />
+    </com.google.android.material.textfield.TextInputLayout>
+
+    <com.google.android.material.textfield.TextInputLayout
+        style="@style/Widget.Gateway.Setup.Field"
+        android:hint="@string/hint_sip_user">
+
+        <com.google.android.material.textfield.TextInputEditText
+            android:id="@+id/setupSipUser"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="text"
+            android:autofillHints="username" />
+    </com.google.android.material.textfield.TextInputLayout>
+
+    <com.google.android.material.textfield.TextInputLayout
+        style="@style/Widget.Gateway.Setup.Field"
+        android:hint="@string/hint_sip_password">
+
+        <com.google.android.material.textfield.TextInputEditText
+            android:id="@+id/setupSipPassword"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="textPassword"
+            android:autofillHints="password" />
+    </com.google.android.material.textfield.TextInputLayout>
+
+    <com.google.android.material.textfield.TextInputLayout
+        style="@style/Widget.Gateway.Setup.Field"
+        android:hint="@string/hint_sip_realm">
+
+        <com.google.android.material.textfield.TextInputEditText
+            android:id="@+id/setupSipRealm"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="text"
+            android:importantForAutofill="no" />
+    </com.google.android.material.textfield.TextInputLayout>
+
+    <CheckBox
+        android:id="@+id/setupSipUseTls"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/option_use_tls" />
+
+    <View style="@style/Widget.Gateway.Divider" />
+
+    <TextView
+        style="@style/Widget.Gateway.FieldLabel"
+        android:text="@string/label_gsm_routing" />
+
+    <TextView
+        style="@style/Widget.Gateway.Caption"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/setup_sip_routing_help" />
+
+    <com.google.android.material.textfield.TextInputLayout
+        style="@style/Widget.Gateway.Setup.Field"
+        android:hint="@string/hint_sim1_destination">
+
+        <com.google.android.material.textfield.TextInputEditText
+            android:id="@+id/setupSim1Destination"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="text"
+            android:importantForAutofill="no" />
+    </com.google.android.material.textfield.TextInputLayout>
+
+    <com.google.android.material.textfield.TextInputLayout
+        style="@style/Widget.Gateway.Setup.Field"
+        android:hint="@string/hint_sim2_destination">
+
+        <com.google.android.material.textfield.TextInputEditText
+            android:id="@+id/setupSim2Destination"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="text"
+            android:importantForAutofill="no" />
+    </com.google.android.material.textfield.TextInputLayout>
+
+    <!-- Next commits this form too, because that is what Next means on a form. This button is
+         for saving without moving on - the operator who wants to check the account reached the
+         endpoint before walking to step 5. -->
+    <Button
+        android:id="@+id/setupSaveAccountButton"
+        style="@style/Widget.Gateway.Button"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/setup_action_save_account" />
+
+</LinearLayout>

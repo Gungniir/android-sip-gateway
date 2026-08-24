@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GW-42 - the "Idle" state of GW-40's status chip, as an inflatable view.
+
+  A style cannot be swapped on a view that has already been inflated, so a chip whose state
+  changes at runtime either recolours itself in Java - which is what GW-41's status header
+  does, and why Widget.Gateway.StatusChip.Ok and .Error were still unconsumed at the end of
+  wave 2 - or inflates the styled version it needs. ui/setup/SetupChip does the second, so all
+  four chip states stay resources the design system owns rather than colours a class knows.
+-->
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    style="@style/Widget.Gateway.StatusChip.Idle"
+    android:background="@drawable/gw_chip_idle" />

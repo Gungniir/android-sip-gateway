@@ -90,5 +90,35 @@
                 android:text="@string/label_web_interface"/>
         </LinearLayout>
 
+        <View style="@style/Widget.Gateway.Divider"/>
+
+        <!--
+          GW-42 - the wizard's re-run entry point.
+
+          Here rather than in an options menu because this screen has no app-bar menu and
+          adding one for a single item would put the only way back into commissioning behind an
+          overflow button on an appliance console. A row in System is where someone looks for
+          "do the setup again".
+
+          Unconditional: any number of times, on a configured gateway or an empty one. Nothing
+          about re-running discards anything.
+        -->
+        <TextView
+            style="@style/Widget.Gateway.SectionHeader"
+            android:text="@string/setup_title"/>
+
+        <TextView
+            style="@style/Widget.Gateway.Caption"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/setup_run_wizard_help"/>
+
+        <Button
+            android:id="@+id/setupWizardButton"
+            style="@style/Widget.Gateway.Button.Secondary"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/setup_action_run_wizard"/>
+
     </LinearLayout>
 </LinearLayout>

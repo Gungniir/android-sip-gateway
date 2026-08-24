@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GW-42 - a callout: something the operator has to notice before they act.
+
+  Used for exactly two things, and both are warnings about destroying something that already
+  works: "this gateway already has a SIP account" on the account step, and "that is a feature
+  code and this trunk cannot dial one" on the verification step.
+
+  This is where GW-40's gw_stroke_emphasis and gw_on_primary_container land. The emphasis
+  stroke is the whole point - a callout that shares the panel's 1dp hairline is a panel.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+
+    <solid android:color="@color/gw_primary_container" />
+
+    <corners android:radius="@dimen/gw_corner_panel" />
+
+    <stroke
+        android:width="@dimen/gw_stroke_emphasis"
+        android:color="@color/gw_primary" />
+</shape>

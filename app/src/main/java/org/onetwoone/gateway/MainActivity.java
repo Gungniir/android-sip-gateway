@@ -27,6 +27,7 @@ import org.onetwoone.gateway.ui.FormGuard;
 import org.onetwoone.gateway.ui.MainViewModel;
 import org.onetwoone.gateway.ui.StatusHeaderBinder;
 import org.onetwoone.gateway.ui.TinymixManager;
+import org.onetwoone.gateway.ui.setup.SetupLauncher;
 
 import java.util.EnumMap;
 import java.util.HashMap;
@@ -154,6 +155,15 @@ public class MainActivity extends AppCompatActivity {
 
         // Initialize permissions via root
         viewModel.initPermissions();
+
+        // GW-42. Opened OVER this screen, never instead of it, and only on a genuinely fresh
+        // launch - savedInstanceState != null is a recreation, and re-opening the wizard on a
+        // night-mode switch would be a wizard the operator cannot close. The decision itself
+        // lives in SetupLauncher: this activity reads no SharedPreferences, and a first-run
+        // flag read here would have been the one exception to that.
+        if (savedInstanceState == null) {
+            SetupLauncher.launchIfFirstRun(this);
+        }
 
         // Start service
         viewModel.startService();
@@ -315,6 +325,10 @@ public class MainActivity extends AppCompatActivity {
             formGuard.clean(testDestinationEdit);
         });
         testHangupButton.setOnClickListener(v -> viewModel.stopTestCall());
+
+        // GW-42. Re-running is unconditional and always allowed - the wizard pre-fills from
+        // GatewayConfig and never clears a value, so it cannot cost a working gateway.
+        findViewById(R.id.setupWizardButton).setOnClickListener(v -> SetupLauncher.launch(this));
 
         // Both radio groups write straight through to config, so the binding window matters:
         // without it, repainting the group from the ViewModel would write the value back as

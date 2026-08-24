@@ -69,6 +69,26 @@
             </intent-filter>
         </activity>
 
+        <!--
+          Commissioning wizard (GW-42).
+
+          exported="false" deliberately. It writes the SIP account, and an exported activity
+          that writes configuration is a tampering surface on a device that already carries one
+          unauthenticated control path (AUDIT S1/S2). The handset is rooted by definition, so
+          launching it from a bench still works: `su -c am start -n
+          org.onetwoone.gateway/.ui.setup.SetupActivity`.
+
+          No launchMode and no task flags: the wizard is opened over MainActivity and must stay
+          over it, so that closing it - by the Close button, by system back, by anything - lands
+          on a usable console rather than an empty task. That is the whole of "never gates the
+          main screen".
+        -->
+        <activity
+            android:name=".ui.setup.SetupActivity"
+            android:exported="false"
+            android:label="@string/setup_title"
+            android:theme="@style/Theme.Gateway.Setup" />
+
         <!-- InCallService - handles GSM calls -->
         <service
             android:name=".GatewayInCallService"

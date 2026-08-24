@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GW-42 - the commissioning wizard's frame.
+
+  A header that says which step this is, one body at a time, and a footer that is always
+  reachable. The footer sits OUTSIDE the ScrollView on purpose: Skip and Close are the recovery
+  path on a phone whose wizard cannot get past step 1, and a Skip you have to scroll to find is
+  not a Skip that works on every step.
+
+  The five bodies are all inflated and only one is visible. Not fragments - the wizard's Back is
+  a step cursor, not a navigation stack - and keeping them attached is what lets someone move
+  back and forth without losing what they typed into a step they have already visited.
+
+  Every colour, size and spacing here is a GW-40 token; the panels use res/values/styles_setup.xml.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/setupRoot"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:paddingStart="@dimen/gw_screen_margin"
+    android:paddingEnd="@dimen/gw_screen_margin"
+    android:paddingTop="@dimen/gw_space_sm">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:baselineAligned="false"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:id="@+id/setupStepIndicator"
+            style="@style/Widget.Gateway.Setup.StepIndicator"
+            android:text="@string/setup_step_indicator" />
+
+        <!-- The escape, and it is in the header rather than the footer so it is on screen
+             before anything else has been read. -->
+        <Button
+            android:id="@+id/setupCloseButton"
+            style="@style/Widget.Gateway.Button.Text"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/setup_action_close" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/setupStepTitle"
+        style="@style/Widget.Gateway.Setup.StepTitle"
+        android:text="@string/setup_step_root_title" />
+
+    <TextView
+        android:id="@+id/setupStepSummary"
+        style="@style/Widget.Gateway.Setup.StepSummary"
+        android:text="@string/setup_step_root_summary" />
+
+    <ScrollView
+        android:id="@+id/setupBodyScroll"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:fillViewport="true"
+        android:scrollbarStyle="outsideOverlay">
+
+        <!-- focusable/focusableInTouchMode so the account step's first field does not grab
+             focus and raise the keyboard the moment the wizard opens. -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:paddingBottom="@dimen/gw_space_lg">
+
+            <include layout="@layout/setup_step_root" />
+
+            <include layout="@layout/setup_step_permissions" />
+
+            <include layout="@layout/setup_step_dialer" />
+
+            <include layout="@layout/setup_step_sip" />
+
+            <include layout="@layout/setup_step_verify" />
+
+        </LinearLayout>
+    </ScrollView>
+
+    <View style="@style/Widget.Gateway.Divider" />
+
+    <LinearLayout style="@style/Widget.Gateway.Setup.Footer">
+
+        <!-- The only control on this screen that is ever disabled, and only on step 1. -->
+        <Button
+            android:id="@+id/setupBackButton"
+            style="@style/Widget.Gateway.Button.Text"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/setup_action_back" />
+
+        <Space
+            android:layout_width="0dp"
+            android:layout_height="1dp"
+            android:layout_weight="1" />
+
+        <!-- Never disabled, on any step, for any reason. -->
+        <Button
+            android:id="@+id/setupSkipButton"
+            style="@style/Widget.Gateway.Button.Secondary"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/setup_action_skip" />
+
+        <Button
+            android:id="@+id/setupNextButton"
+            style="@style/Widget.Gateway.Button"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="@dimen/gw_space_sm"
+            android:text="@string/setup_action_next" />
+    </LinearLayout>
+
+    <TextView
+        style="@style/Widget.Gateway.Footnote"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingBottom="@dimen/gw_space_sm"
+        android:text="@string/setup_close_hint" />
+
+</LinearLayout>

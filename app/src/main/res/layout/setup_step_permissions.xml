@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GW-42 step 2 - the six runtime permissions.
+
+  Granted through root (pm grant) rather than through dialogs, which is why this is a wizard
+  step at all: on a headless appliance nobody is there to tap Allow.
+
+  The doze exemption is a separate button. PermissionManager.disableBatteryOptimizationAsync
+  carries a warning that it can freeze some devices, and a step that might wedge the handset it
+  is commissioning has to be something the operator chose.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/setupStepPermissionsBody"
+    style="@style/Widget.Gateway.Setup.Panel">
+
+    <LinearLayout style="@style/Widget.Gateway.Setup.VerdictRow">
+
+        <FrameLayout
+            android:id="@+id/setupPermissionsChip"
+            style="@style/Widget.Gateway.Setup.ChipSlot" />
+    </LinearLayout>
+
+    <TextView
+        style="@style/Widget.Gateway.Caption"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/setup_permissions_help" />
+
+    <TextView
+        android:id="@+id/setupPermissionsDetail"
+        style="@style/Widget.Gateway.Console.Dense"
+        android:text="@string/status_checking" />
+
+    <LinearLayout
+        style="@style/Widget.Gateway.ButtonBar"
+        android:layout_marginTop="@dimen/gw_space_sm">
+
+        <Button
+            android:id="@+id/setupGrantButton"
+            style="@style/Widget.Gateway.Button"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/setup_action_grant" />
+
+        <Button
+            android:id="@+id/setupRefreshPermissionsButton"
+            style="@style/Widget.Gateway.Button.Secondary"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="@dimen/gw_space_sm"
+            android:text="@string/setup_action_refresh_permissions" />
+    </LinearLayout>
+
+    <View style="@style/Widget.Gateway.Divider" />
+
+    <TextView
+        style="@style/Widget.Gateway.Caption"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/setup_battery_opt_help" />
+
+    <Button
+        android:id="@+id/setupBatteryOptButton"
+        style="@style/Widget.Gateway.Button.Secondary"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/setup_action_battery_opt" />
+
+</LinearLayout>

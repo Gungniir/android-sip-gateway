@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GW-42 - what the commissioning wizard needs on top of GW-40's vocabulary.
+
+  A separate file rather than additions to styles.xml, deliberately. GW-40 owns res/values and
+  GW-44 owns res/drawable; a wave that appends to a file another wave is editing turns a merge
+  into hand-resolution for no benefit, and Android merges every file under res/values into one
+  table regardless of what it is called (PHASE-4-PLAN section 6 makes exactly this argument
+  about the manifest's application tag).
+
+  Additions only. Nothing here redefines a GW-40 or GW-41 style, palette entry or type step -
+  these are compositions of them for a screen that did not exist in either wave.
+-->
+<resources>
+
+    <!-- ==================================================================================
+         Theme
+
+         The gateway theme without the app bar, and nothing else changed.
+
+         The wizard already carries its own header - "Step 3 of 5", the step's name, and the
+         Close button that is the escape route this whole issue is about. A title bar above
+         that would be a second header saying less, and it costs ~56dp on a 5-inch bench phone
+         where the chrome (header, summary, footer, the standing "close at any time" line) is
+         already competing with the step body for the screen.
+
+         Derived from Theme.Gateway rather than from a Material NoActionBar parent, so the
+         palette, the type scale and every default widget style stay exactly what GW-40 set
+         and only the two window flags differ.
+         ================================================================================== -->
+
+    <style name="Theme.Gateway.Setup" parent="Theme.Gateway">
+        <item name="windowActionBar">false</item>
+        <item name="windowNoTitle">true</item>
+    </style>
+
+    <!-- ==================================================================================
+         The wizard's own containers
+         ================================================================================== -->
+
+    <!--
+      A step's body panel. The rounded relative of Widget.Gateway.Panel: it exists because the
+      wizard shows one panel at a time on an otherwise empty screen, where a hairline-bounded
+      card reads as "this is the thing you are doing" and a full-bleed flat surface does not.
+
+      This is where gw_corner_panel finally lands - see @drawable/gw_panel.
+    -->
+    <style name="Widget.Gateway.Setup.Panel" parent="">
+        <item name="android:background">@drawable/gw_panel</item>
+        <item name="android:orientation">vertical</item>
+        <item name="android:padding">@dimen/gw_panel_padding</item>
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_marginBottom">@dimen/gw_panel_gap</item>
+    </style>
+
+    <!--
+      A callout: the thing the operator has to read before they act. Two uses, both about not
+      destroying something that already works - "this gateway already has an account" and
+      "that is a feature code, and this trunk cannot dial one".
+
+      gw_on_primary_container is the text colour GW-40 defined for exactly this pairing and
+      that nothing had yet used; @drawable/gw_callout carries gw_stroke_emphasis.
+    -->
+    <style name="Widget.Gateway.Setup.Callout" parent="Widget.MaterialComponents.TextView">
+        <item name="android:textAppearance">@style/TextAppearance.Gateway.Label</item>
+        <item name="android:textColor">@color/gw_on_primary_container</item>
+        <item name="android:background">@drawable/gw_callout</item>
+        <item name="android:padding">@dimen/gw_space_sm</item>
+        <item name="android:lineSpacingMultiplier">1.15</item>
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_marginBottom">@dimen/gw_space_sm</item>
+    </style>
+
+    <!-- ==================================================================================
+         Header and footer
+         ================================================================================== -->
+
+    <!-- "Step 3 of 5". Small, quiet, and never the thing being read. -->
+    <style name="Widget.Gateway.Setup.StepIndicator" parent="Widget.MaterialComponents.TextView">
+        <item name="android:textAppearance">@style/TextAppearance.Gateway.SectionHeader</item>
+        <item name="android:textColor">@color/gw_on_surface_variant</item>
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_weight">1</item>
+        <item name="android:gravity">center_vertical</item>
+    </style>
+
+    <!-- The step's name. The one line someone glances at. -->
+    <style name="Widget.Gateway.Setup.StepTitle" parent="Widget.MaterialComponents.TextView">
+        <item name="android:textAppearance">@style/TextAppearance.Gateway.Title</item>
+        <item name="android:textColor">@color/gw_on_surface</item>
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:paddingTop">@dimen/gw_space_xs</item>
+    </style>
+
+    <!-- Why the step is on the list. One or two sentences, never more. -->
+    <style name="Widget.Gateway.Setup.StepSummary" parent="Widget.MaterialComponents.TextView">
+        <item name="android:textAppearance">@style/TextAppearance.Gateway.Caption</item>
+        <item name="android:textColor">@color/gw_on_surface_variant</item>
+        <item name="android:lineSpacingMultiplier">1.15</item>
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:paddingTop">@dimen/gw_space_xxs</item>
+        <item name="android:paddingBottom">@dimen/gw_space_sm</item>
+    </style>
+
+    <!--
+      The footer that carries Back, Skip and Next. Pinned outside the scroll view, because a
+      Skip you have to scroll to find is not a Skip that works on every step - and finding it
+      is the whole recovery path on a phone whose wizard cannot get past step 1.
+    -->
+    <style name="Widget.Gateway.Setup.Footer" parent="">
+        <item name="android:orientation">horizontal</item>
+        <item name="android:baselineAligned">false</item>
+        <item name="android:gravity">center_vertical</item>
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:paddingTop">@dimen/gw_space_sm</item>
+        <item name="android:paddingBottom">@dimen/gw_space_sm</item>
+    </style>
+
+    <!-- ==================================================================================
+         Inside a step
+         ================================================================================== -->
+
+    <!-- A chip's slot. Fixed by the chip it holds, which SetupChip inflates by state. -->
+    <style name="Widget.Gateway.Setup.ChipSlot" parent="">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_marginBottom">@dimen/gw_space_sm</item>
+    </style>
+
+    <!-- The row a chip and its one-line verdict share. -->
+    <style name="Widget.Gateway.Setup.VerdictRow" parent="">
+        <item name="android:orientation">horizontal</item>
+        <item name="android:baselineAligned">false</item>
+        <item name="android:gravity">center_vertical</item>
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:paddingBottom">@dimen/gw_space_xs</item>
+    </style>
+
+    <!--
+      An outlined field on the wizard's forms. GW-40 wrote Widget.Gateway.TextInputLayout for
+      "wave 2's form sections where a label has to stay visible once the field is filled";
+      wave 2's screen used bare hints and left it unconsumed. A commissioning form is the case
+      it describes: every box is pre-filled, so a hint would be invisible exactly when someone
+      needs to know which box they are looking at.
+
+      This is also what consumes gw_stroke_emphasis, through boxStrokeWidthFocused.
+    -->
+    <style name="Widget.Gateway.Setup.Field" parent="Widget.Gateway.TextInputLayout">
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_marginBottom">@dimen/gw_space_sm</item>
+    </style>
+
+</resources>

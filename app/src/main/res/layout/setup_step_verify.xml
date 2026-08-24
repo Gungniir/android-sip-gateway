@@ -1,0 +1,170 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GW-42 step 5 - verification, and the limits of it.
+
+  Two panels, not one, because there are two different claims and only one of them is a check:
+
+    1. Registration. The PBX accepted these credentials; the control thread published it; the
+       screen reads it out of the GatewayStatus snapshot. Real, and worth having.
+    2. A test call. Evidence about whether the PBX routes a destination and answers - shown
+       with the whole transcript, so what is being trusted is the transcript and not a chip.
+
+  And a third block that says what neither of them proves: nothing here can confirm that the
+  GSM to SIP audio bridge works. That claim needs a human on a real call.
+
+  The destination default is deliberately NOT *43. The gateway's trunk cannot dial feature
+  codes - the PBX's inbound context for the trunk rejects them - so a step hardcoded to the
+  FreePBX echo test would fail on a correctly configured gateway, which is the worst outcome a
+  commissioning wizard has. See SetupViewModel.defaultVerificationDestination.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/setupStepVerifyBody"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical">
+
+    <!-- ============================ 1. Registration ============================ -->
+
+    <LinearLayout style="@style/Widget.Gateway.Setup.Panel">
+
+        <TextView
+            style="@style/Widget.Gateway.SectionHeader"
+            android:text="@string/setup_verify_registration_heading" />
+
+        <LinearLayout style="@style/Widget.Gateway.Setup.VerdictRow">
+
+            <FrameLayout
+                android:id="@+id/setupRegistrationChip"
+                style="@style/Widget.Gateway.Setup.ChipSlot" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/setupRegistrationDetail"
+            style="@style/Widget.Gateway.Body"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/setup_registration_not_running" />
+
+        <TextView
+            style="@style/Widget.Gateway.Caption"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingTop="@dimen/gw_space_xs"
+            android:text="@string/setup_verify_registration_help" />
+
+        <LinearLayout
+            style="@style/Widget.Gateway.ButtonBar"
+            android:layout_marginTop="@dimen/gw_space_sm">
+
+            <Button
+                android:id="@+id/setupStartGatewayButton"
+                style="@style/Widget.Gateway.Button"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/setup_action_start_gateway" />
+
+            <Button
+                android:id="@+id/setupReRegisterButton"
+                style="@style/Widget.Gateway.Button.Secondary"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="@dimen/gw_space_sm"
+                android:text="@string/setup_action_reregister" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- ============================ 2. Test call ============================ -->
+
+    <LinearLayout style="@style/Widget.Gateway.Setup.Panel">
+
+        <TextView
+            style="@style/Widget.Gateway.SectionHeader"
+            android:text="@string/setup_verify_testcall_heading" />
+
+        <TextView
+            style="@style/Widget.Gateway.Caption"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/setup_verify_testcall_help" />
+
+        <com.google.android.material.textfield.TextInputLayout
+            style="@style/Widget.Gateway.Setup.Field"
+            android:hint="@string/hint_test_destination">
+
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/setupTestDestination"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="phone"
+                android:importantForAutofill="no" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <TextView
+            style="@style/Widget.Gateway.Caption"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/setup_test_destination_help" />
+
+        <!-- Shown only while the box holds a feature code. A warning, never a block: the
+             deployment on the other end of a given handset is not ours to assume. -->
+        <TextView
+            android:id="@+id/setupTestDestinationWarning"
+            style="@style/Widget.Gateway.Setup.Callout"
+            android:visibility="gone"
+            android:text="@string/setup_test_destination_warning" />
+
+        <LinearLayout style="@style/Widget.Gateway.Setup.VerdictRow">
+
+            <FrameLayout
+                android:id="@+id/setupTestCallChip"
+                style="@style/Widget.Gateway.Setup.ChipSlot" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/setupTestCallDetail"
+            style="@style/Widget.Gateway.Body"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/setup_test_call_not_run" />
+
+        <LinearLayout
+            style="@style/Widget.Gateway.ButtonBar"
+            android:layout_marginTop="@dimen/gw_space_sm">
+
+            <Button
+                android:id="@+id/setupTestCallButton"
+                style="@style/Widget.Gateway.Button"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/action_test_call" />
+
+            <Button
+                android:id="@+id/setupTestHangupButton"
+                style="@style/Widget.Gateway.Button.Destructive"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="@dimen/gw_space_sm"
+                android:text="@string/action_hang_up" />
+        </LinearLayout>
+
+        <!-- The transcript, verbatim. This is the thing to read; the chip above it is a
+             summary of exactly five markers in this text. -->
+        <TextView
+            android:id="@+id/setupTestReport"
+            style="@style/Widget.Gateway.Console.Dense"
+            android:layout_marginTop="@dimen/gw_space_sm"
+            android:text="@string/status_no_test_call" />
+    </LinearLayout>
+
+    <!-- ==================== 3. What none of this proves ==================== -->
+
+    <TextView
+        android:id="@+id/setupAudioCaveat"
+        style="@style/Widget.Gateway.Setup.Callout"
+        android:text="@string/setup_audio_caveat" />
+
+</LinearLayout>

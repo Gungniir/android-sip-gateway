@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GW-42 - the rounded backing for one status-chip state.
+
+  Widget.Gateway.StatusChip.Error already names the container colour; what it cannot carry is a
+  corner radius, because its background is a flat @color. GW-41's status header solves that by
+  building a GradientDrawable in Java. The wizard's chips are inflated rather than recoloured
+  (see ui/setup/SetupChip), so they can have the shape as a resource instead - same token,
+  same value at night, no Java.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+
+    <solid android:color="@color/gw_state_error_container" />
+
+    <corners android:radius="@dimen/gw_corner_chip" />
+</shape>

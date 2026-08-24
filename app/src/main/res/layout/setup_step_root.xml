@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GW-42 step 1 - does su work.
+
+  Everything else on the list is downstream of this one, which is why it is first. It is still
+  skippable: a handset whose root has not been set up yet is exactly the handset someone opens
+  this wizard on to read the other four steps.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/setupStepRootBody"
+    style="@style/Widget.Gateway.Setup.Panel">
+
+    <LinearLayout style="@style/Widget.Gateway.Setup.VerdictRow">
+
+        <FrameLayout
+            android:id="@+id/setupRootChip"
+            style="@style/Widget.Gateway.Setup.ChipSlot" />
+    </LinearLayout>
+
+    <TextView
+        style="@style/Widget.Gateway.Caption"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/setup_root_help" />
+
+    <!-- Whatever su actually said, verbatim. A wizard that reports "failed" and nothing else
+         is a wizard you cannot act on. -->
+    <TextView
+        android:id="@+id/setupRootDetail"
+        style="@style/Widget.Gateway.Console.Dense"
+        android:text="@string/setup_root_not_checked" />
+
+    <Button
+        android:id="@+id/setupRootCheckButton"
+        style="@style/Widget.Gateway.Button"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="@dimen/gw_space_sm"
+        android:text="@string/setup_action_check_root" />
+
+</LinearLayout>

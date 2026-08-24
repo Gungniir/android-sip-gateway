@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GW-42 step 3 - the dialer role.
+
+  The quietest failure on the whole list. Without ROLE_DIALER Android never binds
+  GatewayInCallService, so the gateway registers, looks healthy, shows a green chip on the main
+  screen - and no GSM call ever reaches it. PHASE-4-VALIDATION already warns testers to check
+  the role before assuming a UI bug; this step is where a commissioning operator finds out
+  first instead.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/setupStepDialerBody"
+    style="@style/Widget.Gateway.Setup.Panel">
+
+    <LinearLayout style="@style/Widget.Gateway.Setup.VerdictRow">
+
+        <FrameLayout
+            android:id="@+id/setupDialerChip"
+            style="@style/Widget.Gateway.Setup.ChipSlot" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/setupDialerDetail"
+        style="@style/Widget.Gateway.Body"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/setup_dialer_not_held" />
+
+    <TextView
+        style="@style/Widget.Gateway.Caption"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingTop="@dimen/gw_space_xs"
+        android:text="@string/setup_dialer_help" />
+
+    <Button
+        android:id="@+id/setupClaimDialerButton"
+        style="@style/Widget.Gateway.Button"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="@dimen/gw_space_sm"
+        android:text="@string/setup_action_claim_dialer" />
+
+</LinearLayout>
