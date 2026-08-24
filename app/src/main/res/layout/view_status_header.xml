@@ -13,9 +13,12 @@
   getCallDurationMs() and isInGracePeriod() - re-read the clock on every call by design, so
   nothing derived from them may be cached in a field; see that class.
 
-  It sits OUTSIDE the ScrollView in activity_main.xml. On an appliance you are holding at a
-  bench, "is it registered, is a call up, has the watchdog found anything" must not be
-  something you scroll back to.
+  It is the first child INSIDE the ScrollView in activity_main.xml, and scrolls with the
+  sections below it. It was pinned outside the ScrollView when GW-41 landed - the argument
+  being that on a bench instrument "is it registered, is a call up, has the watchdog found
+  anything" should never be something you scroll back to. On a real handset that cost too
+  much of a short screen, so the owner had it scroll. Nothing here depends on which side of
+  the ScrollView it is on; StatusHeaderBinder finds it by id either way.
 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/statusHeader"

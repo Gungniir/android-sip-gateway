@@ -148,6 +148,28 @@ public class MainScreenTest {
     }
 
     /**
+     * The status header scrolls with the sections rather than being pinned above them.
+     *
+     * <p>GW-41 shipped it pinned outside the {@code ScrollView}, on the argument that health
+     * should never be something you scroll back to. On a real handset it cost too much of a
+     * short screen and the owner had it scroll instead. That is a layout decision with no
+     * runtime symptom - {@code StatusHeaderBinder} finds the header by id either way, so
+     * moving it back would break nothing and no other test would notice. Hence this one.
+     */
+    @Test
+    public void theStatusHeaderScrollsWithTheSections() {
+        launch();
+        View scroll = activity.findViewById(R.id.sectionScroll);
+        assertNotNull(scroll);
+
+        View parent = (View) activity.findViewById(R.id.statusHeader).getParent();
+        while (parent != null && parent != scroll) {
+            parent = parent.getParent() instanceof View ? (View) parent.getParent() : null;
+        }
+        assertEquals("the status header must live inside sectionScroll", scroll, parent);
+    }
+
+    /**
      * And in the night configuration. A theme incompatibility fails loudly, which
      * PHASE-4-VALIDATION calls the good news; the point of running it twice is the resources
      * that exist in one configuration and not the other.

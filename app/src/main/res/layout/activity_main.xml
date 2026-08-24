@@ -8,12 +8,17 @@
   limit, audio config, gain, mute preset, save-audio/restart, web interface - in that order,
   with nothing to say where one ended and the next began.
 
-  What it is now: a persistent status header that never scrolls, over four collapsible
-  sections. That shape comes from what the device is (PHASE-4-UI-PLAN section 2) - a rooted
+  What it is now: a status header above four collapsible sections, all of it inside one
+  ScrollView. That shape comes from what the device is (PHASE-4-UI-PLAN section 2) - a rooted
   phone in a drawer with three jobs: commissioning, at-a-glance health, and diagnostics when
   something has broken and you are holding the phone. Health is the header, which is why it
-  is pinned; commissioning is the SIP section, which is why it is the one that starts open;
+  comes first; commissioning is the SIP section, which is why it is the one that starts open;
   diagnostics is one tap away rather than a scroll away.
+
+  The header was originally pinned outside the ScrollView. It scrolls with everything else
+  now, by the owner's decision: on a short screen the pinned panel ate enough height that the
+  section it sat above had very little left, and the header is tall - six labelled rows plus
+  the watchdog block. Scrolling to the top to read it is the cheaper cost.
 
   Density is deliberate. This is a bench instrument, not a consumer app, and whitespace-heavy
   styling would put fewer facts in front of someone standing over a phone with a fault.
@@ -29,8 +34,6 @@
     android:paddingStart="@dimen/gw_screen_margin"
     android:paddingEnd="@dimen/gw_screen_margin"
     android:paddingTop="@dimen/gw_space_sm">
-
-    <include layout="@layout/view_status_header"/>
 
     <ScrollView
         android:id="@+id/sectionScroll"
@@ -51,6 +54,8 @@
             android:focusableInTouchMode="true"
             android:paddingTop="@dimen/gw_panel_gap"
             android:paddingBottom="@dimen/gw_space_xxl">
+
+            <include layout="@layout/view_status_header"/>
 
             <include layout="@layout/section_sip"/>
 
