@@ -114,12 +114,18 @@ assertion armed.
 
 ### Phase 2 — Correctness & resource hygiene
 
+**Execution plan: [PHASE-2-PLAN.md](PHASE-2-PLAN.md)** — it overrides the briefs below
+wherever they disagree. Roughly a third of their required-change items are already done,
+several are factually false, and three carry hazards that would cause on-device damage if
+implemented as written.
+
 | Issue | Fixes |
 |---|---|
 | [GW-20](issues/GW-20-root-helper.md) | H1 — serialized root shell, safe output capture |
 | [GW-21](issues/GW-21-sms-off-main.md) | G1 — SMS pipeline off the main thread |
 | [GW-22](issues/GW-22-pjsip-object-lifetime.md) | H7 — deletion policy for pjsua2 objects |
-| [GW-23](issues/GW-23-rt-audio-path.md) | H2, H3 — bulk JNI copy, no per-frame allocation |
+| [GW-23a](issues/GW-23-rt-audio-path.md) | H2, H3 — bulk JNI copy, no per-frame allocation |
+| GW-23b | **E5 (P0)** — dedicated I/O thread + ring buffer. **Gated**, see PHASE-2-PLAN §2.4 |
 | [GW-24](issues/GW-24-config-consistency.md) | H4 — key mismatch, atomic prefs writes |
 | [GW-25](issues/GW-25-watchdog-invariants.md) | H9 — both orphan directions + fail-safe deadlines |
 | [GW-26](issues/GW-26-service-lifecycle.md) | G2, H8 — non-blocking shutdown, guarded teardown |
@@ -180,6 +186,11 @@ Phase 1:  GW-10 ──┬─→ GW-11 ─┐
 Phase 2:  GW-20, GW-21, GW-22, GW-23, GW-24 — independent, parallel
           GW-25, GW-26 — after GW-10
           GW-27 — after GW-20 (consumes its execRoot result contract)
+
+  ** SUPERSEDED. Phase 2 is a dense mesh around PjsipSipService.java, not a flat
+     fan-out. See PHASE-2-PLAN.md section 4 for the real wave graph and the five
+     hard ordering constraints (GW-20->GW-24, GW-20->GW-27, GW-22->GW-25,
+     GW-26->GW-21, GW-01->GW-23b). **
 
 Phase 3:  GW-30, GW-31 — anytime
           GW-32 — after Phase 1
