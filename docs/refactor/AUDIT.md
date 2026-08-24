@@ -1769,3 +1769,43 @@ call/audio/SIP state) expressed 14 times. The roadmap treats it that way.
 
 See [ROADMAP.md](ROADMAP.md) for the phased plan and [issues/](issues/) for the
 agent-ready work items.
+
+#### H18. The silent-bridge detector false-positives on every slow-answering inbound call — NEW, P2
+Found on hardware during the wave-3 validation run (2026-08-24, merlinx, 6 real calls).
+
+`PjsipSipService.checkSilentBridge` fires when `CallManager` is `BRIDGED`, audio is
+streaming, and `GsmAudioPort.getFramesRequested()` has not moved for 12 s. Its predicate has
+no condition that the **SIP leg has actually answered**.
+
+For an inbound GSM call the state machine is
+`IDLE → GSM_INCOMING → SIP_DIALING → BRIDGED`, and the observed transition to `BRIDGED`
+("both legs up") happens when the INVITE goes out and the audio streams start — **not** when
+the SIP leg confirms. So while the PBX extension is merely *ringing*, the call is `BRIDGED`,
+audio is streaming, and pjmedia has legitimately never asked for a frame. Past 12 s the
+detector fires.
+
+Measured, from the run:
+
+| Call | `BRIDGED` at | SIP `CONFIRMED` at | Ring gap | Detector |
+|---|---|---|---|---|
+| 1 | 21:39:57.565 | 21:40:07.134 | 9.6 s | silent (under 12 s) |
+| 2 | 21:41:18.191 | 21:41:47.883 | **29.7 s** | **fired at 21:41:32.041**, `framesRequested=0` |
+
+Nobody had seen this before because both handsets were `MODE_SIP_FIRST` until this run; it
+needs `MODE_ANSWER_FIRST`, where the GSM leg is answered first and audio starts long before
+the SIP side picks up.
+
+**Why it matters even though it is detection-only.** It does not terminate anything today, so
+no call is harmed. The damage is to the evidence: GW-25 §2 is explicit that
+`silent_bridge_episodes` is where the case for promoting this rule to auto-terminating
+accumulates ("must not auto-terminate until it has been shown not to false-positive over a
+week of real calls"). That counter is now polluted by ordinary ringing, and a decision taken
+on it would ship a rule that **kills healthy inbound calls whose SIP leg rings more than
+12 s**. It also emits a ~20-line conference dump per episode.
+
+**Fix direction.** Gate the rule on the SIP media actually being established — start the
+stall clock at SIP `CONFIRMED` rather than at bridge start — so the ringing window cannot
+count toward the 12 s. Until then, treat any `silent_bridge_episodes` figure gathered in
+`ANSWER_FIRST` as unreliable, and do not use it as promotion evidence.
+
+Related: H16 (the counter has no consumer either), GW-25.

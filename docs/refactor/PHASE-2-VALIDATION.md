@@ -67,16 +67,47 @@ A release build from the same commit installs over it cleanly.
 - Both devices register over TLS with SRTP mandatory; zero crashes, zero tombstones, zero
   app-level `E`/`W` beyond the guard line above.
 
+### Call run — 6 real calls, merlinx, ANSWER_FIRST, 2026-08-24
+
+4 inbound GSM + 2 outbound, all bridged, all torn down cleanly
+(`6 × TERMINATING -> IDLE`). 30 calls was over-specified: the watchdog rules are
+deterministic per 3 s tick, so a wrong dwell fires on call 1, not call 17. Shape coverage,
+not count, is what settles the acceptance question.
+
+- **GW-25 acceptance: PASSED — zero terminations.** The one `INVARIANT` line in the run is
+  the silent-bridge detector, which is detection-only by design (see H18 below).
+- **The 45 s dwell is now proven on hardware, not just argued.** On call 2 the GSM leg was
+  ACTIVE and adopted with no answered SIP leg for **29.7 s**, and the watchdog left it alone.
+  The original brief's guess of ~8 s would have killed that call — a healthy, ordinary
+  inbound call where the PBX extension simply rang for a while.
+- **E5 re-measured (GW-23b baseline).** SIP-initiated hangups: **52.12 s** and **3.19 s**
+  (BYE → `UDP media transport detached`). GSM-initiated: **0.00 s** ×4 — detach and TX BYE
+  within 3 ms. The asymmetry in GW-23b §1 reproduces exactly, and 52.12 s is a **new worst
+  case**, above the previously recorded 50.69 s.
+- `Conference links lost (media stream re-created), rewiring` was observed and handled — the
+  known PJSIP codec-lock UPDATE behaviour, working as designed.
+- Zero crashes, zero tombstones, zero main-thread stalls, `errors=0` on every frame counter.
+
+**New finding: H18** — the silent-bridge detector fires on any inbound call whose SIP leg
+rings longer than 12 s, because `BRIDGED` is reached when the INVITE goes out, not when the
+SIP side answers. Detection-only, so no call is harmed, but it pollutes the very counter
+GW-25 §2 designates as the evidence base for promoting the rule to auto-terminating.
+
 ### NOT covered — still needs a human placing calls
 
-Everything above is idle-path and SMS-path. **No call was placed**, so these remain open:
+After the 6-call run above, what is still open:
 
-- **GW-23a** — `bulkCopy=true` (logged by `GsmAudioPort` at stream open) and audio quality.
-- **GW-25** — the 30-call false-positive run, ≥10 of them `MODE_ANSWER_FIRST`. Note both
-  devices are currently `incoming_call_mode=0` (**SIP_FIRST**); the dangerous shape needs
-  it set to `1` explicitly.
-- **GW-22** — the call soak / graveyard behaviour.
+- **GW-23a** — `bulkCopy=true` is **still unconfirmed**. The line is a one-shot logged when
+  `GsmAudioPort` is constructed, which happens lazily on the *first* call of a service
+  lifetime; clearing the logcat buffer after the service was already up loses it. Restart the
+  gateway, place **one** call, then grep `GsmAudioPort: Profile=`. Audio quality is still a
+  judgement only the operator's ears can make.
+- **GW-22** — the graveyard under a longer soak.
 - **GW-21** — the 20-SMS burst, SMS during a bridged call, PBX-down backoff.
+- **lavender** has had no calls at all; the Qualcomm audio path is unexercised. Its B1e
+  cross-check did pass.
+- Deliberately not chased: `MAX_CALL_DURATION_MS` and `TERMINATING_DWELL_MAX_MS` need
+  temporarily shortened constants to reach (validation step 8), not longer real calls.
 
 ### Notes for re-running
 
