@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GW-40 - the gateway palette (night).
+
+  Every name here also exists in values/colors.xml. This file redefines; it never
+  introduces. If you are adding a token, add it to values/colors.xml FIRST.
+
+  Deliberately absent: ic_launcher_background / ic_launcher_foreground. A launcher icon is
+  drawn by the launcher, not by this app's theme, so it has no night configuration to
+  follow - GW-44 wave 2 depends on those two staying single-valued.
+
+  Reachability, stated plainly: this configuration only engages where the platform has a
+  system dark-theme setting, i.e. API 29+. minSdkVersion is 23, and on Android 6-9 the app
+  renders the day palette unconditionally. That is a consequence of the night-mode decision
+  recorded in the commit that introduced this file, not an oversight.
+-->
+<resources>
+
+    <!-- Structure. Near-black rather than grey: this is a device read in a dim room, and
+         the state colours need somewhere dark to sit. -->
+    <color name="gw_surface">#FF0E1319</color>
+    <color name="gw_surface_variant">#FF161D26</color>
+    <color name="gw_surface_sunken">#FF090D12</color>
+
+    <color name="gw_on_surface">#FFE4EAF1</color>
+    <color name="gw_on_surface_variant">#FF98A5B4</color>
+    <color name="gw_on_surface_faint">#FF7C8A99</color>
+
+    <color name="gw_outline">#FF2C3745</color>
+    <color name="gw_outline_variant">#FF1F2833</color>
+
+    <!-- Brand. Lightened, because a deep blue on near-black is unreadable and Material's
+         own dark guidance is to raise the tone rather than the elevation overlay alone. -->
+    <color name="gw_primary">#FF6BADFF</color>
+    <color name="gw_on_primary">#FF04203E</color>
+    <color name="gw_primary_dark">#FF9AC8FF</color>
+    <color name="gw_primary_container">#FF13304F</color>
+    <color name="gw_on_primary_container">#FFC5DEFF</color>
+
+    <!-- App bar becomes a panel, not a brand block. -->
+    <color name="gw_app_bar">#FF161D26</color>
+    <color name="gw_on_app_bar">#FFE4EAF1</color>
+    <color name="gw_status_bar">#FF090D12</color>
+
+    <!-- State. -->
+    <color name="gw_state_ok">#FF4FC97F</color>
+    <color name="gw_state_ok_container">#FF11301E</color>
+
+    <color name="gw_state_warn">#FFE2A63A</color>
+    <color name="gw_state_warn_container">#FF332614</color>
+
+    <color name="gw_state_error">#FFFF7062</color>
+    <color name="gw_state_error_container">#FF3A1714</color>
+    <color name="gw_on_state_error">#FF2A0906</color>
+
+    <color name="gw_state_idle">#FF8492A2</color>
+    <color name="gw_state_idle_container">#FF1D2630</color>
+
+</resources>

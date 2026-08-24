@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GW-40 - spacing and type scale.
+
+  There was no dimens.xml. Every margin, padding and text size in activity_main.xml was an
+  inline literal, which is how the layout ended up with 4dp/8dp/16dp margins mixed with
+  9sp/10sp/11sp/12sp/13sp/14sp text and no relationship between any of them.
+
+  Two rules that make the scale worth having:
+
+  1. The spacing scale is a 4dp grid. Nothing between the steps.
+  2. gw_text_caption (12sp) is the FLOOR. Lint's SmallSp flags anything under 12sp and the
+     baseline carries two of them (the 10sp permissions block and the 10sp mute-control
+     footnote). There is no step below caption, so a layout built from this scale cannot
+     reintroduce them.
+
+  Sizes are tuned for density, not comfort: this is an appliance console read at arm's
+  length, and a whitespace-heavy consumer rhythm would fit less of the machine on screen.
+-->
+<resources>
+
+    <!-- ==================================================================================
+         Spacing - 4dp grid
+         ================================================================================== -->
+    <dimen name="gw_space_xxs">2dp</dimen>
+    <dimen name="gw_space_xs">4dp</dimen>
+    <dimen name="gw_space_sm">8dp</dimen>
+    <dimen name="gw_space_md">12dp</dimen>
+    <dimen name="gw_space_lg">16dp</dimen>
+    <dimen name="gw_space_xl">24dp</dimen>
+    <dimen name="gw_space_xxl">32dp</dimen>
+
+    <!-- Named applications of the scale, so a layout says what it means. -->
+    <dimen name="gw_screen_margin">16dp</dimen>
+    <dimen name="gw_panel_padding">12dp</dimen>
+    <dimen name="gw_panel_gap">12dp</dimen>
+    <dimen name="gw_row_gap">8dp</dimen>
+    <dimen name="gw_label_gap">4dp</dimen>
+
+    <!-- ==================================================================================
+         Shape and rule weights
+         ================================================================================== -->
+    <dimen name="gw_corner_panel">4dp</dimen>
+    <dimen name="gw_corner_control">4dp</dimen>
+    <dimen name="gw_corner_chip">3dp</dimen>
+    <dimen name="gw_stroke">1dp</dimen>
+    <dimen name="gw_stroke_emphasis">2dp</dimen>
+
+    <!-- Minimum tappable edge. A phone in a drawer gets prodded, not caressed. -->
+    <dimen name="gw_touch_target">48dp</dimen>
+    <dimen name="gw_control_height">44dp</dimen>
+
+    <!-- ==================================================================================
+         Type scale
+
+         Display  24  screen title
+         Title    20  major heading
+         Section  13  section header (all caps, bold, tracked)
+         Body     15  running text and control labels
+         Label    13  compact control labels, radio/checkbox rows
+         Caption  12  helper text - THE FLOOR, see the header note on SmallSp
+         Mono     13  diagnostic output
+         MonoDense 12 dense diagnostic output (test-call report, permission dump)
+         ================================================================================== -->
+    <dimen name="gw_text_display">24sp</dimen>
+    <dimen name="gw_text_title">20sp</dimen>
+    <dimen name="gw_text_section">13sp</dimen>
+    <dimen name="gw_text_body">15sp</dimen>
+    <dimen name="gw_text_label">13sp</dimen>
+    <dimen name="gw_text_caption">12sp</dimen>
+    <dimen name="gw_text_mono">13sp</dimen>
+    <dimen name="gw_text_mono_dense">12sp</dimen>
+
+</resources>

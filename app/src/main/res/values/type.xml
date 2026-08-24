@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GW-40 - named text appearances.
+
+  Every size here comes from @dimen/gw_text_*; none is an inline literal. Colour is included
+  where the role implies it, so a layout can reach the same result through either
+  android:textAppearance or the matching Widget.Gateway.* style.
+
+  The console voice: sans for chrome and prose, monospace for anything the machine
+  produced. That distinction is the single most useful signal on a diagnostic screen -
+  monospace means "this is the device talking, not us".
+-->
+<resources>
+
+    <!-- Screen title. One per screen. -->
+    <style name="TextAppearance.Gateway.Display" parent="TextAppearance.MaterialComponents.Headline5">
+        <item name="android:textSize">@dimen/gw_text_display</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">@color/gw_on_surface</item>
+        <item name="android:letterSpacing">-0.01</item>
+    </style>
+
+    <!-- Major heading inside a screen; also the app bar title. -->
+    <style name="TextAppearance.Gateway.Title" parent="TextAppearance.MaterialComponents.Headline6">
+        <item name="android:textSize">@dimen/gw_text_title</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">@color/gw_on_surface</item>
+        <item name="android:letterSpacing">0</item>
+    </style>
+
+    <!-- Section header. All caps and tracked: it reads as a rule across the screen rather
+         than as another line of prose, which is what lets a dense console stay scannable. -->
+    <style name="TextAppearance.Gateway.SectionHeader" parent="TextAppearance.MaterialComponents.Overline">
+        <item name="android:textSize">@dimen/gw_text_section</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textAllCaps">true</item>
+        <item name="android:letterSpacing">0.09</item>
+        <item name="android:textColor">@color/gw_on_surface_variant</item>
+    </style>
+
+    <!-- Running text and control labels. -->
+    <style name="TextAppearance.Gateway.Body" parent="TextAppearance.MaterialComponents.Body1">
+        <item name="android:textSize">@dimen/gw_text_body</item>
+        <item name="android:textColor">@color/gw_on_surface</item>
+    </style>
+
+    <!-- Compact label: radio rows, checkbox rows, field labels. -->
+    <style name="TextAppearance.Gateway.Label" parent="TextAppearance.MaterialComponents.Body2">
+        <item name="android:textSize">@dimen/gw_text_label</item>
+        <item name="android:textColor">@color/gw_on_surface</item>
+    </style>
+
+    <!-- Helper text under a control. 12sp is the floor of the scale (lint SmallSp). -->
+    <style name="TextAppearance.Gateway.Caption" parent="TextAppearance.MaterialComponents.Caption">
+        <item name="android:textSize">@dimen/gw_text_caption</item>
+        <item name="android:textColor">@color/gw_on_surface_variant</item>
+    </style>
+
+    <!-- Footnote: the quietest text on the screen, still above the SmallSp floor. -->
+    <style name="TextAppearance.Gateway.Footnote" parent="TextAppearance.MaterialComponents.Caption">
+        <item name="android:textSize">@dimen/gw_text_caption</item>
+        <item name="android:textColor">@color/gw_on_surface_faint</item>
+    </style>
+
+    <!-- Machine output. -->
+    <style name="TextAppearance.Gateway.Mono" parent="TextAppearance.MaterialComponents.Body2">
+        <item name="android:fontFamily">monospace</item>
+        <item name="android:typeface">monospace</item>
+        <item name="android:textSize">@dimen/gw_text_mono</item>
+        <item name="android:textColor">@color/gw_on_surface</item>
+    </style>
+
+    <!-- Dense machine output: the permission dump and the test-call report, which are long
+         and are read by scanning, not by reading. Replaces the layout's 9sp and 10sp. -->
+    <style name="TextAppearance.Gateway.MonoDense" parent="TextAppearance.Gateway.Mono">
+        <item name="android:textSize">@dimen/gw_text_mono_dense</item>
+    </style>
+
+    <!-- The headline value of a status row: "REGISTERED", "IN CALL", "00:04:11". -->
+    <style name="TextAppearance.Gateway.StatusValue" parent="TextAppearance.MaterialComponents.Subtitle1">
+        <item name="android:fontFamily">monospace</item>
+        <item name="android:typeface">monospace</item>
+        <item name="android:textSize">@dimen/gw_text_body</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:letterSpacing">0.02</item>
+    </style>
+
+    <!-- Status chip label. Small, caps, tracked - a badge, not a sentence. -->
+    <style name="TextAppearance.Gateway.StatusChip" parent="TextAppearance.MaterialComponents.Overline">
+        <item name="android:textSize">@dimen/gw_text_caption</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textAllCaps">true</item>
+        <item name="android:letterSpacing">0.07</item>
+    </style>
+
+    <!-- Button label. Sentence case on purpose: Material's default all-caps costs width,
+         and this screen has three-button rows on a phone. -->
+    <style name="TextAppearance.Gateway.Button" parent="TextAppearance.MaterialComponents.Button">
+        <item name="android:textSize">@dimen/gw_text_label</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:letterSpacing">0.01</item>
+    </style>
+
+    <!-- App bar title. Colour comes from @color/gw_on_app_bar, which differs from
+         gw_on_surface at night (the bar is a panel there, not a brand block). -->
+    <style name="TextAppearance.Gateway.AppBarTitle" parent="TextAppearance.MaterialComponents.Headline6">
+        <item name="android:textSize">@dimen/gw_text_title</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textColor">@color/gw_on_app_bar</item>
+        <item name="android:letterSpacing">0</item>
+    </style>
+
+</resources>

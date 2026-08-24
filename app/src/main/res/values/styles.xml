@@ -1,5 +1,375 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  GW-40 - the gateway theme and its component vocabulary.
+
+  What was here before: a single AppTheme with parent Theme.AppCompat.Light.DarkActionBar
+  and an EMPTY BODY. No palette, no typography, no component styles. That empty body is the
+  whole reason the app read as a nightly build - not bad styling, no styling
+  (PHASE-4-UI-PLAN section 1).
+
+  Two entry points, deliberately:
+
+    Theme.Gateway  the real theme, named for what it is.
+    AppTheme       an alias kept ONLY so AndroidManifest.xml needs no edit. GW-44 edits the
+                   application tag's icon attributes in wave 2; not touching the same tag
+                   here turns a hand-resolved merge conflict into no merge at all
+                   (PHASE-4-PLAN section 6). Do not delete the alias without moving the
+                   manifest in the same commit.
+
+  Why Theme.MaterialComponents.DayNight.DarkActionBar and not a Material 3 theme: M3's
+  dynamic colour needs API 31 at runtime and is out of scope (PHASE-4-PLAN section 5 rule
+  2); we ship a fixed palette. M2's DayNight gives us values-night for free at
+  minSdkVersion 23, and its view inflater upgrades the existing stock Button / CheckBox /
+  RadioButton / TextView in activity_main.xml in place - which is how wave 1 changes the
+  app's appearance without touching a layout that GW-41 is about to rewrite.
+
+  Colour discipline: nothing in this file names a hex value. Everything routes through
+  @color/gw_* so values-night is the only thing that has to change for dark.
+-->
 <resources>
-    <style name="AppTheme" parent="Theme.AppCompat.Light.DarkActionBar">
+
+    <!-- ==================================================================================
+         Theme
+         ================================================================================== -->
+
+    <style name="Theme.Gateway" parent="Theme.MaterialComponents.DayNight.DarkActionBar">
+
+        <!-- Brand. colorSecondary is deliberately the same as colorPrimary: in Material
+             Components 2 the checkbox, radio and switch tints come from colorSecondary, and
+             an appliance console has one accent, not two. -->
+        <item name="colorPrimary">@color/gw_primary</item>
+        <item name="colorPrimaryVariant">@color/gw_primary_dark</item>
+        <item name="colorOnPrimary">@color/gw_on_primary</item>
+        <item name="colorSecondary">@color/gw_primary</item>
+        <item name="colorSecondaryVariant">@color/gw_primary_dark</item>
+        <item name="colorOnSecondary">@color/gw_on_primary</item>
+        <item name="colorAccent">@color/gw_primary</item>
+
+        <!-- Surfaces. -->
+        <item name="android:colorBackground">@color/gw_surface</item>
+        <item name="colorOnBackground">@color/gw_on_surface</item>
+        <item name="colorSurface">@color/gw_surface_variant</item>
+        <item name="colorOnSurface">@color/gw_on_surface</item>
+        <item name="android:windowBackground">@color/gw_surface</item>
+
+        <!-- Error. Wired to the same token the destructive button and the fault chip use,
+             so "something is wrong" is one colour everywhere. -->
+        <item name="colorError">@color/gw_state_error</item>
+        <item name="colorOnError">@color/gw_on_state_error</item>
+
+        <!-- Text. -->
+        <item name="android:textColorPrimary">@color/gw_on_surface</item>
+        <item name="android:textColorSecondary">@color/gw_on_surface_variant</item>
+        <item name="android:textColorTertiary">@color/gw_on_surface_faint</item>
+        <item name="android:textColorHint">@color/gw_on_surface_faint</item>
+        <item name="android:textColorLink">@color/gw_primary</item>
+
+        <!-- Controls: field underlines, checkbox boxes, spinner carets. -->
+        <item name="colorControlNormal">@color/gw_outline</item>
+        <item name="colorControlActivated">@color/gw_primary</item>
+        <item name="colorControlHighlight">@color/gw_primary_container</item>
+
+        <!-- System bars. statusBarColor is its own token because at night it is near-black
+             while colorPrimary is a light blue. -->
+        <item name="colorPrimaryDark">@color/gw_status_bar</item>
+        <item name="android:statusBarColor">@color/gw_status_bar</item>
+
+        <!-- App bar. -->
+        <item name="actionBarStyle">@style/Widget.Gateway.ActionBar</item>
+
+        <!-- Type scale wired into the Material attributes, so library components that read
+             ?attr/textAppearance* pick up our scale without being restyled one by one. -->
+        <item name="textAppearanceHeadline5">@style/TextAppearance.Gateway.Display</item>
+        <item name="textAppearanceHeadline6">@style/TextAppearance.Gateway.Title</item>
+        <item name="textAppearanceSubtitle1">@style/TextAppearance.Gateway.StatusValue</item>
+        <item name="textAppearanceBody1">@style/TextAppearance.Gateway.Body</item>
+        <item name="textAppearanceBody2">@style/TextAppearance.Gateway.Label</item>
+        <item name="textAppearanceCaption">@style/TextAppearance.Gateway.Caption</item>
+        <item name="textAppearanceOverline">@style/TextAppearance.Gateway.SectionHeader</item>
+        <item name="textAppearanceButton">@style/TextAppearance.Gateway.Button</item>
+
+        <!-- Default widget styles. These are what make wave 1 visible without a layout
+             edit: activity_main.xml assigns no styles at all, so every Button, EditText,
+             Spinner, CheckBox and RadioButton in it picks these up. -->
+        <item name="materialButtonStyle">@style/Widget.Gateway.Button</item>
+        <item name="borderlessButtonStyle">@style/Widget.Gateway.Button.Text</item>
+        <item name="editTextStyle">@style/Widget.Gateway.TextField</item>
+        <item name="android:editTextStyle">@style/Widget.Gateway.TextField</item>
+        <item name="spinnerStyle">@style/Widget.Gateway.Spinner</item>
+        <item name="android:spinnerStyle">@style/Widget.Gateway.Spinner</item>
+        <item name="checkboxStyle">@style/Widget.Gateway.CheckBox</item>
+        <item name="android:checkboxStyle">@style/Widget.Gateway.CheckBox</item>
+        <item name="radioButtonStyle">@style/Widget.Gateway.RadioButton</item>
+        <item name="android:radioButtonStyle">@style/Widget.Gateway.RadioButton</item>
     </style>
+
+    <!-- Alias. See the header: this is what AndroidManifest.xml points at, and keeping the
+         name is what lets GW-40 land without touching the application tag. -->
+    <style name="AppTheme" parent="Theme.Gateway"/>
+
+    <!-- ==================================================================================
+         Theme overlays
+
+         The Material way to recolour one component without inventing a res/color state
+         list: hand the component a theme in which colorPrimary already means what you want.
+         ================================================================================== -->
+
+    <!-- Destructive actions - Disconnect, Restart, anything that drops a live call. -->
+    <style name="ThemeOverlay.Gateway.Destructive" parent="">
+        <item name="colorPrimary">@color/gw_state_error</item>
+        <item name="colorOnPrimary">@color/gw_on_state_error</item>
+        <item name="colorPrimaryVariant">@color/gw_state_error</item>
+    </style>
+
+    <!-- ==================================================================================
+         App bar
+         ================================================================================== -->
+
+    <style name="Widget.Gateway.ActionBar" parent="Widget.MaterialComponents.ActionBar.Solid">
+        <item name="background">@color/gw_app_bar</item>
+        <item name="titleTextStyle">@style/TextAppearance.Gateway.AppBarTitle</item>
+        <item name="elevation">0dp</item>
+    </style>
+
+    <!-- ==================================================================================
+         Text - one style per role. Wave 2 (GW-41) applies these; wave 1 defines them.
+         ================================================================================== -->
+
+    <style name="Widget.Gateway.SectionHeader" parent="Widget.MaterialComponents.TextView">
+        <item name="android:textAppearance">@style/TextAppearance.Gateway.SectionHeader</item>
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:paddingTop">@dimen/gw_space_md</item>
+        <item name="android:paddingBottom">@dimen/gw_space_xs</item>
+    </style>
+
+    <style name="Widget.Gateway.Body" parent="Widget.MaterialComponents.TextView">
+        <item name="android:textAppearance">@style/TextAppearance.Gateway.Body</item>
+        <item name="android:lineSpacingMultiplier">1.15</item>
+    </style>
+
+    <style name="Widget.Gateway.Label" parent="Widget.MaterialComponents.TextView">
+        <item name="android:textAppearance">@style/TextAppearance.Gateway.Label</item>
+    </style>
+
+    <!-- Helper text under a control. -->
+    <style name="Widget.Gateway.Caption" parent="Widget.MaterialComponents.TextView">
+        <item name="android:textAppearance">@style/TextAppearance.Gateway.Caption</item>
+        <item name="android:lineSpacingMultiplier">1.1</item>
+        <item name="android:paddingBottom">@dimen/gw_space_xs</item>
+    </style>
+
+    <style name="Widget.Gateway.Footnote" parent="Widget.MaterialComponents.TextView">
+        <item name="android:textAppearance">@style/TextAppearance.Gateway.Footnote</item>
+        <item name="android:lineSpacingMultiplier">1.1</item>
+    </style>
+
+    <!-- Diagnostic well. This is the style that replaces the layout's three
+         android:background="#f0f0f0" monospace blocks, which are the reason those blocks
+         currently survive a switch to the night palette as light grey patches. -->
+    <style name="Widget.Gateway.Console" parent="Widget.MaterialComponents.TextView">
+        <item name="android:textAppearance">@style/TextAppearance.Gateway.Mono</item>
+        <item name="android:background">@color/gw_surface_sunken</item>
+        <item name="android:padding">@dimen/gw_panel_padding</item>
+        <item name="android:lineSpacingMultiplier">1.05</item>
+        <item name="android:textIsSelectable">true</item>
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+    </style>
+
+    <!-- Dense variant for long dumps: the permission report and the test-call report. -->
+    <style name="Widget.Gateway.Console.Dense">
+        <item name="android:textAppearance">@style/TextAppearance.Gateway.MonoDense</item>
+        <item name="android:padding">@dimen/gw_space_sm</item>
+    </style>
+
+    <!-- The value half of a status row. -->
+    <style name="Widget.Gateway.StatusValue" parent="Widget.MaterialComponents.TextView">
+        <item name="android:textAppearance">@style/TextAppearance.Gateway.StatusValue</item>
+        <item name="android:textColor">@color/gw_on_surface</item>
+    </style>
+
+    <!-- ==================================================================================
+         State chips - the four values a status console has to be able to say.
+
+         Background is the container tint, text is the signal colour. Both halves come from
+         values-night at night, so a chip needs no per-configuration layout.
+         ================================================================================== -->
+
+    <style name="Widget.Gateway.StatusChip" parent="Widget.MaterialComponents.TextView">
+        <item name="android:textAppearance">@style/TextAppearance.Gateway.StatusChip</item>
+        <item name="android:paddingLeft">@dimen/gw_space_sm</item>
+        <item name="android:paddingRight">@dimen/gw_space_sm</item>
+        <item name="android:paddingTop">@dimen/gw_space_xs</item>
+        <item name="android:paddingBottom">@dimen/gw_space_xs</item>
+        <item name="android:gravity">center</item>
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">wrap_content</item>
+    </style>
+
+    <style name="Widget.Gateway.StatusChip.Ok">
+        <item name="android:background">@color/gw_state_ok_container</item>
+        <item name="android:textColor">@color/gw_state_ok</item>
+    </style>
+
+    <style name="Widget.Gateway.StatusChip.Warn">
+        <item name="android:background">@color/gw_state_warn_container</item>
+        <item name="android:textColor">@color/gw_state_warn</item>
+    </style>
+
+    <style name="Widget.Gateway.StatusChip.Error">
+        <item name="android:background">@color/gw_state_error_container</item>
+        <item name="android:textColor">@color/gw_state_error</item>
+    </style>
+
+    <style name="Widget.Gateway.StatusChip.Idle">
+        <item name="android:background">@color/gw_state_idle_container</item>
+        <item name="android:textColor">@color/gw_state_idle</item>
+    </style>
+
+    <!-- ==================================================================================
+         Containers
+         ================================================================================== -->
+
+    <!-- A grouped section of the console. Flat, not floating: elevation shadows cost
+         contrast and buy nothing on a screen that is read, not browsed. -->
+    <style name="Widget.Gateway.Panel" parent="">
+        <item name="android:background">@color/gw_surface_variant</item>
+        <item name="android:padding">@dimen/gw_panel_padding</item>
+        <item name="android:orientation">vertical</item>
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+    </style>
+
+    <style name="Widget.Gateway.Divider" parent="">
+        <item name="android:background">@color/gw_outline_variant</item>
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">@dimen/gw_stroke</item>
+        <item name="android:layout_marginTop">@dimen/gw_space_sm</item>
+        <item name="android:layout_marginBottom">@dimen/gw_space_sm</item>
+    </style>
+
+    <!-- Horizontal button row. Carries baselineAligned="false", which is the fix for the
+         one DisableBaselineAlignment entry in lint-baseline.xml when GW-41 applies it. -->
+    <style name="Widget.Gateway.ButtonBar" parent="">
+        <item name="android:orientation">horizontal</item>
+        <item name="android:baselineAligned">false</item>
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+    </style>
+
+    <!-- ==================================================================================
+         Buttons
+
+         Colours are NOT set here. Widget.MaterialComponents.Button resolves its background
+         and disabled state from ?attr/colorPrimary / ?attr/colorOnSurface through Material's
+         own state lists, so wiring the theme is enough and no res/color/ selector is needed
+         - which matters, because res/drawable and res/color belong to other waves.
+         ================================================================================== -->
+
+    <style name="Widget.Gateway.Button" parent="Widget.MaterialComponents.Button.UnelevatedButton">
+        <item name="android:textAppearance">@style/TextAppearance.Gateway.Button</item>
+        <item name="cornerRadius">@dimen/gw_corner_control</item>
+        <item name="android:minHeight">@dimen/gw_touch_target</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+        <item name="android:paddingLeft">@dimen/gw_space_md</item>
+        <item name="android:paddingRight">@dimen/gw_space_md</item>
+    </style>
+
+    <!-- Secondary: outlined. Same weight, less commitment. -->
+    <style name="Widget.Gateway.Button.Secondary" parent="Widget.MaterialComponents.Button.OutlinedButton">
+        <item name="android:textAppearance">@style/TextAppearance.Gateway.Button</item>
+        <item name="cornerRadius">@dimen/gw_corner_control</item>
+        <item name="strokeColor">@color/gw_outline</item>
+        <item name="strokeWidth">@dimen/gw_stroke</item>
+        <item name="android:minHeight">@dimen/gw_touch_target</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+    </style>
+
+    <!-- Destructive: filled, in the fault colour, via the theme overlay above. Reserve it
+         for actions that end something - Disconnect, Restart, Hang Up. -->
+    <style name="Widget.Gateway.Button.Destructive" parent="Widget.MaterialComponents.Button.UnelevatedButton">
+        <item name="android:theme">@style/ThemeOverlay.Gateway.Destructive</item>
+        <item name="android:textAppearance">@style/TextAppearance.Gateway.Button</item>
+        <item name="cornerRadius">@dimen/gw_corner_control</item>
+        <item name="android:minHeight">@dimen/gw_touch_target</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+    </style>
+
+    <!-- Borderless, for button bars. This is the vocabulary for the five ButtonStyle
+         entries in lint-baseline.xml; GW-41 applies it when it rebuilds the button rows. -->
+    <style name="Widget.Gateway.Button.Text" parent="Widget.MaterialComponents.Button.TextButton">
+        <item name="android:textAppearance">@style/TextAppearance.Gateway.Button</item>
+        <item name="cornerRadius">@dimen/gw_corner_control</item>
+        <item name="android:minHeight">@dimen/gw_touch_target</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+    </style>
+
+    <!-- ==================================================================================
+         Input
+         ================================================================================== -->
+
+    <!-- Plain EditText. Underline and cursor come from colorControlNormal /
+         colorControlActivated on the theme. -->
+    <style name="Widget.Gateway.TextField" parent="Widget.AppCompat.EditText">
+        <item name="android:textAppearance">@style/TextAppearance.Gateway.Body</item>
+        <item name="android:textColor">@color/gw_on_surface</item>
+        <item name="android:textColorHint">@color/gw_on_surface_faint</item>
+        <item name="android:minHeight">@dimen/gw_control_height</item>
+        <item name="android:paddingTop">@dimen/gw_space_sm</item>
+        <item name="android:paddingBottom">@dimen/gw_space_sm</item>
+    </style>
+
+    <!-- Outlined text field, for wave 2's form sections where a label has to stay visible
+         once the field is filled. Requires com.google.android.material TextInputLayout. -->
+    <style name="Widget.Gateway.TextInputLayout" parent="Widget.MaterialComponents.TextInputLayout.OutlinedBox.Dense">
+        <item name="boxStrokeColor">@color/gw_primary</item>
+        <item name="boxStrokeWidth">@dimen/gw_stroke</item>
+        <item name="boxStrokeWidthFocused">@dimen/gw_stroke_emphasis</item>
+        <item name="hintTextColor">@color/gw_on_surface_variant</item>
+    </style>
+
+    <style name="Widget.Gateway.Spinner" parent="Widget.AppCompat.Spinner.Underlined">
+        <item name="android:minHeight">@dimen/gw_control_height</item>
+        <item name="android:popupBackground">@color/gw_surface_variant</item>
+        <item name="android:paddingTop">@dimen/gw_space_sm</item>
+        <item name="android:paddingBottom">@dimen/gw_space_sm</item>
+    </style>
+
+    <!-- ==================================================================================
+         Selection controls
+
+         Tints come from the theme (colorSecondary / colorOnSurface) through Material's own
+         state lists, so these styles only set geometry and type. minHeight is the point:
+         the current layout stacks 13sp radio rows with no minimum, which is a poor target
+         for someone prodding a phone one-handed over a bench.
+         ================================================================================== -->
+
+    <style name="Widget.Gateway.CheckBox" parent="Widget.MaterialComponents.CompoundButton.CheckBox">
+        <item name="android:textAppearance">@style/TextAppearance.Gateway.Label</item>
+        <item name="android:minHeight">@dimen/gw_touch_target</item>
+        <item name="android:paddingLeft">@dimen/gw_space_sm</item>
+        <item name="android:paddingStart">@dimen/gw_space_sm</item>
+    </style>
+
+    <style name="Widget.Gateway.RadioButton" parent="Widget.MaterialComponents.CompoundButton.RadioButton">
+        <item name="android:textAppearance">@style/TextAppearance.Gateway.Label</item>
+        <item name="android:minHeight">@dimen/gw_touch_target</item>
+        <item name="android:paddingLeft">@dimen/gw_space_sm</item>
+        <item name="android:paddingStart">@dimen/gw_space_sm</item>
+    </style>
+
+    <!-- For com.google.android.material.switchmaterial.SwitchMaterial. The layout still has
+         a raw Switch at activity_main.xml:551, which is the UseSwitchCompatOrMaterialXml
+         and UseSwitchCompatOrMaterialCode pair in lint-baseline.xml; swapping the widget is
+         GW-41's edit, and this is the style it lands on. -->
+    <style name="Widget.Gateway.Switch" parent="Widget.MaterialComponents.CompoundButton.Switch">
+        <item name="android:textAppearance">@style/TextAppearance.Gateway.Body</item>
+        <item name="android:minHeight">@dimen/gw_touch_target</item>
+    </style>
+
 </resources>
