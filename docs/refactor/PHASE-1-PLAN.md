@@ -344,6 +344,41 @@ the two operations it names. Nothing on the RT path may ever take this lock.
 
 ---
 
+## 3d. GW-11 leaves a trap for GW-13 — read this before demoting PhoneStateListener
+
+GW-11 made `terminateAllCalls()` idempotent: it now returns immediately when the machine is
+already `IDLE`, so it no longer fires `onCallsTerminated()` and therefore no longer calls
+`stopBridge()` / `stopAudioStreams()` from `IDLE`. That is correct and intended.
+
+It is safe **today** only because a second, unconditional teardown path still exists:
+`PjsipSipService.handlePhoneState`'s `CALL_STATE_IDLE` branch calls
+`audioBridge.stopAudioStreams()` regardless of `CallManager` state, with this comment:
+
+> *"Always stop the audio streams so the mixer routing is torn down even for calls that never
+> reached the BRIDGED state (otherwise the enforce thread would keep the local mic muted)."*
+
+That branch is on the **`PhoneStateListener` path — exactly the path GW-13 exists to
+demote or delete.** The Telecom `Call.Callback` path (`onGsmCallStateChanged`
+→ `STATE_DISCONNECTED`) does **not** stop audio streams; it only calls
+`callManager.onGsmCallEnded()` and releases the mute lease.
+
+So if GW-13 removes `handlePhoneState`'s side effects without first moving the
+unconditional `stopAudioStreams()` onto the Telecom path, a GSM call that ends **without
+ever reaching `BRIDGED`** loses both teardown routes at once:
+
+- `onGsmCallEnded()` → `terminateAllCalls()` → returns early, because the machine never
+  left `IDLE` for such a call;
+- `handlePhoneState(IDLE)` → deleted.
+
+The symptom is the one the comment warns about and that GW-08 was written to stop: the
+orphaned `MixerEnforce` thread keeps re-asserting the call routing and the mic mute every
+2 s, with no open PCM and no call — i.e. **a phone with a dead microphone until reboot.**
+
+**Requirement on GW-13:** whichever path becomes the single source of truth must call
+`stopAudioStreams()` unconditionally on GSM end, independent of `CallManager` state. Verify
+it specifically with a call that never reaches `BRIDGED` — reject the SIP leg, or hang up
+the GSM leg during ring.
+
 ## 4. Exit criterion for Phase 1
 
 From the ROADMAP, unchanged:
