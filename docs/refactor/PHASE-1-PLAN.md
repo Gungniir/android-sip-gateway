@@ -416,3 +416,49 @@ Findings that Phase 1 interacts with but does not close:
   *visible* (commit `67d0089`) but not solved. Untouched by Phase 1.
 - **B1b / B4b / B4c** — out-of-process restore state: a process kill leaves a mute or a
   charging block with nothing to restore it. Still unfiled as an issue.
+
+---
+
+## 6. Wave 1 on-device verification — 2026-08-24
+
+Build: `refactor/phase-1` with GW-10, GW-11, GW-12, GW-15 merged. 180 tests/variant
+(from a 106 baseline at the start of Phase 1), 0 failures, `lintDebug` clean.
+Debug build (assertions **armed**, they throw) on merlinx; release on lavender.
+
+| Criterion | merlinx (MT6768) | lavender (SDM660) |
+|---|---|---|
+| Two-way audio, both directions | ✅ user-confirmed | ✅ user-confirmed |
+| `assertOnControlThread` failures | **0** | **0** |
+| `ILLEGAL TRANSITION` (GW-11 table) | **0** | **0** |
+| `Skipped N frames` | **0** | **0** |
+| `Conference links lost … rewiring` | ✅ fired | ✅ fired |
+| New tombstones | **0** | **0** |
+| `RESTORE REFUSED` (B1d) | 0 | 0 |
+| Web `/api/config` from a NanoHTTPD worker | ✅ HTTP 200, no assertion | — |
+
+Both call directions were exercised on both phones, and **GW-11's state split is visibly
+working** — the GSM→SIP direction now walks `IDLE → GSM_INCOMING → SIP_DIALING → BRIDGED`
+instead of sitting in `SIP_INCOMING` and lying to the UI. Every lifecycle line is on the
+control thread's tid.
+
+### Do not chase this: "Audio bridge started" 3× vs "stopped" 2×
+
+The counts look unbalanced and they are not a leak. The re-wire branch logs
+`Audio bridge started` a *second* time for the **same** call, immediately after
+`Conference links lost … rewiring`. Two calls therefore produce three "started" lines and
+two "stopped" lines. Verified against the full timeline on both SoCs.
+
+Not fixed deliberately: that log line sits inside the region proved byte-identical to
+`ce18980` during the GW-12 review, and re-wording it would invalidate that proof for no
+functional gain. If it is ever changed, `Audio bridge rewired` is the honest wording.
+
+### Still not measured
+
+- **Thread-count drop** (a stated exit criterion) — no clean pre-GW-10 baseline was
+  captured from an equivalent device state, so the comparison was never made. `SipInit` and
+  `ConfigReload` are confirmed gone from the thread table; the numeric claim is unproven.
+- **F2 pool-capacity flatness** across ~200 reconnect cycles (GW-15) — the unit test covers
+  the assertion that *replaces* the registration, not the leak itself.
+- **50-cycle random-offset hangup soak** and the **E2 restart-with-a-bridged-call** case
+  (GW-12) — neither has been run.
+- A call that **never reaches `BRIDGED`** — see §3d; that is GW-13's gate, not wave 1's.
