@@ -1,5 +1,6 @@
 package org.onetwoone.gateway.config;
 
+import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.SharedPreferences;
 
@@ -457,6 +458,36 @@ public class GatewayConfig {
      */
     public static float dbToLinear(float db) {
         return (float) Math.pow(10.0, db / 20.0);
+    }
+
+    // ========== SMS duplicate suppression (AUDIT H13 / GW-27) ==========
+
+    private static final String KEY_PROCESSED_SMS = "processed_sms";
+
+    /**
+     * The persisted SMS duplicate-suppression record, or {@code ""} when nothing has been
+     * forwarded yet.
+     *
+     * <p>Opaque to this class on purpose: {@code SmsHandler} owns the encoding, the pruning
+     * and the age policy, and this is only the durable slot they live in. It exists because
+     * the inbox {@code read} flag is provider state the app <b>cannot</b> guarantee it can
+     * write (it is not the default SMS app, and the root fallback is device-dependent), so
+     * the flag must not be the only defence against re-forwarding the whole inbox on every
+     * process start — AUDIT H13.
+     *
+     * <p>Written with {@code commit()} rather than {@code apply()}: the failure this guards
+     * against is precisely the process going away, and {@code apply()}'s disk write is not
+     * ordered against that. The record is a few KB and the write happens once per forwarded
+     * message, never on a hot path.
+     */
+    public String getProcessedSmsRecord() {
+        return gatewayPrefs.getString(KEY_PROCESSED_SMS, "");
+    }
+
+    /** @see #getProcessedSmsRecord() */
+    @SuppressLint("ApplySharedPref")
+    public void setProcessedSmsRecord(String record) {
+        gatewayPrefs.edit().putString(KEY_PROCESSED_SMS, record == null ? "" : record).commit();
     }
 
     // ========== Bulk Operations ==========
