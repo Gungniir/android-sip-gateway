@@ -95,3 +95,27 @@ Medium. §1 can break the operator's own tooling if anything drives the gateway 
 broadcast from an unsigned app. Confirm what actually sends these broadcasts today before
 merging — if a third-party automation app is in use, `signatureOrPrivileged` plus the
 existing priv-app permission file is the path, not removing the check.
+
+---
+
+## Added after Phase 2 — H16: `GET_STATUS` is a stub, and wiring it widens this surface
+
+`ACTION_GET_STATUS` is documented in `CLAUDE.md` and in `GatewayControlReceiver`'s header as
+part of the remote-control API. Its handler is `Log.i(TAG, "GET_STATUS not yet implemented")`.
+
+Phase 2 filled `GatewayStatus.toBundle()` with real content — call state, grace-period
+instant, config generation, `calls_created`/`calls_deleted`/`calls_alive` (GW-22),
+`watchdog_terminations`/`silent_bridge_episodes` (GW-25) — and **none of it has a consumer.**
+It also made a validation step unrunnable; see AUDIT H16.
+
+**Do the two together, in this order.** Implementing the broadcast first would hand the
+gateway's full runtime state to any app on the device, because the receiver is
+`exported="true"` with no permission (S1). So: permission-gate the receiver, *then* wire
+`GET_STATUS` to `getStatusSnapshot().toBundle()` via `setResultExtras`.
+
+`ServiceWatchdog.checkNow()` is the natural way to force a fresh tick before answering, and
+it already exists as an any-thread entry point (`control.post`, not the private handler).
+
+Note the UI half of the same defect is **GW-45** (Phase 4), not this issue: `MainViewModel`
+flattens the snapshot to three fields before it reaches the screen.
+

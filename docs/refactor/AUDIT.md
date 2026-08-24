@@ -1711,6 +1711,38 @@ Fixed by catching `Throwable` there and wrapping a non-`Exception` into an `Exce
 rethrowing — wrapped rather than rethrown so `initializeSip`'s handler treats it as a failed
 init and schedules a reconnect, instead of an `Error` killing the control thread.
 
+#### H16. The status bundle has no consumer: GET_STATUS is a stub — NEW, P2
+Found by the Phase 4 UI session at `b3b2c0e`, and confirmed here. Everything Phase 2 added
+to the observable surface is computed and then discarded at the last hop.
+
+`GatewayControlReceiver.ACTION_GET_STATUS` is documented in the class header and in
+`CLAUDE.md` as part of the remote-control API, but its handler is
+`Log.i(TAG, "GET_STATUS not yet implemented")`. Meanwhile `GatewayStatus.toBundle()` now
+carries `call_state`, `gsm_call_placed_at`, `config_generation`, `calls_created`,
+`calls_deleted`, `calls_alive`, `watchdog_terminations` and `silent_bridge_episodes` —
+**none of which reach any consumer.**
+
+Two separate consequences:
+
+1. **The documented broadcast API silently does nothing.** `START`, `STOP` and `CONFIGURE`
+   work; `GET_STATUS` answers nothing, so anything driving the gateway remotely cannot read
+   its state.
+2. **It made a validation step unrunnable.** `PHASE-2-VALIDATION.md` originally told the
+   operator to score GW-25's 30-call false-positive run — the acceptance test for the whole
+   watchdog change — from `GET_STATUS`'s `watchdog_terminations`. That command returns
+   nothing. Corrected in place to grep logcat for the `INVARIANT` prefix, which every
+   termination logs at ERROR.
+
+The UI half is the same defect one layer up and is **GW-45**'s (Phase 4): `MainViewModel`
+reads the snapshot and keeps three fields, flattening everything into
+`getStatusText()`'s three-line string, so call state, duration, grace period, the call
+counters and the whole `WatchdogFindings` block never reach the screen either.
+
+Wiring the broadcast is small — `toBundle()` already exists and `ServiceWatchdog.checkNow()`
+is the natural trigger — but the receiver is `exported="true"` with no permission (**S1**),
+so implementing it *widens an unauthenticated surface*. It therefore belongs with
+**GW-30**, not before it. → **GW-30**.
+
 ### P2 — security posture
 
 #### S1. Exported control receiver with no permission
