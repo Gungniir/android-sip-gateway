@@ -1,5 +1,116 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <color name="ic_launcher_background">#2196F3</color>
-    <color name="ic_launcher_foreground">#FFFFFF</color>
+<!--
+  GW-40 - the gateway palette (day).
+
+  Before this file there was no app palette at all: two launcher-icon colours and a theme
+  with an empty body, so every surface in the app was whatever Theme.AppCompat.Light
+  happened to hand out.
+
+  Structure. Two groups, and the difference between them matters:
+
+  * SEMANTIC TOKENS (gw_*) - named for the ROLE, never for the hue. Every one of them is
+    redefined in values-night/colors.xml under the same name. Nothing outside this file and
+    its night twin may hardcode a hex value, and no token may be defined only in
+    values-night - a token that exists in one configuration and not the other is a crash
+    waiting for a device with the other setting.
+
+  * LAUNCHER COLOURS - ic_launcher_background / ic_launcher_foreground. These are NOT
+    theme tokens. A launcher icon does not follow the app's night mode, so they are
+    deliberately absent from values-night. The names are load-bearing: GW-44 builds the
+    adaptive icon on them in wave 2. Values may change; names may not.
+
+  The design target (PHASE-4-UI-PLAN section 2) is a status-first console for a rooted
+  phone in a drawer, read at arm's length over a bench. Density is a virtue. The palette is
+  therefore low-chroma for everything structural, and saves saturation entirely for the
+  four state colours - because on a status console the state colours are the interface.
+-->
+<!--
+  UnusedResources is suppressed for this file, deliberately and temporarily.
+
+  A design system defines its vocabulary one wave before anything consumes it: GW-40 ships
+  the tokens and styles, GW-41 rewrites res/layout and applies them (PHASE-4-PLAN section 6).
+  Between those two waves lint sees ~50 resources with no reference and is, narrowly, right.
+
+  Suppressing here rather than regenerating lint-baseline.xml keeps the suppression visible,
+  scoped to the four design-system files, and easy to remove - which is the point.
+
+  GW-41 / GW-42: delete this tools:ignore once the layouts consume the vocabulary. After
+  that, an unused token is a real finding - a role nobody needed - and lint should say so.
+-->
+<resources xmlns:tools="http://schemas.android.com/tools"
+           tools:ignore="UnusedResources">
+
+    <!-- ==================================================================================
+         Structure
+         ================================================================================== -->
+
+    <!-- Page background. Cool near-white; never pure #FFFFFF, so a raised panel can be. -->
+    <color name="gw_surface">#FFF4F6F8</color>
+    <!-- Raised panel / grouped section. -->
+    <color name="gw_surface_variant">#FFFFFFFF</color>
+    <!-- Inset well for diagnostic and monospace output. Replaces the layout's #f0f0f0. -->
+    <color name="gw_surface_sunken">#FFE7ECF1</color>
+
+    <!-- Primary reading colour. -->
+    <color name="gw_on_surface">#FF141A21</color>
+    <!-- Secondary / helper text. Replaces the layout's #666666. -->
+    <color name="gw_on_surface_variant">#FF5A6674</color>
+    <!-- Tertiary / footnote text. Replaces the layout's #999999. Still >= 4.5:1 on gw_surface. -->
+    <color name="gw_on_surface_faint">#FF6E7A88</color>
+
+    <!-- Hairline rules, field underlines, panel edges. -->
+    <color name="gw_outline">#FFC6CFD9</color>
+    <!-- Disabled controls and dividers inside a panel. -->
+    <color name="gw_outline_variant">#FFDDE3EA</color>
+
+    <!-- ==================================================================================
+         Brand
+         ================================================================================== -->
+
+    <color name="gw_primary">#FF0A5FC2</color>
+    <color name="gw_on_primary">#FFFFFFFF</color>
+    <!-- Pressed / selected tint of the primary, and the M2 colorPrimaryVariant slot. -->
+    <color name="gw_primary_dark">#FF08498F</color>
+    <!-- Low-emphasis primary wash: selected rows, focused field fill. -->
+    <color name="gw_primary_container">#FFDCE9F9</color>
+    <color name="gw_on_primary_container">#FF073A73</color>
+
+    <!-- App bar and status bar. Separate tokens because night resolves them differently
+         from the brand colour: a bright blue bar at night is a lamp, not a header. -->
+    <color name="gw_app_bar">#FF0A5FC2</color>
+    <color name="gw_on_app_bar">#FFFFFFFF</color>
+    <color name="gw_status_bar">#FF08498F</color>
+
+    <!-- ==================================================================================
+         State - the reason this screen exists
+
+         Each state has a signal colour (text, dot, icon) and a container tint (chip
+         background). Chip text is the signal colour ON the container tint; both pairings
+         are checked for >= 4.5:1 contrast.
+         ================================================================================== -->
+
+    <!-- OK / registered / bridged. -->
+    <color name="gw_state_ok">#FF12703A</color>
+    <color name="gw_state_ok_container">#FFDCF0E3</color>
+
+    <!-- Warn / degraded / grace period / needs a restart to apply. -->
+    <color name="gw_state_warn">#FF8A5300</color>
+    <color name="gw_state_warn_container">#FFFAEACF</color>
+
+    <!-- Error / fault / unregistered. Doubles as the destructive-action colour. -->
+    <color name="gw_state_error">#FFB32116</color>
+    <color name="gw_state_error_container">#FFFBE1DE</color>
+    <color name="gw_on_state_error">#FFFFFFFF</color>
+
+    <!-- Idle / not started / unknown. Deliberately the same family as helper text: idle is
+         the absence of a signal, and it must not read as one. -->
+    <color name="gw_state_idle">#FF5A6674</color>
+    <color name="gw_state_idle_container">#FFE3E9EF</color>
+
+    <!-- ==================================================================================
+         Launcher icon - NOT theme tokens. See the header. GW-44 owns these in wave 2.
+         ================================================================================== -->
+    <color name="ic_launcher_background">#FF0A5FC2</color>
+    <color name="ic_launcher_foreground">#FFFFFFFF</color>
+
 </resources>

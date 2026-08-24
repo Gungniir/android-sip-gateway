@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GW-40 - the gateway palette (night).
+
+  Every name here also exists in values/colors.xml. This file redefines; it never
+  introduces. If you are adding a token, add it to values/colors.xml FIRST.
+
+  Deliberately absent: ic_launcher_background / ic_launcher_foreground. A launcher icon is
+  drawn by the launcher, not by this app's theme, so it has no night configuration to
+  follow - GW-44 wave 2 depends on those two staying single-valued.
+
+  =======================================================================================
+  HOW NIGHT MODE IS SELECTED, AND WHY (GW-40 decision)
+
+  The app does NOT call AppCompatDelegate.setDefaultNightMode(). The DayNight parent on
+  Theme.Gateway resolves from the framework configuration and nothing else. Three reasons,
+  in order of weight:
+
+  1. Forcing MODE_NIGHT_YES would make the day palette unreachable, and PHASE-4-PLAN
+     section 7 requires on-device validation "in both themes". A theme you cannot get to is
+     a theme you cannot validate.
+
+  2. An explicit MODE_NIGHT_FOLLOW_SYSTEM call would be ceremony. AppCompat's default is
+     MODE_NIGHT_UNSPECIFIED, which already resolves DayNight from the configuration;
+     AppCompat only consults UiModeManager for FOLLOW_SYSTEM when the device is in car
+     mode, so on every API level this app runs on the call is a no-op. GatewayApplication.
+     onCreate is where the GatewayConfig preference migration runs (AUDIT H4) and its
+     ordering is load-bearing - it is not a place to add a line that does nothing.
+
+  3. A per-app theme override is a user-visible preference. That means a GatewayConfig key
+     and a control to set it, which is GW-41/GW-42 territory, not the design-system
+     foundation's.
+
+  The consequence, stated plainly rather than left to be discovered: there is no
+  system-wide dark theme before API 29. minSdkVersion is 23, so on Android 6-9 this file
+  never applies and the app always renders the day palette. That is accepted, not an
+  oversight - and it is why the DAY palette is the one that had to be got right first.
+  =======================================================================================
+-->
+<resources xmlns:tools="http://schemas.android.com/tools"
+           tools:ignore="UnusedResources">
+
+    <!-- Structure. Near-black rather than grey: this is a device read in a dim room, and
+         the state colours need somewhere dark to sit. -->
+    <color name="gw_surface">#FF0E1319</color>
+    <color name="gw_surface_variant">#FF161D26</color>
+    <color name="gw_surface_sunken">#FF090D12</color>
+
+    <color name="gw_on_surface">#FFE4EAF1</color>
+    <color name="gw_on_surface_variant">#FF98A5B4</color>
+    <color name="gw_on_surface_faint">#FF7C8A99</color>
+
+    <color name="gw_outline">#FF2C3745</color>
+    <color name="gw_outline_variant">#FF1F2833</color>
+
+    <!-- Brand. Lightened, because a deep blue on near-black is unreadable and Material's
+         own dark guidance is to raise the tone rather than the elevation overlay alone. -->
+    <color name="gw_primary">#FF6BADFF</color>
+    <color name="gw_on_primary">#FF04203E</color>
+    <color name="gw_primary_dark">#FF9AC8FF</color>
+    <color name="gw_primary_container">#FF13304F</color>
+    <color name="gw_on_primary_container">#FFC5DEFF</color>
+
+    <!-- App bar becomes a panel, not a brand block. -->
+    <color name="gw_app_bar">#FF161D26</color>
+    <color name="gw_on_app_bar">#FFE4EAF1</color>
+    <color name="gw_status_bar">#FF090D12</color>
+
+    <!-- State. -->
+    <color name="gw_state_ok">#FF4FC97F</color>
+    <color name="gw_state_ok_container">#FF11301E</color>
+
+    <color name="gw_state_warn">#FFE2A63A</color>
+    <color name="gw_state_warn_container">#FF332614</color>
+
+    <color name="gw_state_error">#FFFF7062</color>
+    <color name="gw_state_error_container">#FF3A1714</color>
+    <color name="gw_on_state_error">#FF2A0906</color>
+
+    <color name="gw_state_idle">#FF8492A2</color>
+    <color name="gw_state_idle_container">#FF1D2630</color>
+
+</resources>

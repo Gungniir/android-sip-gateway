@@ -81,6 +81,16 @@ android {
     packagingOptions {
         pickFirst 'lib/arm64-v8a/libc++_shared.so'
     }
+
+    // Robolectric needs the MERGED resource table and manifest to resolve R.string /
+    // R.style / R.color. Without this AGP does not emit
+    // com/android/tools/test_config.properties and every app resource lookup in a unit test
+    // throws Resources$NotFoundException. GW-40 needs it for the theme-resolution tests.
+    testOptions {
+        unitTests {
+            includeAndroidResources = true
+        }
+    }
 }
 
 configurations.all {
@@ -92,6 +102,19 @@ configurations.all {
 
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.6.1'
+
+    // Material Components (GW-40). Provides the DayNight theme the design system is built
+    // on, and the MaterialComponentsViewInflater that upgrades the layout's stock Button /
+    // CheckBox / RadioButton / TextView in place.
+    //
+    // 1.13.0 is the CEILING, not a preference: 1.14.0 pulls androidx.core 1.16.0, whose AAR
+    // metadata declares "requires Android Gradle plugin 8.6.0 or higher" and this build is
+    // on AGP 8.2.0. Raising it means raising AGP, which is not a UI change. Lint will
+    // therefore keep reporting "a newer version of material than 1.13.0 is available"; that
+    // warning is expected and does not gate the build.
+    //
+    // None of this touches targetSdkVersion, which stays 27.
+    implementation 'com.google.android.material:material:1.13.0'
 
     // Lifecycle & ViewModel for MVVM
     implementation 'androidx.lifecycle:lifecycle-viewmodel:2.6.2'

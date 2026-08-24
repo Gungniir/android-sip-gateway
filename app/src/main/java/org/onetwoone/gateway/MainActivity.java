@@ -387,7 +387,9 @@ public class MainActivity extends AppCompatActivity {
                 if (position < presetNames.length) {
                     String selectedPreset = presetNames[position];
                     viewModel.selectMutePreset(selectedPreset);
-                    Toast.makeText(MainActivity.this, "Preset: " + presetDescriptions[position], Toast.LENGTH_SHORT).show();
+                    Toast.makeText(MainActivity.this,
+                            getString(R.string.toast_mute_preset, presetDescriptions[position]),
+                            Toast.LENGTH_SHORT).show();
                 }
             }
             @Override
@@ -488,7 +490,7 @@ public class MainActivity extends AppCompatActivity {
 
         if (controls == null || controls.isEmpty()) {
             TextView noControlsText = new TextView(this);
-            noControlsText.setText("No mixer controls found. Check root permissions.");
+            noControlsText.setText(R.string.status_no_mixer_controls);
             noControlsText.setTextSize(12);
             noControlsText.setTextColor(0xFF999999);
             micMuteCheckboxContainer.addView(noControlsText);
@@ -515,9 +517,9 @@ public class MainActivity extends AppCompatActivity {
     private void updateWebInterfaceLabel(boolean enabled) {
         if (enabled) {
             String ip = getDeviceIp();
-            webInterfaceLabel.setText("Web Interface: http://" + ip + ":8080");
+            webInterfaceLabel.setText(getString(R.string.label_web_interface_enabled, ip));
         } else {
-            webInterfaceLabel.setText("Web Interface (disabled)");
+            webInterfaceLabel.setText(R.string.label_web_interface_disabled);
         }
     }
 
