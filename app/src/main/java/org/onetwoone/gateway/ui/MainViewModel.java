@@ -180,8 +180,15 @@ public class MainViewModel extends AndroidViewModel {
     private final ServiceConnection serviceConnection = new ServiceConnection() {
         @Override
         public void onServiceConnected(ComponentName name, IBinder binder) {
-            PjsipSipService.LocalBinder localBinder = (PjsipSipService.LocalBinder) binder;
-            pjsipService = localBinder.getService();
+            // An unchecked cast on a callback argument, on the UI thread, in an app whose
+            // whole job is to keep running unattended. instanceof covers null as well, and
+            // "the binding did not produce our service" is a state this can survive - the
+            // poll publishes UNAVAILABLE and the header says so.
+            if (!(binder instanceof PjsipSipService.LocalBinder)) {
+                Log.w(TAG, "Ignoring a binding that is not PjsipSipService.LocalBinder: " + binder);
+                return;
+            }
+            pjsipService = ((PjsipSipService.LocalBinder) binder).getService();
             serviceBound = true;
             Log.d(TAG, "Service connected");
 
