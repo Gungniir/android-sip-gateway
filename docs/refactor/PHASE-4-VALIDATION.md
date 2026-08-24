@@ -191,7 +191,7 @@ The surface is not rendered yet, so this is a no-regression check only.
 - **Whether the palette actually reads well** on the merlinx and lavender panels, at arm's
   length, in a drawer or over a bench. No amount of unit testing reaches this; it is a
   judgement call that needs the physical device in the intended setting.
-- **H18** (the locale-sensitive SoC detection found during this wave) cannot be reproduced on
+- **H20** (the locale-sensitive SoC detection found during this wave) cannot be reproduced on
   merlinx, which prints `mt6768` — a marker that survives the bug. Do not attempt it.
 
 ## Wave 2 — `phase-4-wave-2` (GW-41, GW-44)

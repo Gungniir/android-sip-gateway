@@ -1841,6 +1841,11 @@ sides are ASCII literals.
 Found by lint (`DefaultLocale`) while landing GW-40, which does not touch this file. Not
 folded into that change.
 
+Worth noting where it bites hardest: **merlinx prints `mt6768`, so the bench cannot reproduce
+it.** The one marker that fails is `mediatek`, on a kernel that prints that string, on a
+Turkish or Azerbaijani device. So this will never show up in validation here — it is a
+reasoning defect, closed by reading the code, not by testing. → **GW-31**.
+
 ### P2 — security posture
 
 #### S1. Exported control receiver with no permission
@@ -1860,7 +1865,7 @@ start/stop the gateway, or place calls (`GatewayControlReceiver.configure:165`).
 |---|---|---|
 | P0 | 9 | native UAF (2), device-brick (4), Telecom NPE/lost-call (3) |
 | P1 | 14 | call state machine (4), audio bridge (4), SIP lifecycle (6) → all downstream of the missing threading model; plus 3 ANR |
-| P2 | 14 | resource hygiene, correctness, observability, security |
+| P2 | 17 | resource hygiene, correctness, observability, security |
 
 The P1 block is not 14 independent bugs — it is one missing decision (which thread owns
 call/audio/SIP state) expressed 14 times. The roadmap treats it that way.

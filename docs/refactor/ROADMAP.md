@@ -204,7 +204,7 @@ the only test*.
 
 Findings raised *during* Phase 4, none of them fixed: **H17** (the SMS send outcome has no
 single thread — `SmsHandler:1127` is on the control thread while `:1210`/`:1224`/`:1229` are on
-main), **H18** (SoC auto-detection is locale-sensitive; a Turkish or Azerbaijani device loads
+main), **H20** (SoC auto-detection is locale-sensitive; a Turkish or Azerbaijani device loads
 the Qualcomm profile on a MediaTek phone). GW-46 is filed and deferred; GW-43 is specified and
 gated.
 

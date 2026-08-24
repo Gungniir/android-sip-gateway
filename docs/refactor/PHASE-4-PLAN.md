@@ -91,9 +91,17 @@ Measured at `b3b2c0e`:
 | `MainViewModel.java` `toastMessage.setValue("…")` | 10 |
 | **Total user-facing literals** | **68** |
 
-`strings.xml` has 4 entries and **three of them are unreferenced** — `select_capture`,
-`select_playback`, `select_mixer` are declared but the layout uses none of them (0 `@string`
-refs). That is two of the baseline's `UnusedResources`.
+~~`strings.xml` has 4 entries and three of them are unreferenced.~~ **Wrong — corrected
+during GW-40.** `select_capture`, `select_playback` and `select_mixer` are all referenced,
+from `android:prompt` at `activity_main.xml:365`, `:379` and `:393`. The "0 `@string` refs"
+figure came from grepping only `android:text` and `android:hint`, which is the same narrow
+measurement that produced the 43-vs-68 undercount above — `android:prompt` was never in the
+pattern. All three are live and stay. The baseline's two `UnusedResources` entries are the
+launcher colours, not these.
+
+The general lesson, since this is twice now: **counting user-facing strings by attribute name
+misses attributes you did not think of.** `android:prompt`, `android:contentDescription`,
+`android:title` and `android:summary` all take user-visible text.
 
 ### C3 — The root-on-main-thread constraint is already satisfied
 
