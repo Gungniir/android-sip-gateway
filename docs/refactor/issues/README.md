@@ -46,14 +46,42 @@ Independent, small, individually shippable. `GW-07` lands last (wide diff).
 | [GW-24](GW-24-config-consistency.md) | Config key mismatch; audio config never reloadable | P1 | — |
 | [GW-25](GW-25-watchdog-invariants.md) | Watchdog misses the reverse orphan; no fail-safe deadlines | P1 | GW-10/11/13 |
 | [GW-26](GW-26-service-lifecycle.md) | Blocking shutdown, unguarded teardown, restart interplay | P1 | GW-10 |
+| [GW-27](GW-27-sms-duplicate-suppression.md) | The whole SMS inbox is re-forwarded on every restart | P1 | GW-20 |
+
+`GW-23` was split during execution: **23a** (bulk JNI copy, no per-frame `malloc`) shipped;
+**23b** (the E5 ring buffer, P0) is **gated on hardware** — see `PHASE-2-PLAN.md` §2.4.
 
 ## Phase 3 — Hardening
 
 | ID | Title | Sev | Depends |
 |---|---|---|---|
-| [GW-30](GW-30-exported-surface.md) | Unauthenticated control receiver and web config | P1 | — |
+| [GW-30](GW-30-exported-surface.md) | Unauthenticated control receiver and web config; wire `GET_STATUS` (H16) | P1 | — |
+| [GW-28](GW-28-reload-gives-up-permanently.md) | A reload with no endpoint stops the gateway for good | P1 | GW-14 |
 | [GW-31](GW-31-remove-footguns.md) | Delete dead code that violates project rules | P2 | GW-12 |
 | [GW-32](GW-32-concurrency-tests.md) | Regression harness so the model does not erode | P2 | GW-10, GW-11 |
+
+## Phase 4 — UI: from debug harness to appliance console
+
+Execution plan: [PHASE-4-PLAN.md](../PHASE-4-PLAN.md), which overrides the older
+[PHASE-4-UI-PLAN.md](../PHASE-4-UI-PLAN.md). Almost presentation-only — **GW-45 is the
+exception and it is a prerequisite, not a nicety.**
+
+| ID | Title | Sev | Depends |
+|---|---|---|---|
+| GW-40 | Design system foundation — Material, palette, `values-night`, 68 strings | — | — |
+| [GW-45](GW-45-status-surface.md) | The UI cannot reach the status it shows | P2 | — |
+| GW-41 | Status-first main screen; decompose `MainActivity` / `MainViewModel` | — | GW-40, GW-45 |
+| GW-44 | Adaptive icon, density buckets, three stock notification icons | — | GW-40 |
+| GW-42 | First-run commissioning wizard | — | GW-40, GW-41, GW-45 |
+| GW-43 | Web interface redesign | — | **GATED on GW-30** |
+| [GW-46](GW-46-sms-status.md) | SMS is unobservable on the device | P2 | GW-21 |
+
+**GW-43 is gated**, not merely sequenced: `/api/config` returns `sip_password` in cleartext
+from an unauthenticated `0.0.0.0:8080` server (**S2**). A better-looking unauthenticated
+config endpoint invites more use of it.
+
+**GW-46 is deferred** and in no wave. SMS counters need new counters *and* a new cross-thread
+hand-off — half the send-outcome path still dispatches on main (**H17**).
 
 ## Conflict map
 
@@ -63,7 +91,19 @@ Do not assign two agents to the same file simultaneously:
 - `GsmAudioPort.java` — GW-01, GW-08, GW-12, GW-23
 - `CallManager.java` — GW-06, GW-07, GW-11, GW-25
 - `AudioBridgeManager.java` — GW-12, GW-22, GW-31
-- `WebConfigServer.java` — GW-24, GW-30
+- `WebConfigServer.java` — GW-24, GW-30, GW-43
 - `cpp/gsm_audio_jni.c` — GW-01, GW-23
+- `ui/MainViewModel.java` — GW-14, GW-24, GW-45, GW-41
+- `AndroidManifest.xml` — GW-40 (`android:theme`), GW-44 (`android:icon`), GW-42 (new
+  activity), GW-30 (receiver permission). Four issues, four different attributes of the same
+  `<application>` tag — this is why Phase 4 splits GW-40 and GW-44 across waves.
+- `res/values/colors.xml` — GW-40 owns it outright; GW-44 *references* `ic_launcher_*` and
+  must not edit the file.
 
 Prefer one worktree per agent, merged in issue-number order within each phase.
+
+**Pin the base in every brief.** A fresh agent worktree starts at `origin/main`, not at the
+branch you are working on — there is no `worktree.baseRef` setting. Make
+`git checkout -B <branch> <base-sha>` the agent's step 0 and require it to report its branch
+name back; merging by an assumed name has already reported "Already up to date" and would
+have landed nothing.
