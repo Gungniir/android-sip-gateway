@@ -584,9 +584,11 @@ public class SetupViewModel extends AndroidViewModel {
             return;
         }
 
-        GatewayConfig config = GatewayConfig.getInstance();
-        config.setTestDestination(dest);
-        config.setTestMode(VERIFICATION_MODE);
+        // The destination is persisted - the wizard has just worked out a routable one and the
+        // Diagnostics section should come up on it. The MODE is deliberately not: it is passed
+        // to the call directly, so writing it would overwrite an operator's chosen diagnostic
+        // mode for no reason. The wizard changes what it must and nothing else.
+        GatewayConfig.getInstance().setTestDestination(dest);
 
         testCallVerdict.setValue(TestCallVerdict.DIALING);
         bound.startTestCall(dest, VERIFICATION_MODE, VERIFICATION_DURATION_SEC);
