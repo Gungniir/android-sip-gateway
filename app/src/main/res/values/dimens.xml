@@ -8,7 +8,9 @@
 
   Two rules that make the scale worth having:
 
-  1. The spacing scale is a 4dp grid. Nothing between the steps.
+  1. The spacing scale steps in even dp - a 4dp rhythm from xs upward, plus one 2dp
+     hairline step for the places where 4dp is already too loose. Nothing between the steps,
+     and nothing odd.
   2. gw_text_caption (12sp) is the FLOOR. Lint's SmallSp flags anything under 12sp and the
      baseline carries two of them (the 10sp permissions block and the 10sp mute-control
      footnote). There is no step below caption, so a layout built from this scale cannot
