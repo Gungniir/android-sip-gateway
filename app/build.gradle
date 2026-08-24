@@ -97,7 +97,7 @@ dependencies {
     // on, and the MaterialComponentsViewInflater that upgrades the layout's stock Button /
     // CheckBox / RadioButton / TextView in place. Version pinned deliberately - see the
     // comment on resolutionStrategy below.
-    implementation 'com.google.android.material:material:1.12.0'
+    implementation 'com.google.android.material:material:1.13.0'
 
     // Lifecycle & ViewModel for MVVM
     implementation 'androidx.lifecycle:lifecycle-viewmodel:2.6.2'
