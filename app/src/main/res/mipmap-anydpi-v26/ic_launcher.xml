@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GW-44 - adaptive launcher icon (API 26+).
+
+  This file is only half the icon. minSdkVersion is 23, and API 23-25 never look in
+  mipmap-anydpi-v26: they load the rasterised mipmap-{m,h,xh,xxh,xxxh}dpi/ic_launcher.png
+  buckets instead. Deleting those PNGs leaves Android 6 and 7 with no launcher icon at all,
+  and neither test device can show it - both are API 26+, so both only ever load this file.
+
+  <monochrome> is the Android 13+ themed icon, and it reuses the foreground layer rather
+  than duplicating its path data: a themed icon keeps only the drawable's ALPHA channel and
+  applies the system's own tint, and the foreground is already a flat silhouette on
+  transparent. API 26-32 skip the tag - AdaptiveIconDrawable's inflater ignores children it
+  does not recognise - so this costs those versions nothing.
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+    <monochrome android:drawable="@drawable/ic_launcher_foreground" />
+</adaptive-icon>

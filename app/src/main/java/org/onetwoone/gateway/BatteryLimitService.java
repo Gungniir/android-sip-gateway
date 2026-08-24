@@ -873,7 +873,7 @@ public class BatteryLimitService extends Service {
             return builder
                 .setContentTitle("Battery Charge Limit")
                 .setContentText(text)
-                .setSmallIcon(android.R.drawable.ic_lock_idle_low_battery)
+                .setSmallIcon(R.drawable.ic_notification_battery)
                 .setContentIntent(pendingIntent)
                 .setOngoing(true)
                 .build();
@@ -889,7 +889,7 @@ public class BatteryLimitService extends Service {
             return builder
                 .setContentTitle("Battery Limit")
                 .setContentText("Running...")
-                .setSmallIcon(android.R.drawable.ic_lock_idle_low_battery)
+                .setSmallIcon(R.drawable.ic_notification_battery)
                 .build();
         }
     }

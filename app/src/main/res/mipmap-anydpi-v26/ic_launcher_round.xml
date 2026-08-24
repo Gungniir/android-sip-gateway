@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GW-44 - adaptive launcher icon for android:roundIcon (API 26+).
+
+  Identical layers to ic_launcher.xml on purpose: an adaptive icon is masked by the launcher,
+  so the round variant needs no separate artwork. The two entries exist because some OEM
+  launchers read android:roundIcon and would otherwise fall back to the legacy PNG.
+
+  The round legacy rasters (mipmap-*dpi/ic_launcher_round.png) are NOT redundant in the same
+  way - those are pre-masked circles for API 23-25, which do no masking of their own.
+
+  <monochrome> has to be here too, not just in ic_launcher.xml: a launcher that prefers
+  android:roundIcon reads this file, and would find no themed icon. See ic_launcher.xml for
+  why it reuses the foreground layer.
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+    <monochrome android:drawable="@drawable/ic_launcher_foreground" />
+</adaptive-icon>

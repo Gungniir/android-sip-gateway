@@ -2415,7 +2415,7 @@ public class PjsipSipService extends Service implements SipCallService {
         return builder
             .setContentTitle("GSM-SIP Gateway")
             .setContentText(text)
-            .setSmallIcon(android.R.drawable.ic_menu_call)
+            .setSmallIcon(R.drawable.ic_notification_gateway)
             .setContentIntent(pi)
             .setOngoing(true)
             .build();
