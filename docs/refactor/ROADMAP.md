@@ -198,9 +198,9 @@ the only test*.
 
 | Wave | Issues | Tests | APK |
 |---|---|---|---|
-| `phase-4-wave-1` | GW-40, GW-45 | 361 → 385 | `wave-1-475496a.apk` |
-| `phase-4-wave-2` | GW-41, GW-44 | 385 → 410 | `wave-2-a3dd203.apk` |
-| `phase-4-wave-3` | GW-42 | 410 → **468** | `wave-3-0f8d7ed.apk` |
+| `phase-4-wave-1` | GW-40, GW-45 | 361 → 385 | `wave-1-ebf8eee.apk` |
+| `phase-4-wave-2` | GW-41, GW-44 | 385 → 410 | `wave-2-91a8573.apk` |
+| `phase-4-wave-3` | GW-42 | 410 → **468** | `wave-3-597c252.apk` |
 
 Findings raised *during* Phase 4, none of them fixed: **H17** (the SMS send outcome has no
 single thread — `SmsHandler:1127` is on the control thread while `:1210`/`:1224`/`:1229` are on
