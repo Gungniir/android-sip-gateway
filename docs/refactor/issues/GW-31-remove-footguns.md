@@ -33,6 +33,16 @@ of which would break something specific:
 Also worth checking while here: `GsmAudioPort.stop()` (`:373-375`) is a one-line alias for
 `stopCapture()` — confirm whether anything calls it and collapse if not.
 
+5. **`DeviceMuteManager.setSoundCard`** — added by GW-24's sweep (Phase 2 plan §2.5). No
+   callers, and its persistence was a fiction: it wrote `"sound_card"` into
+   `device_mute_prefs`, a key nothing has ever read. The card actually used comes from
+   `gsm_audio_config`'s `"card"` via `GatewayConfig.getAudioCard()`, re-read per mute by
+   `refreshFromConfig()`. GW-24 removed the dead write (it could not stay: nothing outside
+   `config/` may name a preference key any more) and left the method, which is now a plain
+   field setter with no callers. Delete it, and check for a stale `sound_card` entry in
+   `device_mute_prefs` on the test devices while you are there — GW-24 does not remove it,
+   because it is not a value anything has ever consumed.
+
 ## Required change
 
 Delete 1, 3 and 4 outright.
@@ -61,6 +71,7 @@ resurrected.
       `shutdownSip` is resolved either way.
 - [ ] The persistent-root-shell API is gone.
 - [ ] The superseded Qualcomm mixer helpers in `GsmAudioNative` are gone.
+- [ ] `DeviceMuteManager.setSoundCard` is gone.
 - [ ] `CLAUDE.md` records where the Qualcomm routing lives.
 - [ ] `./gradlew assembleDebug` and `./gradlew test` green; `./gradlew lintDebug`
       introduces no new issues.

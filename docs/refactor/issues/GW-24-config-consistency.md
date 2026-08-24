@@ -70,11 +70,34 @@ key drift happened. `WebConfigServer` also hardcodes different defaults than
 
 ## Acceptance criteria
 
-- [ ] One key, one type for the mute-control list; legacy values migrated on first run.
-- [ ] No component outside `config/` calls `getSharedPreferences` for gateway config.
-- [ ] Each config-save request performs exactly one `apply()` per prefs file.
-- [ ] Defaults are defined once, in `GatewayConfig`.
-- [ ] Migration is safe against a device that already has both keys with mismatched types.
+- [x] One key, one type for the mute-control list; legacy values migrated on first run.
+      Canonical: `mic_mute_decs`, comma-separated `String`. Migration in `GatewayConfig.init`,
+      before the instance is published.
+- [x] No component outside `config/` calls `getSharedPreferences` for gateway config.
+      `WebConfigServer`, `GatewayControlReceiver`, `DeviceMuteManager`, `BootReceiver` and
+      `BatteryLimitService` all route through `GatewayConfig` / `GatewayConfig.from(context)`.
+      (`PjsipSipService`'s `gateway_lifecycle` prefs are GW-26's service-lifecycle latch, not
+      gateway config, and are left alone.)
+- [x] Each config-save request performs exactly one `apply()` per prefs file —
+      `GatewayConfig.Editor`.
+- [x] Defaults are defined once, in `GatewayConfig`.
+- [x] Migration is safe against a device that already has both keys with mismatched types:
+      read via `getAll()` + type check, canonical wins, commit-then-read-back before the
+      legacy key is removed. `MicMuteControlMigrationTest`.
+- [x] **H4b:** `QualcommAudioProfile` re-reads route / devices / mute list per
+      `setupMixer`; teardown and enforce use the session that set up. The sound card and the
+      SoC profile still need a restart, and the toast says so.
+
+**Migration placement, decided:** `GatewayConfig.init` moved to `GatewayApplication.onCreate`
+**and** every raw-prefs reader routed through `GatewayConfig`. Either alone would have been
+enough on paper; both together mean the ordering does not depend on which component starts
+the process. `GatewayConfig.from(context)` exists for the entry points that can be first
+(receivers, a directly-started service, JVM tests with no `Application`) and cannot bypass
+`init`.
+
+**Still needs hardware** — see AUDIT H4's warning box. This change is what arms
+`QualcommAudioProfile`'s mute loop (B1e); its first real execution is the next GSM call on a
+device with the custom preset selected.
 
 ## Verification
 
