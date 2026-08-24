@@ -14,25 +14,45 @@ import org.onetwoone.gateway.GatewayCall;
 import org.onetwoone.gateway.GatewayAccount;
 import org.onetwoone.gateway.GatewayInCallService;
 import org.onetwoone.gateway.config.GatewayConfig;
+import org.onetwoone.gateway.core.ControlThread;
+import org.onetwoone.gateway.core.GatewayControlThread;
 import org.pjsip.pjsua2.*;
 
+import java.util.Collections;
+import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Manages call coordination between SIP and GSM.
+ * The gateway's call state machine: one thread, one explicit transition table.
  *
- * Call flows:
- * 1. SIP → GSM: Incoming SIP call triggers GSM outgoing call
- * 2. GSM → SIP: Incoming GSM call triggers SIP outgoing call
+ * <h3>Call flows</h3>
+ * <ol>
+ *   <li><b>SIP → GSM</b> - an INVITE from the PBX is answered and a GSM call is dialled:
+ *       {@code IDLE → SIP_INCOMING → SIP_ANSWERED → GSM_DIALING → BRIDGED}.
+ *   <li><b>GSM → SIP</b> - an inbound GSM call provokes an outgoing INVITE:
+ *       {@code IDLE → GSM_INCOMING → SIP_DIALING → BRIDGED}.
+ * </ol>
+ * The two directions used to share {@code SIP_INCOMING}, which is why the UI reported an
+ * inbound GSM call as "Incoming SIP call". GW-11 split them (AUDIT D1).
  *
- * This class handles:
- * - Call state management
- * - GSM call placement via TelecomManager
- * - SIP call creation and answering
- * - Call termination coordination
+ * <h3>Threading</h3>
+ * Every public method runs on the {@link GatewayControlThread} and says so with
+ * {@link GatewayControlThread#assertOnControlThread(String)}. Off-thread readers go through
+ * the immutable {@link org.onetwoone.gateway.core.GatewayStatus} snapshot instead. The one
+ * deliberate exception is {@link #setListener}, which is construction-time wiring - see its
+ * javadoc.
+ *
+ * <p>Because the thread is single, nothing in here is synchronised: the {@code synchronized}
+ * that used to sit on {@link #hangupSipCall()} protected nothing (its actual caller,
+ * {@link #terminateAllCalls()}, never took the monitor) while holding it across a pjsua2 BYE,
+ * a Telecom {@code disconnectCall()} and a ~250 ms native drain. See plan §3c.
  */
+@ControlThread
 public class CallManager {
     private static final String TAG = "CallMgr";
 
@@ -48,32 +68,69 @@ public class CallManager {
     private final Context context;
     private final GatewayConfig config;
     private final GsmDtmfSender dtmfSender;
+    private final GatewayControlThread control;
 
-    // Current calls.
-    //
-    // Since GW-10 every writer is the control thread: PjsipSipService routes the pjsua
-    // callbacks, the Telecom/phone-state hops, the watchdog tick and the public commands
-    // through it. Readers are still cross-thread - getStatusString() feeds the status
-    // snapshot from the control thread, but NanoHTTPD and the test suite reach the getters
-    // directly - so volatile stays (rule 7: this diff does not remove synchronisation the
-    // control thread makes redundant). GW-11 formalises the transitions and is where the
-    // remaining read-modify-write correctness comes from (AUDIT D1).
+    // Current calls. Confined to the control thread: every writer and every reader asserts
+    // it. `volatile` is kept deliberately - assertOnControlThread throws only in debug
+    // builds, and in release it merely logs, so a stray off-thread read must at least be a
+    // well-defined one rather than a torn 64-bit long or an indefinitely stale reference.
+    @ControlThread
     private volatile GatewayCall currentSipCall;
+    @ControlThread
     private volatile String pendingGsmDestination;
+    @ControlThread
     private volatile int pendingGsmSimSlot = 1;
+    @ControlThread
     private volatile long gsmCallPlacedTime = 0;
 
-    // Call state
+    /**
+     * The state machine's alphabet. The legal edges between these are
+     * {@link #LEGAL_TRANSITIONS}; nothing may assign {@link #state} except
+     * {@link #transition}.
+     */
     public enum CallState {
         IDLE,
-        SIP_INCOMING,      // SIP call received, waiting to answer
-        SIP_ANSWERED,      // SIP answered, placing GSM call
-        GSM_DIALING,       // GSM call is dialing
-        BRIDGED,           // Both calls connected, audio bridged
-        TERMINATING        // Calls being terminated
+        /** SIP→GSM: an INVITE arrived from the PBX and has not been answered yet. */
+        SIP_INCOMING,
+        /** SIP→GSM: the SIP leg is answered, the GSM dial is pending. */
+        SIP_ANSWERED,
+        /** SIP→GSM: the GSM leg is dialling. */
+        GSM_DIALING,
+        /** GSM→SIP: a GSM call is ringing and the SIP dial is pending. */
+        GSM_INCOMING,
+        /** GSM→SIP: the outgoing INVITE has gone to the PBX. */
+        SIP_DIALING,
+        /** Both legs are connected and the audio bridge is up. */
+        BRIDGED,
+        /** Both legs are being torn down. */
+        TERMINATING
     }
 
-    /** See {@link #currentSipCall} for the writer/reader threads. */
+    /**
+     * The transition table (GW-11 §2). Every edge the state machine may take, and no others.
+     *
+     * <p>{@code IDLE} is deliberately <em>not</em> a source for {@code TERMINATING}: there is
+     * nothing to terminate, and {@link #terminateAllCalls()} returns before it gets that far.
+     * That early return is what makes termination idempotent, so a second
+     * {@code terminateAllCalls()} cannot fire {@code onCallsTerminated()} a second time.
+     */
+    private static final Map<CallState, Set<CallState>> LEGAL_TRANSITIONS = legalTransitions();
+
+    private static Map<CallState, Set<CallState>> legalTransitions() {
+        Map<CallState, Set<CallState>> t = new EnumMap<>(CallState.class);
+        t.put(CallState.IDLE,         EnumSet.of(CallState.SIP_INCOMING, CallState.GSM_INCOMING));
+        t.put(CallState.SIP_INCOMING, EnumSet.of(CallState.SIP_ANSWERED, CallState.TERMINATING));
+        t.put(CallState.GSM_INCOMING, EnumSet.of(CallState.SIP_DIALING,  CallState.TERMINATING));
+        t.put(CallState.SIP_ANSWERED, EnumSet.of(CallState.GSM_DIALING,  CallState.TERMINATING));
+        t.put(CallState.SIP_DIALING,  EnumSet.of(CallState.BRIDGED,      CallState.TERMINATING));
+        t.put(CallState.GSM_DIALING,  EnumSet.of(CallState.BRIDGED,      CallState.TERMINATING));
+        t.put(CallState.BRIDGED,      EnumSet.of(CallState.TERMINATING));
+        t.put(CallState.TERMINATING,  EnumSet.of(CallState.IDLE));
+        return Collections.unmodifiableMap(t);
+    }
+
+    /** Never assigned outside {@link #transition}. See {@link #currentSipCall} on volatility. */
+    @ControlThread
     private volatile CallState state = CallState.IDLE;
 
     public interface CallListener {
@@ -87,45 +144,116 @@ public class CallManager {
 
     private CallListener listener;
 
-    public CallManager(Context context, GatewayConfig config) {
-        this(context, config, new GsmDtmfSender());
+    public CallManager(Context context, GatewayConfig config, GatewayControlThread control) {
+        this(context, config, control, new GsmDtmfSender());
     }
 
     // Visible for testing.
-    CallManager(Context context, GatewayConfig config, GsmDtmfSender dtmfSender) {
+    CallManager(Context context, GatewayConfig config, GatewayControlThread control,
+                GsmDtmfSender dtmfSender) {
+        if (control == null) {
+            throw new IllegalArgumentException("CallManager needs the control thread to assert on");
+        }
         this.context = context.getApplicationContext();
         this.config = config;
+        this.control = control;
         this.dtmfSender = dtmfSender;
     }
 
+    /**
+     * Wire up the one listener. <b>The only public method here that does not assert the
+     * control thread</b>, and deliberately so: it is called from {@code Service.onCreate} on
+     * main, before the control thread has been given any work, and moving it onto the control
+     * thread would open a window in which a callback fires with no listener attached. It is
+     * construction-time wiring, not a runtime mutator - do not call it again once the service
+     * is running.
+     *
+     * <p>Publication is safe by the same happens-before that publishes the manager itself:
+     * every control-thread task is queued after this call, and {@code Handler.post} is a
+     * happens-before edge.
+     */
     public void setListener(CallListener listener) {
         this.listener = listener;
     }
 
+    // ========== Transitions ==========
+
+    /**
+     * The single writer of {@link #state} (GW-11 §2).
+     *
+     * <p>Rejects, loudly and without throwing, in two cases:
+     * <ul>
+     *   <li>the machine is not in {@code from} - the caller reasoned from a state that has
+     *       since moved;
+     *   <li>{@code from → to} is not in {@link #LEGAL_TRANSITIONS}.
+     * </ul>
+     * A rejection is a bug in the caller or in the table, never a reason to kill a live
+     * gateway, so it is a log line and a no-op. Run the call matrix on a debug build and
+     * treat every {@code ILLEGAL TRANSITION} line as a finding.
+     *
+     * @return true if the state actually moved
+     */
+    @ControlThread
+    private boolean transition(CallState from, CallState to, String reason) {
+        CallState current = state;
+        if (current != from) {
+            Log.e(TAG, "ILLEGAL TRANSITION " + from + " -> " + to + " (" + reason
+                    + "): machine is in " + current + ", not " + from);
+            return false;
+        }
+        Set<CallState> allowed = LEGAL_TRANSITIONS.get(from);
+        if (allowed == null || !allowed.contains(to)) {
+            Log.e(TAG, "ILLEGAL TRANSITION " + from + " -> " + to + " (" + reason
+                    + "): not in the transition table, ignored");
+            return false;
+        }
+
+        state = to;
+        Log.d(TAG, "State " + from + " -> " + to + " (" + reason + ")");
+        notifyStateChanged();
+        return true;
+    }
+
     // ========== State Accessors ==========
 
+    @ControlThread
     public CallState getState() {
+        control.assertOnControlThread("CallManager.getState");
         return state;
     }
 
+    @ControlThread
     public GatewayCall getCurrentSipCall() {
+        control.assertOnControlThread("CallManager.getCurrentSipCall");
         return currentSipCall;
     }
 
+    @ControlThread
     public String getPendingGsmDestination() {
+        control.assertOnControlThread("CallManager.getPendingGsmDestination");
         return pendingGsmDestination;
     }
 
+    @ControlThread
     public int getPendingGsmSimSlot() {
+        control.assertOnControlThread("CallManager.getPendingGsmSimSlot");
         return pendingGsmSimSlot;
     }
 
+    @ControlThread
     public boolean hasActiveCall() {
+        control.assertOnControlThread("CallManager.hasActiveCall");
         return state != CallState.IDLE;
     }
 
+    /**
+     * True while the GSM leg is still inside its post-dial grace period, re-read from the
+     * clock every time (GW-11 §6). The watchdog depends on this staying derived: frozen into
+     * a boolean it would keep an orphaned call invisible for as long as the freeze lived.
+     */
+    @ControlThread
     public boolean isInGracePeriod() {
-        // Snapshot: the watchdog reads this while the control thread clears it.
+        control.assertOnControlThread("CallManager.isInGracePeriod");
         long placedAt = gsmCallPlacedTime;
         if (placedAt == 0) return false;
         return System.currentTimeMillis() - placedAt < GSM_CALL_GRACE_PERIOD_MS;
@@ -139,7 +267,9 @@ public class CallManager {
      * {@link #isInGracePeriod()} into a snapshot that would then answer "yes" for as long as
      * the snapshot lives (plan §2.7, trap 1).
      */
+    @ControlThread
     public long getGsmCallPlacedAtWallMs() {
+        control.assertOnControlThread("CallManager.getGsmCallPlacedAtWallMs");
         return gsmCallPlacedTime;
     }
 
@@ -150,7 +280,9 @@ public class CallManager {
      * rather than {@code getCurrentSipCall() != null}: a disposed leftover is not a call in
      * progress, and treating it as one is what used to block every diagnostic call.
      */
+    @ControlThread
     public boolean hasLiveSipCall() {
+        control.assertOnControlThread("CallManager.hasLiveSipCall");
         GatewayCall call = currentSipCall;
         return call != null && !call.isDisposed();
     }
@@ -197,7 +329,9 @@ public class CallManager {
      *         exception; false if it was refused or failed to start (state is clean either
      *         way)
      */
+    @ControlThread
     public boolean placeOutgoingSipCall(GatewayCall call, SipCallPlacer placer) {
+        control.assertOnControlThread("CallManager.placeOutgoingSipCall");
         if (!setOutgoingSipCall(call)) {
             return false;
         }
@@ -220,10 +354,18 @@ public class CallManager {
      * This must happen <em>before</em> the INVITE goes out - prefer
      * {@link #placeOutgoingSipCall}, which enforces that.
      *
+     * <p>When this is the SIP leg of an inbound GSM call - the only way it is reached in
+     * production - it also moves the machine {@code GSM_INCOMING → SIP_DIALING}. From any
+     * other state the slot is claimed without a transition: registering a call object is not
+     * on its own a state change, and the D2 regression tests register calls from states the
+     * table has no edge out of.
+     *
      * @return true if the call is now the current one; false if a live call already holds the
      *         slot, in which case the new call must not be placed
      */
+    @ControlThread
     public boolean setOutgoingSipCall(GatewayCall call) {
+        control.assertOnControlThread("CallManager.setOutgoingSipCall");
         if (call == null) {
             Log.w(TAG, "Ignoring null outgoing SIP call");
             return false;
@@ -242,6 +384,11 @@ public class CallManager {
 
         currentSipCall = call;
         Log.d(TAG, "Outgoing SIP call registered before dialling");
+
+        if (state == CallState.GSM_INCOMING) {
+            transition(CallState.GSM_INCOMING, CallState.SIP_DIALING,
+                    "INVITE going out for the inbound GSM call");
+        }
         return true;
     }
 
@@ -255,7 +402,9 @@ public class CallManager {
      * deliver inline on the dialling thread (the unit tests model exactly that), and
      * {@code terminateAllCalls()} below clears the field from inside this very method.
      */
+    @ControlThread
     public void onOutgoingCallFailed(GatewayCall call) {
+        control.assertOnControlThread("CallManager.onOutgoingCallFailed");
         if (call == null) {
             return;
         }
@@ -301,7 +450,9 @@ public class CallManager {
      * @param simSlotHint SIM slot the PBX requested via X-GSM-SIM, or 0 to fall back to
      *                    deriving the slot from the caller extension
      */
+    @ControlThread
     public void onIncomingSipCall(GatewayCall call, int simSlotHint) {
+        control.assertOnControlThread("CallManager.onIncomingSipCall");
         if (state != CallState.IDLE) {
             Log.w(TAG, "Already have active call, rejecting incoming");
             rejectCall(call);
@@ -309,7 +460,7 @@ public class CallManager {
         }
 
         currentSipCall = call;
-        state = CallState.SIP_INCOMING;
+        transition(CallState.IDLE, CallState.SIP_INCOMING, "INVITE received from the PBX");
 
         try {
             // Get call info to extract destination
@@ -374,14 +525,14 @@ public class CallManager {
             prm.setStatusCode(pjsip_status_code.PJSIP_SC_OK);
             call.answer(prm);
 
-            state = CallState.SIP_ANSWERED;
-            notifyStateChanged();
+            transition(CallState.SIP_INCOMING, CallState.SIP_ANSWERED, "SIP leg answered");
 
             Log.d(TAG, "SIP call answered");
 
-            // Notify that GSM call is needed. Snapshot: onGsmCallEnded /
-            // terminateAllCalls() null this from another thread, so the checked value must
-            // be the dialled one.
+            // Notify that GSM call is needed. Read once, so the null check and the number
+            // actually dialled cannot disagree: the listener below re-enters this class
+            // (placeGsmCall, and terminateAllCalls if it fails), and terminateAllCalls nulls
+            // this field.
             String destination = pendingGsmDestination;
             if (listener != null && destination != null) {
                 listener.onGsmCallNeeded(destination, pendingGsmSimSlot);
@@ -410,7 +561,9 @@ public class CallManager {
     /**
      * Handle SIP call state change.
      */
+    @ControlThread
     public void onSipCallState(GatewayCall call, int pjsipState) {
+        control.assertOnControlThread("CallManager.onSipCallState");
         Log.d(TAG, "SIP call state: " + pjsipState);
 
         if (pjsipState == pjsip_inv_state.PJSIP_INV_STATE_CONFIRMED) {
@@ -452,7 +605,9 @@ public class CallManager {
      * the GSM call asking the caller to press something). The digit is replayed on the GSM
      * leg out-of-band via Telecom.
      */
+    @ControlThread
     public void onSipDtmf(String digit) {
+        control.assertOnControlThread("CallManager.onSipDtmf");
         if (!config.isDtmfRelayEnabled()) {
             Log.d(TAG, "DTMF relay disabled, ignoring '" + digit + "'");
             return;
@@ -471,7 +626,9 @@ public class CallManager {
     /**
      * Place a GSM call.
      */
+    @ControlThread
     public void placeGsmCall(String number, int simSlot) {
+        control.assertOnControlThread("CallManager.placeGsmCall");
         if (!isValidPhoneNumber(number)) {
             Log.e(TAG, "Invalid phone number: " + number);
             notifyError("Invalid phone number");
@@ -480,9 +637,11 @@ public class CallManager {
 
         Log.d(TAG, "Placing GSM call to " + number + " via SIM" + simSlot);
 
-        state = CallState.GSM_DIALING;
+        // Timestamp first: transition() notifies the listener synchronously, and the status
+        // snapshot that gets published from there must already carry the dial instant or its
+        // derived grace period reads "expired" for the whole first publish.
         gsmCallPlacedTime = System.currentTimeMillis();
-        notifyStateChanged();
+        transition(CallState.SIP_ANSWERED, CallState.GSM_DIALING, "dialling the GSM leg");
 
         try {
             TelecomManager telecomManager = (TelecomManager) context.getSystemService(Context.TELECOM_SERVICE);
@@ -562,19 +721,29 @@ public class CallManager {
      * Handle GSM call connected.
      * This is called by the service when GSM call becomes active.
      */
+    @ControlThread
     public void onGsmCallConnected() {
+        control.assertOnControlThread("CallManager.onGsmCallConnected");
         Log.d(TAG, "GSM call connected");
 
-        if (state == CallState.GSM_DIALING) {
-            state = CallState.BRIDGED;
-            notifyStateChanged();
+        // Both directions end here. SIP→GSM arrives from GSM_DIALING (we dialled out);
+        // GSM→SIP from SIP_DIALING (the inbound GSM call was answered once the PBX picked
+        // up). The second edge is new: before the SIP_INCOMING split there was no state to
+        // recognise it by, so an inbound GSM call never reached BRIDGED and the UI showed
+        // "Incoming SIP call" for the whole conversation.
+        if (state == CallState.GSM_DIALING || state == CallState.SIP_DIALING) {
+            transition(state, CallState.BRIDGED, "both legs up");
+        } else {
+            Log.d(TAG, "GSM connect in state " + state + " - nothing to bridge");
         }
     }
 
     /**
      * Handle GSM call ended.
      */
+    @ControlThread
     public void onGsmCallEnded() {
+        control.assertOnControlThread("CallManager.onGsmCallEnded");
         Log.d(TAG, "GSM call ended");
         pendingGsmDestination = null;
         gsmCallPlacedTime = 0;
@@ -589,7 +758,9 @@ public class CallManager {
     /**
      * Handle incoming GSM call (will create outgoing SIP call).
      */
+    @ControlThread
     public void onIncomingGsmCall(String callerNumber, int simSlot) {
+        control.assertOnControlThread("CallManager.onIncomingGsmCall");
         if (state != CallState.IDLE) {
             Log.w(TAG, "Already have active call, ignoring incoming GSM");
             return;
@@ -604,10 +775,10 @@ public class CallManager {
             return;
         }
 
-        state = CallState.SIP_INCOMING; // Reuse state, but it's outgoing SIP
-        notifyStateChanged();
+        transition(CallState.IDLE, CallState.GSM_INCOMING, "GSM call ringing");
 
-        // Notify that SIP call is needed
+        // Notify that SIP call is needed. setOutgoingSipCall, reached synchronously through
+        // this listener, takes the machine on to SIP_DIALING.
         if (listener != null) {
             listener.onSipCallNeeded(sipDest, callerNumber, simSlot);
         }
@@ -616,15 +787,20 @@ public class CallManager {
     // ========== Termination ==========
 
     /**
-     * Hangup current SIP call.
+     * Hangup the current SIP call.
+     *
+     * <p>Not {@code synchronized} any more (GW-11 §1, plan §3c). The monitor never protected
+     * anything - {@code terminateAllCalls()}, its only real caller, did not take it - while
+     * being held across a pjsua2 BYE and, through the outer monitor on
+     * {@code PjsipSipService.hangupCall}, a Telecom {@code disconnectCall()} and
+     * {@code GsmAudioPort.stopCapture()}: a ~1.75 s join plus a ~250 ms native drain, entered
+     * from main and from pjsua workers alike. Both monitors are gone; the thread invariant
+     * asserted above is what serialises this now.
      */
-    public synchronized void hangupSipCall() {
-        // One snapshot for both the guard and the teardown: the writers (onSipCallState,
-        // onOutgoingCallFailed) do not take this monitor, so re-reading the field after the
-        // null check could hand us a null - or a different call. Since GW-10 all of them run
-        // on the control thread, which makes this monitor redundant; GW-11 §1 deletes it,
-        // together with the outer one in PjsipSipService.hangupCall (plan §3c). Kept here
-        // because GW-10 does not remove synchronisation.
+    @ControlThread
+    public void hangupSipCall() {
+        control.assertOnControlThread("CallManager.hangupSipCall");
+        // One snapshot for both the guard and the teardown.
         GatewayCall callToDispose = currentSipCall;
         if (callToDispose == null) {
             return;
@@ -651,13 +827,34 @@ public class CallManager {
     }
 
     /**
-     * Terminate all calls and reset state.
+     * Terminate both legs and reset the machine - idempotent (GW-11 §3).
+     *
+     * <p>A second call while the first is still running, or one made when there is nothing to
+     * terminate, returns immediately. That is what stops {@code onCallsTerminated()} firing
+     * twice, which used to mean two concurrent {@code stopBridge()} runs. A plain check, no
+     * lock: the single-thread invariant makes check and act indivisible.
+     *
+     * <p>Consequence worth knowing: {@code hangupCall()} from the web UI or the Telecom
+     * timeout no longer runs the bridge teardown when the machine is already {@code IDLE}.
+     * IDLE means no call, so there is nothing for it to tear down; the reload path in
+     * {@code PjsipSipService.doReloadConfig} stops the bridge itself and does not rely on
+     * this.
      */
+    @ControlThread
     public void terminateAllCalls() {
-        Log.d(TAG, "Terminating all calls");
+        control.assertOnControlThread("CallManager.terminateAllCalls");
 
-        state = CallState.TERMINATING;
-        notifyStateChanged();
+        CallState from = state;
+        if (from == CallState.IDLE || from == CallState.TERMINATING) {
+            Log.d(TAG, "Nothing to terminate, already " + from);
+            return;
+        }
+
+        Log.d(TAG, "Terminating all calls");
+        // Cannot be rejected: every state that gets past the guard above has TERMINATING in
+        // its legal set. If it ever is, the log line says so and the machine stays put rather
+        // than half-terminating.
+        transition(from, CallState.TERMINATING, "tearing both legs down");
 
         // Drop any DTMF still queued for the GSM leg
         dtmfSender.clear();
@@ -673,8 +870,7 @@ public class CallManager {
         pendingGsmSimSlot = 1;
         gsmCallPlacedTime = 0;
 
-        state = CallState.IDLE;
-        notifyStateChanged();
+        transition(CallState.TERMINATING, CallState.IDLE, "teardown complete");
 
         if (listener != null) {
             listener.onCallsTerminated();
@@ -760,9 +956,12 @@ public class CallManager {
     }
 
     /**
-     * Get status string for UI.
+     * Status line for the UI. Since the {@code SIP_INCOMING} split it names the direction
+     * honestly: an inbound GSM call used to be reported as "Incoming SIP call".
      */
+    @ControlThread
     public String getStatusString() {
+        control.assertOnControlThread("CallManager.getStatusString");
         switch (state) {
             case IDLE:
                 return "Idle";
@@ -772,6 +971,10 @@ public class CallManager {
                 return "Dialing GSM...";
             case GSM_DIALING:
                 return "GSM connecting...";
+            case GSM_INCOMING:
+                return "Incoming GSM call";
+            case SIP_DIALING:
+                return "Dialing SIP...";
             case BRIDGED:
                 return "Call bridged";
             case TERMINATING:

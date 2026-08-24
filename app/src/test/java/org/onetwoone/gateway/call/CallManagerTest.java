@@ -1,21 +1,28 @@
 package org.onetwoone.gateway.call;
 
 import android.app.Application;
+import android.os.Looper;
 
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.onetwoone.gateway.BuildConfig;
 import org.onetwoone.gateway.config.GatewayConfig;
+import org.onetwoone.gateway.core.GatewayControlThread;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
+import org.robolectric.shadows.ShadowLog;
 
 import org.onetwoone.gateway.GatewayCall;
 import org.pjsip.pjsua2.pjsip_inv_state;
 
 import java.lang.reflect.Method;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.Assert.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -24,14 +31,20 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * Unit tests for CallManager.
- * Tests phone number validation, URI parsing, and state management.
+ * Unit tests for CallManager: phone-number validation, URI parsing, the outgoing-call
+ * registration contract (AUDIT D2), and - since GW-11 - the explicit transition table and the
+ * control-thread invariant.
+ *
+ * <p>The control thread runs on Robolectric's main looper, which is the test thread, so every
+ * {@code assertOnControlThread} in production code is satisfied here. The suite-wide pattern:
+ * see {@code GatewayControlThreadTest}.
  */
 @RunWith(RobolectricTestRunner.class)
 @Config(manifest = Config.NONE, sdk = 28)
 public class CallManagerTest {
 
     private CallManager callManager;
+    private GatewayControlThread control;
     private Application app;
 
     @Before
@@ -48,7 +61,50 @@ public class CallManagerTest {
         }
         GatewayConfig.init(app);
 
-        callManager = new CallManager(app, GatewayConfig.getInstance());
+        control = new GatewayControlThread(Looper.getMainLooper(), null);
+        callManager = new CallManager(app, GatewayConfig.getInstance(), control);
+    }
+
+    /** Records everything the manager tells its listener. */
+    private static class RecordingListener implements CallManager.CallListener {
+        final java.util.List<CallManager.CallState> states = new java.util.ArrayList<>();
+        int terminated;
+        int errors;
+        String sipDestination;
+        String sipCallerId;
+
+        @Override
+        public void onCallStateChanged(CallManager.CallState state) {
+            states.add(state);
+        }
+
+        @Override
+        public void onSipCallConnected(GatewayCall call) {}
+
+        @Override
+        public void onGsmCallNeeded(String destination, int simSlot) {}
+
+        @Override
+        public void onSipCallNeeded(String destination, String callerId, int simSlot) {
+            sipDestination = destination;
+            sipCallerId = callerId;
+        }
+
+        @Override
+        public void onCallsTerminated() {
+            terminated++;
+        }
+
+        @Override
+        public void onError(String error) {
+            errors++;
+        }
+    }
+
+    private RecordingListener listen() {
+        RecordingListener l = new RecordingListener();
+        callManager.setListener(l);
+        return l;
     }
 
     @Test
@@ -141,34 +197,21 @@ public class CallManagerTest {
         assertEquals("Should be IDLE after GSM call ended", CallManager.CallState.IDLE, callManager.getState());
     }
 
+    /**
+     * The listener sees every state change. Driven from BRIDGED rather than IDLE because
+     * since GW-11 §3 terminating from IDLE is a no-op - and that is its own test below.
+     */
     @Test
-    public void testListenerCallback() {
-        final boolean[] callbackCalled = {false};
-
-        callManager.setListener(new CallManager.CallListener() {
-            @Override
-            public void onCallStateChanged(CallManager.CallState state) {
-                callbackCalled[0] = true;
-            }
-
-            @Override
-            public void onSipCallConnected(org.onetwoone.gateway.GatewayCall call) {}
-
-            @Override
-            public void onGsmCallNeeded(String destination, int simSlot) {}
-
-            @Override
-            public void onSipCallNeeded(String destination, String callerId, int simSlot) {}
-
-            @Override
-            public void onCallsTerminated() {}
-
-            @Override
-            public void onError(String error) {}
-        });
+    public void testListenerCallback() throws Exception {
+        RecordingListener listener = listen();
+        forceState(CallManager.CallState.BRIDGED);
 
         callManager.terminateAllCalls();
-        assertTrue("Listener should be called on state change", callbackCalled[0]);
+
+        assertEquals("both edges of the teardown must be reported",
+                java.util.Arrays.asList(CallManager.CallState.TERMINATING,
+                        CallManager.CallState.IDLE),
+                listener.states);
     }
 
     // ========== DTMF relay ==========
@@ -191,7 +234,7 @@ public class CallManagerTest {
 
     private RecordingDtmfSender withDtmfSender(CallManager.CallState state) throws Exception {
         RecordingDtmfSender sender = new RecordingDtmfSender();
-        callManager = new CallManager(app, GatewayConfig.getInstance(), sender);
+        callManager = new CallManager(app, GatewayConfig.getInstance(), control, sender);
 
         java.lang.reflect.Field stateField = CallManager.class.getDeclaredField("state");
         stateField.setAccessible(true);
@@ -274,7 +317,9 @@ public class CallManagerTest {
     @Test
     public void testSynchronousDisconnectDuringMakeCallLeavesNoPhantom() throws Exception {
         GatewayCall call = fakeCall();
-        forceState(CallManager.CallState.SIP_INCOMING);
+        // GSM_INCOMING, not SIP_INCOMING: this is the GSM→SIP direction, which before the
+        // GW-11 split shared the inbound-SIP state.
+        forceState(CallManager.CallState.GSM_INCOMING);
 
         boolean placed = callManager.placeOutgoingSipCall(call, c -> {
             // Exactly what GatewayCall.onCallState does for DISCONNECTED: flag itself
@@ -299,7 +344,7 @@ public class CallManagerTest {
     @Test
     public void testSlotIsReusableAfterASynchronousFailure() throws Exception {
         GatewayCall failed = fakeCall();
-        forceState(CallManager.CallState.SIP_INCOMING);
+        forceState(CallManager.CallState.GSM_INCOMING);
 
         callManager.placeOutgoingSipCall(failed, c -> {
             c.dispose();
@@ -322,7 +367,7 @@ public class CallManagerTest {
     @Test
     public void testThrowingMakeCallLeavesNoPhantom() throws Exception {
         GatewayCall call = fakeCall();
-        forceState(CallManager.CallState.SIP_INCOMING);
+        forceState(CallManager.CallState.GSM_INCOMING);
 
         boolean placed = callManager.placeOutgoingSipCall(call, c -> {
             throw new Exception("transport error");
@@ -466,7 +511,7 @@ public class CallManagerTest {
     @Test
     public void testDeferredDisconnectAfterDialLeavesNoPhantom() throws Exception {
         GatewayCall call = fakeCall();
-        forceState(CallManager.CallState.SIP_INCOMING);
+        forceState(CallManager.CallState.GSM_INCOMING);
 
         // makeCall returns cleanly; the DISCONNECTED it provoked is still queued.
         assertTrue(callManager.placeOutgoingSipCall(call, c -> c.dispose()));
@@ -478,6 +523,381 @@ public class CallManagerTest {
         assertNull("A dead call must not stay registered", callManager.getCurrentSipCall());
         assertEquals(CallManager.CallState.IDLE, callManager.getState());
         assertFalse(callManager.hasLiveSipCall());
+    }
+
+    // ========== The transition table (GW-11 §2) ==========
+
+    /** Drive {@code transition()} the way production does, without going through Telecom. */
+    private boolean transition(CallManager.CallState from, CallManager.CallState to)
+            throws Exception {
+        Method m = CallManager.class.getDeclaredMethod("transition",
+                CallManager.CallState.class, CallManager.CallState.class, String.class);
+        m.setAccessible(true);
+        return (Boolean) m.invoke(callManager, from, to, "unit test");
+    }
+
+    /**
+     * An edge that is not in the table is refused - logged, no-op, <em>not</em> thrown. A
+     * throw here would kill a live gateway over a state-machine bug; the brief is explicit
+     * that it must not.
+     */
+    @Test
+    public void illegalTransitionIsRejectedAndDoesNotMoveTheMachine() throws Exception {
+        RecordingListener listener = listen();
+        forceState(CallManager.CallState.BRIDGED);
+
+        // BRIDGED may only go to TERMINATING.
+        assertFalse("BRIDGED to SIP_ANSWERED is not in the table",
+                transition(CallManager.CallState.BRIDGED, CallManager.CallState.SIP_ANSWERED));
+
+        assertEquals("the machine must not have moved",
+                CallManager.CallState.BRIDGED, callManager.getState());
+        assertTrue("a rejected transition must not be announced as one",
+                listener.states.isEmpty());
+    }
+
+    /** IDLE is deliberately not a source for TERMINATING - there is nothing to terminate. */
+    @Test
+    public void idleMayNotTransitionStraightToTerminating() throws Exception {
+        assertFalse(transition(CallManager.CallState.IDLE, CallManager.CallState.TERMINATING));
+        assertEquals(CallManager.CallState.IDLE, callManager.getState());
+    }
+
+    /** A caller reasoning from a state the machine has already left must be refused too. */
+    @Test
+    public void transitionIsRejectedWhenTheMachineHasAlreadyMovedOn() throws Exception {
+        forceState(CallManager.CallState.BRIDGED);
+
+        // IDLE to SIP_INCOMING is a legal edge, but we are not in IDLE.
+        assertFalse(transition(CallManager.CallState.IDLE, CallManager.CallState.SIP_INCOMING));
+        assertEquals(CallManager.CallState.BRIDGED, callManager.getState());
+    }
+
+    /** ...and a legal edge from the state we really are in does move it, exactly once. */
+    @Test
+    public void legalTransitionMovesTheMachineAndTellsTheListener() throws Exception {
+        RecordingListener listener = listen();
+        forceState(CallManager.CallState.GSM_INCOMING);
+
+        assertTrue(transition(CallManager.CallState.GSM_INCOMING,
+                CallManager.CallState.SIP_DIALING));
+
+        assertEquals(CallManager.CallState.SIP_DIALING, callManager.getState());
+        assertEquals(java.util.Collections.singletonList(CallManager.CallState.SIP_DIALING),
+                listener.states);
+    }
+
+    /**
+     * The whole legal table, edge by edge, driven through the same method production uses.
+     * If someone widens {@link CallManager.CallState} without widening the table, or the
+     * other way round, this is what notices.
+     */
+    @Test
+    public void everyDeclaredEdgeIsWalkableAndNothingElseIs() throws Exception {
+        java.util.Map<CallManager.CallState, java.util.Set<CallManager.CallState>> legal =
+                new java.util.EnumMap<>(CallManager.CallState.class);
+        legal.put(CallManager.CallState.IDLE, java.util.EnumSet.of(
+                CallManager.CallState.SIP_INCOMING, CallManager.CallState.GSM_INCOMING));
+        legal.put(CallManager.CallState.SIP_INCOMING, java.util.EnumSet.of(
+                CallManager.CallState.SIP_ANSWERED, CallManager.CallState.TERMINATING));
+        legal.put(CallManager.CallState.GSM_INCOMING, java.util.EnumSet.of(
+                CallManager.CallState.SIP_DIALING, CallManager.CallState.TERMINATING));
+        legal.put(CallManager.CallState.SIP_ANSWERED, java.util.EnumSet.of(
+                CallManager.CallState.GSM_DIALING, CallManager.CallState.TERMINATING));
+        legal.put(CallManager.CallState.SIP_DIALING, java.util.EnumSet.of(
+                CallManager.CallState.BRIDGED, CallManager.CallState.TERMINATING));
+        legal.put(CallManager.CallState.GSM_DIALING, java.util.EnumSet.of(
+                CallManager.CallState.BRIDGED, CallManager.CallState.TERMINATING));
+        legal.put(CallManager.CallState.BRIDGED, java.util.EnumSet.of(
+                CallManager.CallState.TERMINATING));
+        legal.put(CallManager.CallState.TERMINATING, java.util.EnumSet.of(
+                CallManager.CallState.IDLE));
+
+        for (CallManager.CallState from : CallManager.CallState.values()) {
+            for (CallManager.CallState to : CallManager.CallState.values()) {
+                forceState(from);
+                boolean expected = legal.get(from).contains(to);
+                assertEquals(from + " to " + to, expected, transition(from, to));
+                assertEquals("state after " + from + " to " + to,
+                        expected ? to : from, callManager.getState());
+            }
+        }
+    }
+
+    // ========== Idempotent termination (GW-11 §3) ==========
+
+    /**
+     * Two terminations must produce one {@code onCallsTerminated()}. Before GW-11 each one
+     * set TERMINATING, hung up, fired the callback and reset to IDLE - so the service ran
+     * {@code stopBridge()} twice for a single call.
+     */
+    @Test
+    public void doubleTerminationFiresOnCallsTerminatedExactlyOnce() throws Exception {
+        RecordingListener listener = listen();
+        forceState(CallManager.CallState.BRIDGED);
+
+        callManager.terminateAllCalls();
+        callManager.terminateAllCalls();
+
+        assertEquals("the second termination must find nothing to do", 1, listener.terminated);
+        assertEquals(CallManager.CallState.IDLE, callManager.getState());
+    }
+
+    /**
+     * Re-entrant termination: {@code onCallsTerminated()} runs the audio teardown, and if
+     * that path ever calls back in - the watchdog, a queued disconnect - the second entry
+     * must find TERMINATING/IDLE and stop. Modelled by terminating from inside the callback.
+     */
+    @Test
+    public void reentrantTerminationFromTheCallbackDoesNotRecurse() throws Exception {
+        AtomicInteger reentries = new AtomicInteger();
+        callManager.setListener(new RecordingListener() {
+            @Override
+            public void onCallsTerminated() {
+                if (reentries.incrementAndGet() < 5) {
+                    callManager.terminateAllCalls();
+                }
+            }
+        });
+        forceState(CallManager.CallState.BRIDGED);
+
+        callManager.terminateAllCalls();
+
+        assertEquals("the re-entrant call must find IDLE and return", 1, reentries.get());
+    }
+
+    /** Terminating with nothing up must not announce a teardown that never happened. */
+    @Test
+    public void terminatingFromIdleIsASilentNoOp() {
+        RecordingListener listener = listen();
+
+        callManager.terminateAllCalls();
+
+        assertEquals(0, listener.terminated);
+        assertTrue(listener.states.isEmpty());
+        assertEquals(CallManager.CallState.IDLE, callManager.getState());
+    }
+
+    // ========== The SIP_INCOMING split (GW-11 §2) ==========
+
+    /**
+     * An inbound GSM call used to be reported to the UI as "Incoming SIP call", because it
+     * reused {@code SIP_INCOMING} with a comment apologising for it. It now has its own state.
+     */
+    @Test
+    public void inboundGsmCallIsNoLongerReportedAsAnIncomingSipCall() {
+        GatewayConfig.getInstance().setSim1Destination("2001");
+        RecordingListener listener = listen();
+
+        callManager.onIncomingGsmCall("+79161234567", 1);
+
+        assertEquals(CallManager.CallState.GSM_INCOMING, callManager.getState());
+        assertEquals("Incoming GSM call", callManager.getStatusString());
+        assertEquals("2001", listener.sipDestination);
+        assertEquals("+79161234567", listener.sipCallerId);
+    }
+
+    /** ...and dialling its SIP leg moves it on, so the UI stops saying "ringing" mid-call. */
+    @Test
+    public void dialingTheSipLegOfAnInboundGsmCallReachesSipDialingThenBridged() {
+        GatewayConfig.getInstance().setSim1Destination("2001");
+        callManager.onIncomingGsmCall("+79161234567", 1);
+
+        assertTrue(callManager.placeOutgoingSipCall(fakeCall(), c -> { }));
+        assertEquals(CallManager.CallState.SIP_DIALING, callManager.getState());
+        assertEquals("Dialing SIP...", callManager.getStatusString());
+
+        // The GSM leg is answered once the PBX picks up.
+        callManager.onGsmCallConnected();
+        assertEquals(CallManager.CallState.BRIDGED, callManager.getState());
+        assertEquals("Call bridged", callManager.getStatusString());
+    }
+
+    /** The SIP to GSM direction keeps its own states and its own status strings. */
+    @Test
+    public void sipToGsmDirectionKeepsItsOwnStates() throws Exception {
+        forceState(CallManager.CallState.SIP_ANSWERED);
+        assertEquals("Dialing GSM...", callManager.getStatusString());
+
+        forceState(CallManager.CallState.GSM_DIALING);
+        assertEquals("GSM connecting...", callManager.getStatusString());
+
+        callManager.onGsmCallConnected();
+        assertEquals(CallManager.CallState.BRIDGED, callManager.getState());
+    }
+
+    // ========== No realistic flow may trip the table (GW-11 Risk) ==========
+
+    /** Every {@code ILLEGAL TRANSITION} the manager logged since the last clear. */
+    private static java.util.List<String> illegalTransitionsLogged() {
+        java.util.List<String> found = new java.util.ArrayList<>();
+        for (ShadowLog.LogItem item : ShadowLog.getLogs()) {
+            if ("CallMgr".equals(item.tag) && item.msg != null
+                    && item.msg.contains("ILLEGAL TRANSITION")) {
+                found.add(item.msg);
+            }
+        }
+        return found;
+    }
+
+    /**
+     * The brief's headline risk: "the transition table will reject transitions the code
+     * currently performs". This walks every call flow that can be driven on the JVM - both
+     * directions, both teardown sides, and the failure branches - and fails on the first
+     * rejection, naming it.
+     *
+     * <p>What it cannot reach is the SIP→GSM answer path, which runs {@code new CallOpParam()}
+     * straight into libpjsua2; that edge ({@code SIP_INCOMING → SIP_ANSWERED}) is covered by
+     * {@link #everyDeclaredEdgeIsWalkableAndNothingElseIs()} and on-device verification.
+     */
+    @Test
+    public void noRealisticCallFlowTripsTheTransitionTable() throws Exception {
+        GatewayConfig.getInstance().setSim1Destination("2001");
+        ShadowLog.clear();
+
+        // 1. GSM→SIP, answered, then hung up from the GSM side.
+        callManager.onIncomingGsmCall("+79161234567", 1);
+        assertTrue(callManager.placeOutgoingSipCall(fakeCall(), c -> { }));
+        callManager.onGsmCallConnected();
+        callManager.onSipDtmf("1");
+        callManager.onGsmCallEnded();
+        assertEquals("GSM-side hangup returns to IDLE",
+                CallManager.CallState.IDLE, callManager.getState());
+
+        // 2. GSM→SIP where the PBX refuses the INVITE inline.
+        callManager.onIncomingGsmCall("+79161234567", 1);
+        callManager.placeOutgoingSipCall(fakeCall(), c -> {
+            c.dispose();
+            callManager.onSipCallState(c, pjsip_inv_state.PJSIP_INV_STATE_DISCONNECTED);
+        });
+        assertEquals(CallManager.CallState.IDLE, callManager.getState());
+
+        // 3. GSM→SIP where the GSM caller gives up while the INVITE is still out.
+        callManager.onIncomingGsmCall("+79161234567", 1);
+        callManager.placeOutgoingSipCall(fakeCall(), c -> { });
+        callManager.onGsmCallEnded();
+        assertEquals(CallManager.CallState.IDLE, callManager.getState());
+
+        // 4. GSM→SIP torn down from the SIP side once bridged.
+        callManager.onIncomingGsmCall("+79161234567", 1);
+        GatewayCall bridged = fakeCall();
+        callManager.placeOutgoingSipCall(bridged, c -> { });
+        callManager.onGsmCallConnected();
+        bridged.dispose();
+        callManager.onSipCallState(bridged, pjsip_inv_state.PJSIP_INV_STATE_DISCONNECTED);
+        assertEquals(CallManager.CallState.IDLE, callManager.getState());
+
+        // 5. SIP→GSM from the point the SIP leg is answered. placeGsmCall reaches Telecom,
+        //    which under Robolectric may refuse - either outcome is a legal path, and this
+        //    asserts only that neither is an illegal transition.
+        forceState(CallManager.CallState.SIP_ANSWERED);
+        callManager.placeGsmCall("+79161234567", 1);
+        callManager.onGsmCallConnected();
+        callManager.onGsmCallEnded();
+        assertEquals(CallManager.CallState.IDLE, callManager.getState());
+
+        // 6. An INVITE arriving while a call is already up is rejected, not transitioned.
+        forceState(CallManager.CallState.BRIDGED);
+        callManager.onIncomingGsmCall("+79161234567", 1);
+        assertEquals("a second inbound GSM call must not move the machine",
+                CallManager.CallState.BRIDGED, callManager.getState());
+
+        // 7. The teardown commands: hangupCall / doReloadConfig call this unguarded, and the
+        //    watchdog calls it on an orphan. Twice, then again with nothing up.
+        callManager.terminateAllCalls();
+        callManager.terminateAllCalls();
+        assertEquals(CallManager.CallState.IDLE, callManager.getState());
+
+        assertEquals("no realistic flow may be rejected by the table",
+                java.util.Collections.emptyList(), illegalTransitionsLogged());
+    }
+
+    /** ...and the check above is only worth anything if it can actually see a rejection. */
+    @Test
+    public void theIllegalTransitionLogIsWhatTheFlowCheckReads() throws Exception {
+        forceState(CallManager.CallState.BRIDGED);
+        ShadowLog.clear();
+
+        assertFalse(transition(CallManager.CallState.BRIDGED, CallManager.CallState.IDLE));
+
+        java.util.List<String> logged = illegalTransitionsLogged();
+        assertEquals(1, logged.size());
+        assertTrue("the log must name from, to and the reason",
+                logged.get(0).contains("BRIDGED") && logged.get(0).contains("IDLE")
+                        && logged.get(0).contains("unit test"));
+    }
+
+    // ========== The control-thread invariant (GW-11 §1) ==========
+
+    /**
+     * A reader on the wrong thread must be caught. This is the assertion that keeps the
+     * threading model from eroding, and the one that would have fired once a second had the
+     * 1 Hz UI poll not already been routed through the {@code GatewayStatus} snapshot.
+     */
+    @Test
+    public void readingStateFromAnotherThreadTripsTheAssertion() throws Exception {
+        AtomicReference<Throwable> thrown = new AtomicReference<>();
+        CountDownLatch done = new CountDownLatch(1);
+
+        new Thread(() -> {
+            try {
+                callManager.getStatusString();
+            } catch (Throwable t) {
+                thrown.set(t);
+            } finally {
+                done.countDown();
+            }
+        }, "not-control").start();
+
+        assertTrue(done.await(10, TimeUnit.SECONDS));
+
+        if (BuildConfig.DEBUG) {
+            assertNotNull("debug builds must fail loudly", thrown.get());
+            assertTrue(thrown.get() instanceof IllegalStateException);
+            assertTrue("the message must name the offending thread",
+                    thrown.get().getMessage().contains("not-control"));
+        } else {
+            assertNull("release builds must not kill a live gateway over this", thrown.get());
+        }
+    }
+
+    /** A mutator on the wrong thread, same rule. */
+    @Test
+    public void terminatingFromAnotherThreadTripsTheAssertion() throws Exception {
+        AtomicReference<Throwable> thrown = new AtomicReference<>();
+        CountDownLatch done = new CountDownLatch(1);
+        forceState(CallManager.CallState.BRIDGED);
+
+        new Thread(() -> {
+            try {
+                callManager.terminateAllCalls();
+            } catch (Throwable t) {
+                thrown.set(t);
+            } finally {
+                done.countDown();
+            }
+        }, "not-control").start();
+
+        assertTrue(done.await(10, TimeUnit.SECONDS));
+
+        if (BuildConfig.DEBUG) {
+            assertNotNull("debug builds must fail loudly", thrown.get());
+            assertEquals("...and must not have torn anything down",
+                    CallManager.CallState.BRIDGED, callManager.getState());
+        } else {
+            assertNull(thrown.get());
+        }
+    }
+
+    /** The manager cannot exist without knowing which thread owns it. */
+    @Test
+    public void constructorRefusesAMissingControlThread() {
+        try {
+            new CallManager(app, GatewayConfig.getInstance(), null);
+            fail("a CallManager with nothing to assert on is not a CallManager");
+        } catch (IllegalArgumentException expected) {
+            // as specified
+        }
     }
 
     /** The raw timestamp the status snapshot carries instead of a frozen boolean. */
