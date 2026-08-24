@@ -186,6 +186,28 @@ implemented as written.
 
 ### Phase 4 — UI: from debug harness to appliance console
 
+### ✅ CODE COMPLETE, ⏳ UNVERIFIED ON DEVICE
+
+All five wave issues implemented and merged onto `refactor/phase-4-ui`, in three tagged waves
+(`phase-4-wave-1/2/3`), based on Phase 2's tip `b3b2c0e`.
+**468 tests, 0 failures/errors/skipped, both variants; `lintDebug` green with the baseline
+never regenerated; `assembleDebug` green including the native CMake build.**
+**Nothing has run on a phone**, and unlike Phases 0–2 there is no automated layer beneath the
+view code at all — see [PHASE-4-VALIDATION.md](PHASE-4-VALIDATION.md), where *that document is
+the only test*.
+
+| Wave | Issues | Tests | APK |
+|---|---|---|---|
+| `phase-4-wave-1` | GW-40, GW-45 | 361 → 385 | `wave-1-475496a.apk` |
+| `phase-4-wave-2` | GW-41, GW-44 | 385 → 410 | `wave-2-a3dd203.apk` |
+| `phase-4-wave-3` | GW-42 | 410 → **468** | `wave-3-0f8d7ed.apk` |
+
+Findings raised *during* Phase 4, none of them fixed: **H17** (the SMS send outcome has no
+single thread — `SmsHandler:1127` is on the control thread while `:1210`/`:1224`/`:1229` are on
+main), **H18** (SoC auto-detection is locale-sensitive; a Turkish or Azerbaijani device loads
+the Qualcomm profile on a MediaTek phone). GW-46 is filed and deferred; GW-43 is specified and
+gated.
+
 **Execution plan: [PHASE-4-PLAN.md](PHASE-4-PLAN.md)** — it overrides
 [PHASE-4-UI-PLAN.md](PHASE-4-UI-PLAN.md) below wherever they disagree. That plan was measured
 at `c0255dd`, before Phase 2 landed; its diagnosis holds but nine of its facts do not, and one
