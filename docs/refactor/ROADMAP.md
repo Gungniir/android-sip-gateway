@@ -125,7 +125,7 @@ implemented as written.
 | [GW-21](issues/GW-21-sms-off-main.md) | ✅ G1, H12 — SMS pipeline off the main thread, one owner for the suppression state |
 | [GW-22](issues/GW-22-pjsip-object-lifetime.md) | H7 — deletion policy for pjsua2 objects |
 | [GW-23a](issues/GW-23-rt-audio-path.md) | H2, H3 — bulk JNI copy, no per-frame allocation |
-| GW-23b | **E5 (P0)** — dedicated I/O thread + ring buffer. **Gated**, see PHASE-2-PLAN §2.4 |
+| [GW-23b](issues/GW-23b-e5-io-thread.md) | **E5 (P0)** — dedicated I/O thread + ring buffer. **Gated on G1/G2**, see that issue §3 |
 | [GW-24](issues/GW-24-config-consistency.md) | H4 — key mismatch, atomic prefs writes |
 | [GW-25](issues/GW-25-watchdog-invariants.md) | H9 — both orphan directions + fail-safe deadlines |
 | [GW-26](issues/GW-26-service-lifecycle.md) | ✅ G2, H8, H8c, H11, F6c, H15 — cancellable shutdown, guarded teardown, deliberate restart |
