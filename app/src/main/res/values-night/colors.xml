@@ -9,10 +9,33 @@
   drawn by the launcher, not by this app's theme, so it has no night configuration to
   follow - GW-44 wave 2 depends on those two staying single-valued.
 
-  Reachability, stated plainly: this configuration only engages where the platform has a
-  system dark-theme setting, i.e. API 29+. minSdkVersion is 23, and on Android 6-9 the app
-  renders the day palette unconditionally. That is a consequence of the night-mode decision
-  recorded in the commit that introduced this file, not an oversight.
+  =======================================================================================
+  HOW NIGHT MODE IS SELECTED, AND WHY (GW-40 decision)
+
+  The app does NOT call AppCompatDelegate.setDefaultNightMode(). The DayNight parent on
+  Theme.Gateway resolves from the framework configuration and nothing else. Three reasons,
+  in order of weight:
+
+  1. Forcing MODE_NIGHT_YES would make the day palette unreachable, and PHASE-4-PLAN
+     section 7 requires on-device validation "in both themes". A theme you cannot get to is
+     a theme you cannot validate.
+
+  2. An explicit MODE_NIGHT_FOLLOW_SYSTEM call would be ceremony. AppCompat's default is
+     MODE_NIGHT_UNSPECIFIED, which already resolves DayNight from the configuration;
+     AppCompat only consults UiModeManager for FOLLOW_SYSTEM when the device is in car
+     mode, so on every API level this app runs on the call is a no-op. GatewayApplication.
+     onCreate is where the GatewayConfig preference migration runs (AUDIT H4) and its
+     ordering is load-bearing - it is not a place to add a line that does nothing.
+
+  3. A per-app theme override is a user-visible preference. That means a GatewayConfig key
+     and a control to set it, which is GW-41/GW-42 territory, not the design-system
+     foundation's.
+
+  The consequence, stated plainly rather than left to be discovered: there is no
+  system-wide dark theme before API 29. minSdkVersion is 23, so on Android 6-9 this file
+  never applies and the app always renders the day palette. That is accepted, not an
+  oversight - and it is why the DAY palette is the one that had to be got right first.
+  =======================================================================================
 -->
 <resources xmlns:tools="http://schemas.android.com/tools"
            tools:ignore="UnusedResources">
