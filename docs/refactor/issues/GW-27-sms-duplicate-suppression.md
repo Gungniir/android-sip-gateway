@@ -91,8 +91,25 @@ current bug) versus *over*-suppression (a genuine SMS silently dropped). Persist
 successful forward keeps the failure direction on the safe side. Test 3 is the one that
 proves it; do not skip it.
 
-## Note
+## Reproduction fixture — DO NOT CLEAR
 
-`content update` was verified on merlinx during triage, which set SMS `_id=1` to `read=1`.
-The remaining 8 unread test messages on that device were deliberately left alone so the
-reproduction stays available.
+**merlinx (Redmi Note 9) is holding a live reproduction of this bug. Leave it intact.**
+
+8 unread SMS (`_id` 3, 4, 5, 6, 8, 10, 11, 12) sit in that device's inbox with `read = 0`.
+They are the exact messages that were re-forwarded at 13:04 on 2026-08-24. They exist so the
+fix can be tested against the real failing state rather than a synthetic one, and the user has
+asked explicitly that they be preserved until then.
+
+Do **not** run `content update … read:i:1` on them, do not clear the inbox, and do not
+"tidy up" during any unrelated on-device verification. `_id=1` was already flipped to
+`read=1` during triage to prove the `content` mechanism works — that one is spent; the
+other 8 are the fixture.
+
+Check the fixture is still intact before testing:
+```
+adb -s 055f14050405 shell su -c 'content query --uri content://sms/inbox --projection _id:read'
+```
+Expect 8 rows with `read=0` and `_id=1` with `read=1`.
+
+The acceptance test is then exactly the reported bug: restart the app and confirm **zero**
+re-forwards at the PBX, where today all 8 are re-sent.
