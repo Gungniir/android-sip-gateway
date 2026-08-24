@@ -1742,6 +1742,40 @@ Wiring the broadcast is small — `toBundle()` already exists and `ServiceWatchd
 is the natural trigger — but the receiver is `exported="true"` with no permission (**S1**),
 so implementing it *widens an unauthenticated surface*. It therefore belongs with
 **GW-30**, not before it. → **GW-30**.
+#### H17. The SMS send outcome still arrives on main, so SMS cannot be published — NEW, P2 — filed as GW-46
+Found while doing GW-45 (the status surface), checking whether SMS counters could be added to
+`GatewayStatus` without a new cross-thread read. They cannot, for two reasons that compound.
+
+**GW-21 finished half the job.** It moved the inbound pipeline onto the control thread by
+giving the `ContentObserver` `new Handler(control.getLooper())` (`SmsHandler.java:355`). The
+two *send-status* receivers were left as they were — `registerReceiver(receiver, filter)` with
+no handler, `SmsHandler.java:1238-1244` — so every `sent` / `failed` / `delivered` /
+`delivery_failed` verdict is dispatched on **main**. The submission side is clean
+(`PjsipSipService.handleIncomingSipMessage:1404` is `@ControlThread` and calls `sendSms` from
+there); only the outcome is split off. Same family as **F4b**: a single residual main-thread
+touch in a path the refactor otherwise owns.
+
+**And there is nothing to count yet.** No lifetime tally of forwarded or sent messages exists.
+The `@ControlThread` state is all gauges and bookkeeping — `inFlightIds:230`,
+`forwardAttempts:234`, `retryNotBefore:238`, the flag-write health at `:242`/`:246`/`:255`,
+and `processInboxCounter:456`, which counts inbox *scans* rather than messages. The one field
+that reads like a count, `confirmedIds:221`, is a **pruned** suppression record — TTL 30 days
+(`:147`), hard cap 1000 (`:150`), `pruneProcessedIds():987` — so `size()` is a retention
+window that silently diverges from the real total on exactly the long-running deployment this
+gateway is built for. Publishing it as "SMS forwarded" would be a number that lies.
+
+Consequence, and why it is a finding rather than a preference: **SMS is unobservable on the
+device.** `GatewayStatus` carries no SMS fields, and since GW-45 the snapshot is the UI's only
+status surface, so neither the app nor the web page can show a count, a last-forwarded time or
+a failure — including the `rootFlagWriteGivenUp` state, in which duplicate suppression is
+resting entirely on the persisted set. **H13** was reported from the field by a person who
+noticed duplicate messages, because the appliance itself had nothing to show.
+
+Not fixed in GW-45, deliberately: its brief allowed SMS counters only if they could be read
+from state `SmsHandler` already keeps, on the thread that already owns it, with no new
+locking. Both halves of that fail. The fix is to move the receivers onto the control looper
+first and *then* add plain confined counters — not to buy an `AtomicLong`. Full plan in
+[issues/GW-46-sms-status.md](issues/GW-46-sms-status.md).
 
 ### P2 — security posture
 
@@ -1762,7 +1796,7 @@ start/stop the gateway, or place calls (`GatewayControlReceiver.configure:165`).
 |---|---|---|
 | P0 | 9 | native UAF (2), device-brick (4), Telecom NPE/lost-call (3) |
 | P1 | 14 | call state machine (4), audio bridge (4), SIP lifecycle (6) → all downstream of the missing threading model; plus 3 ANR |
-| P2 | 12 | resource hygiene, correctness, security |
+| P2 | 14 | resource hygiene, correctness, observability, security |
 
 The P1 block is not 14 independent bugs — it is one missing decision (which thread owns
 call/audio/SIP state) expressed 14 times. The roadmap treats it that way.

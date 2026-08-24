@@ -75,6 +75,7 @@ public class GatewayStatusTest {
     }
 
     @Test
+    @SuppressWarnings("deprecation") // GW-45 deprecated the composite; this pins what it says
     public void statusTextIsTheThreeLineCompositeTheUiAlwaysShowed() {
         GatewayStatus status = GatewayStatus.capture(
                 false, accountManager, callManager, audioBridge, 0L, 0L, 0L, null);
