@@ -48,8 +48,30 @@ public class GatewayInCallService extends InCallService {
 
     private static volatile GatewayInCallService instance;
 
+    /**
+     * The id handed out when the event does not belong to a tracked GSM leg. Never issued by
+     * {@link #CALL_ID_SEQ}, so it can never collide with a real call.
+     */
+    public static final long NO_GSM_CALL = 0L;
+
+    /**
+     * Hands out the identity of each GSM leg (GW-13 §3). {@code android.telecom.Call} is
+     * {@code final} and carries no stable id of its own, so the gateway mints one per
+     * {@link #onCallAdded(Call)} and threads it through every lifecycle event. Identity is
+     * what lets a late event be recognised as belonging to a call that is no longer current
+     * and dropped, instead of tearing down the call that replaced it.
+     */
+    private static final java.util.concurrent.atomic.AtomicLong CALL_ID_SEQ =
+            new java.util.concurrent.atomic.AtomicLong();
+
     /** The single GSM leg this gateway is bridging, or null. Snapshot before use. */
     private volatile Call currentCall;
+
+    /**
+     * The id of {@link #currentCall}, or {@link #NO_GSM_CALL}. Written on main together with
+     * {@code currentCall} and read on main by the callbacks that forward it onwards.
+     */
+    private volatile long currentCallId = NO_GSM_CALL;
 
     private final Handler timeoutHandler = new Handler(Looper.getMainLooper());
 
@@ -59,7 +81,12 @@ public class GatewayInCallService extends InCallService {
     private Call.Callback callCallback = new Call.Callback() {
         @Override
         public void onStateChanged(Call call, int state) {
-            Log.d(TAG, "Call state changed: " + stateToString(state));
+            // Snapshot once: onCallAdded/onCallRemoved write the pair from this same looper,
+            // but re-reading would let the two halves come from different calls.
+            final Call tracked = currentCall;
+            final long id = (call == tracked) ? currentCallId : NO_GSM_CALL;
+
+            Log.d(TAG, "Call state changed: " + stateToString(state) + " (gsmCallId=" + id + ")");
 
             // NOTE: Don't mute microphone - it breaks SIP→GSM audio path!
             // The Incall_Music injection uses the same audio path as microphone.
@@ -67,7 +94,7 @@ public class GatewayInCallService extends InCallService {
             // Notify PjsipSipService about GSM call state
             PjsipSipService sipService = PjsipSipService.getInstance();
             if (sipService != null) {
-                sipService.onGsmCallStateChanged(call, state);
+                sipService.onGsmCallStateChanged(call, id, state);
             }
         }
 
@@ -127,7 +154,9 @@ public class GatewayInCallService extends InCallService {
         }
 
         currentCall = call;
+        currentCallId = CALL_ID_SEQ.incrementAndGet();
         call.registerCallback(callCallback);
+        Log.d(TAG, "Tracking GSM call as gsmCallId=" + currentCallId);
 
         Log.d(TAG, "========== onCallAdded START (Android " + Build.VERSION.SDK_INT + ") ==========");
         Log.d(TAG, "Call state: " + stateToString(call.getState()));
@@ -400,7 +429,7 @@ public class GatewayInCallService extends InCallService {
 
         PjsipSipService sipService = PjsipSipService.getInstance();
         if (sipService != null && sipService.isSipRegistered()) {
-            sipService.onIncomingGsmCall(callerNumber, simSlot);
+            sipService.onIncomingGsmCall(callerNumber, simSlot, currentCallId);
         } else {
             // Retry every 500ms until the GSM call ends or the cap is reached
             Log.w(TAG, "SIP service not ready, retry " + (attempt + 1) + " in 500ms");
@@ -421,7 +450,21 @@ public class GatewayInCallService extends InCallService {
         if (call == tracked) {
             // Cancel timeout when call is removed
             cancelIncomingTimeout();
+            final long removedId = currentCallId;
             currentCall = null;
+            currentCallId = NO_GSM_CALL;
+
+            // GW-13 / plan §3d backstop. Removal is the last word Telecom says about a leg,
+            // and after GW-13 this class is the *only* source of GSM lifecycle - the
+            // PhoneStateListener no longer tears anything down. If a DISCONNECTED state
+            // callback is ever dropped, this is what still stops the audio streams, and with
+            // it the MixerEnforce thread that would otherwise hold the mic muted until
+            // reboot. When DISCONNECTED did arrive, the id says so and the service logs a
+            // no-op: teardown is idempotent per call id, so this can only ever add safety.
+            PjsipSipService sipService = PjsipSipService.getInstance();
+            if (sipService != null) {
+                sipService.onGsmCallRemoved(removedId);
+            }
         } else {
             // A refused second leg going away must not cancel the tracked call's timeout.
             Log.d(TAG, "Removed call was not the tracked call, current call left untouched");
@@ -430,6 +473,19 @@ public class GatewayInCallService extends InCallService {
 
     public Call getCurrentCall() {
         return currentCall;
+    }
+
+    /**
+     * Whether the tracked GSM leg is still live - i.e. it exists and its Telecom state is not
+     * {@code DISCONNECTED}/{@code DISCONNECTING}.
+     *
+     * <p>Since GW-13 this is what the watchdog asks instead of reading the
+     * {@code PhoneStateListener}'s process-wide {@code lastPhoneState}: it is about the leg
+     * this gateway is tracking, so it cannot report some *other* call as this one's.
+     */
+    public boolean hasLiveGsmCall() {
+        Call call = currentCall;
+        return call != null && !isDead(call);
     }
 
     public void answerCall() {

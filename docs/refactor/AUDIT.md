@@ -239,13 +239,25 @@ callManager.setOutgoingSipCall(call);   // too late
 `onSipCallState` then finds `currentSipCall == null`, skips the clear, and
 `setOutgoingSipCall` stores an **already-dead call** as the current one.
 
-#### D3. Two independent sources drive the same GSM transitions
+#### D3. Two independent sources drive the same GSM transitions — ✅ fixed by GW-13
 `handlePhoneState` (`PjsipSipService.java:448`, from `PhoneStateListener`) and
 `onGsmCallStateChanged` (`:473`, from `Call.Callback`) both call
 `startAudioStreams()` + `onGsmCallConnected()` on connect and the stop pair on end,
 with no defined ordering. Neither is idempotent: the connect path also spawns a
 `MuteControls` thread each time, and the end path can run **after** a subsequent call's
 start path.
+
+**GW-13** made `Call.Callback` the only driver. `GatewayInCallService` now mints a
+`gsmCallId` per tracked leg and threads it through `onGsmCallStateChanged` /
+`onIncomingGsmCall` into `CallManager`, so an event naming a leg that is no longer current is
+ignored and logged rather than applied — which is what closes the stale-stop race
+independently of ordering. Connect and end are idempotent per leg, so exactly one
+`startAudioStreams()` and one `DeviceMuteManager` lease happen per call.
+`handlePhoneState` mutates nothing any more: it compares the modem's process-wide state
+against the tracked leg and logs a discrepancy. Per plan §3d the unconditional
+`stopAudioStreams()` moved onto the Telecom path, so a leg that never reaches `BRIDGED` still
+tears the mixer down. `checkOrphanedCalls` asks `GatewayInCallService` for the tracked leg
+instead of reading `lastPhoneState`.
 
 #### D4. `SipTestCallManager` ownership check is racy — ✅ ownership half fixed by GW-10
 `SipTestCallManager.java:90` (`call`, non-volatile) is read by `owns()` (`:141`) from
@@ -286,6 +298,39 @@ bridge undiagnosable after a failed outgoing call. The gate that is both correct
 D2-safe is `getState() == IDLE`, which only became expressible once GW-11 split the states —
 but changing admission behaviour is not a threading move, so it is filed rather than folded
 into GW-11's diff.
+
+#### D5. A bridged call logs `Audio streams stopped` twice — NEW, for GW-25/GW-31
+Pre-existing, unchanged by GW-13, and benign — filed so it is not mistaken for a leak the
+way `Audio bridge started` 3× was (plan §6).
+
+When the GSM side ends a bridged call, `PjsipSipService.handleGsmCallEnded` calls
+`audioBridge.stopAudioStreams()` unconditionally (it must — plan §3d), then tells
+`CallManager`, whose `terminateAllCalls()` fires `onCallsTerminated()`, which stops the
+streams again. Before GW-13 the first of the two was `handlePhoneState`'s IDLE branch, so the
+count is the same as it always was.
+
+Harmless at the port level: the second `GsmAudioPort.stopCapture()` finds
+`isSessionActive(current)` false, so `ended = 0`, `releaseLocked(0)` releases nothing and the
+enforce thread is already gone. Only the two log lines are real. It cannot simply be removed
+from `onCallsTerminated()`: a **SIP-side** hangup reaches teardown through that listener and
+the GSM `DISCONNECTED` can be up to 50.7 s behind it (finding E5), so dropping it would leave
+the ALSA capture open for that whole window. The fix, if it is worth one, is to make
+`stopAudioStreams()` log only when it actually stopped a session — which is an
+`AudioBridgeManager`/`GsmAudioPort` change, out of GW-13's scope.
+
+#### D6. Nothing acts on a GSM source discrepancy — NEW, for GW-25
+GW-13 kept `PhoneStateListener` as a cross-check: it logs
+`GSM source cross-check: modem is IDLE but GSM leg N is still tracked` when the modem says
+the call is over and the Telecom path never reported the end. That line describes precisely
+the state plan §3d warns about — audio streams up, `MixerEnforce` re-asserting the mic mute
+every 2 s, no call — and **nothing repairs it**, because repairing from that path is exactly
+the second source of truth GW-13 removed.
+
+The watchdog is the right owner, but `checkOrphanedCalls` cannot see this case either: it
+returns early unless `callManager.hasActiveCall()`, and the leg in question has already left
+the state machine. GW-25 should give the watchdog a GSM-liveness check that runs regardless
+of `CallManager` state and stops the audio streams when Telecom has no live leg. Until then
+the discrepancy is observable in `logcat -s GatewaySvc` and nothing more.
 
 ---
 

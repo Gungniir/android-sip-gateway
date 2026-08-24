@@ -84,6 +84,21 @@ public class CallManager {
     private volatile long gsmCallPlacedTime = 0;
 
     /**
+     * Identity of the GSM leg this machine is driving, or
+     * {@link GatewayInCallService#NO_GSM_CALL} (GW-13 §3).
+     *
+     * <p>Adopted from the first identified GSM event for a leg - {@code onIncomingGsmCall} for
+     * the GSM→SIP direction, {@code onGsmCallConnected} for SIP→GSM, where no
+     * {@code android.telecom.Call} exists yet at dial time - and cleared by
+     * {@link #terminateAllCalls()}. Its only job is to let a lifecycle event that names a
+     * *different* leg be dropped instead of moving the machine: without it, a
+     * {@code DISCONNECTED} for call 1 arriving after call 2 has connected terminates call 2,
+     * and no amount of ordering discipline in the callers can prevent that.
+     */
+    @ControlThread
+    private volatile long currentGsmCallId = GatewayInCallService.NO_GSM_CALL;
+
+    /**
      * The state machine's alphabet. The legal edges between these are
      * {@link #LEGAL_TRANSITIONS}; nothing may assign {@link #state} except
      * {@link #transition}.
@@ -719,12 +734,35 @@ public class CallManager {
 
     /**
      * Handle GSM call connected.
-     * This is called by the service when GSM call becomes active.
+     * This is called by the service when the GSM leg {@code gsmCallId} becomes active.
+     *
+     * <p>Idempotent per leg (GW-13 §4): a second connect for the leg already bridged is a
+     * logged no-op, and a connect naming a leg that is not the current one is dropped.
+     *
+     * @param gsmCallId identity of the GSM leg, or {@link GatewayInCallService#NO_GSM_CALL}
+     *                  when the caller cannot name one
      */
     @ControlThread
-    public void onGsmCallConnected() {
+    public void onGsmCallConnected(long gsmCallId) {
         control.assertOnControlThread("CallManager.onGsmCallConnected");
-        Log.d(TAG, "GSM call connected");
+
+        if (!ownsGsmCall(gsmCallId)) {
+            Log.w(TAG, "GSM connect for call " + gsmCallId + " while " + currentGsmCallId
+                    + " is the current leg - ignoring");
+            return;
+        }
+        if (gsmCallId != GatewayInCallService.NO_GSM_CALL) {
+            // SIP→GSM adopts here: at placeGsmCall() time Telecom has not created the Call
+            // yet, so this is the first event that can name the leg.
+            currentGsmCallId = gsmCallId;
+        }
+
+        Log.d(TAG, "GSM call connected (gsmCallId=" + gsmCallId + ")");
+
+        if (state == CallState.BRIDGED) {
+            Log.d(TAG, "Already bridged - ignoring duplicate GSM connect");
+            return;
+        }
 
         // Both directions end here. SIP→GSM arrives from GSM_DIALING (we dialled out);
         // GSM→SIP from SIP_DIALING (the inbound GSM call was answered once the PBX picked
@@ -740,11 +778,32 @@ public class CallManager {
 
     /**
      * Handle GSM call ended.
+     *
+     * <p>An end naming a leg that is not the current one is ignored and logged (GW-13 §3):
+     * that is the stale-stop scenario - call 1's teardown arriving after call 2 has already
+     * connected - and identity is the only thing that can tell the two apart, ordering
+     * guarantees being unavailable.
+     *
+     * <p>Note this decides only the <em>state machine's</em> teardown. The audio streams are
+     * stopped by {@code PjsipSipService} independently of anything here, because a leg that
+     * never reached {@link CallState#BRIDGED} leaves this method with nothing to terminate
+     * (plan §3d).
+     *
+     * @param gsmCallId identity of the GSM leg, or {@link GatewayInCallService#NO_GSM_CALL}
+     *                  when the caller cannot name one
      */
     @ControlThread
-    public void onGsmCallEnded() {
+    public void onGsmCallEnded(long gsmCallId) {
         control.assertOnControlThread("CallManager.onGsmCallEnded");
-        Log.d(TAG, "GSM call ended");
+
+        if (!ownsGsmCall(gsmCallId)) {
+            Log.w(TAG, "GSM end for call " + gsmCallId + " which is not the current leg "
+                    + currentGsmCallId + " - ignoring");
+            return;
+        }
+
+        Log.d(TAG, "GSM call ended (gsmCallId=" + gsmCallId + ")");
+        currentGsmCallId = GatewayInCallService.NO_GSM_CALL;
         pendingGsmDestination = null;
         gsmCallPlacedTime = 0;
 
@@ -753,20 +812,40 @@ public class CallManager {
         }
     }
 
+    /**
+     * Whether an event naming {@code gsmCallId} may drive this machine.
+     *
+     * <p>True when the event names the leg already adopted, when no leg is adopted (nothing
+     * to contradict it), or when the caller could not name one at all - an untagged event is
+     * treated as it was before GW-13 rather than being silently dropped. False only when the
+     * machine is demonstrably driving a <em>different</em> leg.
+     */
+    @ControlThread
+    private boolean ownsGsmCall(long gsmCallId) {
+        return gsmCallId == GatewayInCallService.NO_GSM_CALL
+                || currentGsmCallId == GatewayInCallService.NO_GSM_CALL
+                || currentGsmCallId == gsmCallId;
+    }
+
     // ========== Incoming GSM Call ==========
 
     /**
      * Handle incoming GSM call (will create outgoing SIP call).
      */
     @ControlThread
-    public void onIncomingGsmCall(String callerNumber, int simSlot) {
+    public void onIncomingGsmCall(String callerNumber, int simSlot, long gsmCallId) {
         control.assertOnControlThread("CallManager.onIncomingGsmCall");
         if (state != CallState.IDLE) {
             Log.w(TAG, "Already have active call, ignoring incoming GSM");
             return;
         }
 
-        Log.d(TAG, "Incoming GSM call from " + callerNumber + " on SIM" + simSlot);
+        Log.d(TAG, "Incoming GSM call from " + callerNumber + " on SIM" + simSlot
+                + " (gsmCallId=" + gsmCallId + ")");
+
+        // GSM→SIP adopts the identity here, before the SIP leg is even dialled, so a GSM
+        // hangup during ring can be matched to the leg that is ringing.
+        currentGsmCallId = gsmCallId;
 
         // Get SIP destination for this SIM
         String sipDest = config.getDestinationForSim(simSlot);
@@ -866,6 +945,7 @@ public class CallManager {
         hangupGsmCall();
 
         // Clear state
+        currentGsmCallId = GatewayInCallService.NO_GSM_CALL;
         pendingGsmDestination = null;
         pendingGsmSimSlot = 1;
         gsmCallPlacedTime = 0;
