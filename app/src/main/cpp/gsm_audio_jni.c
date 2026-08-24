@@ -675,6 +675,9 @@ Java_org_onetwoone_gateway_GsmAudioNative_pjBufRead(
     if ((*env)->GetArrayLength(env, dst) < length) {
         return -1;
     }
+    if (length == 0) {
+        return 0;                        /* begin may legitimately be NULL when empty */
+    }
 
     const struct pj_byte_vector *v = (const struct pj_byte_vector *)(intptr_t)handle;
     (*env)->SetByteArrayRegion(env, dst, 0, length, (const jbyte *)v->begin);
@@ -701,6 +704,9 @@ Java_org_onetwoone_gateway_GsmAudioNative_pjBufWrite(
     }
     if ((*env)->GetArrayLength(env, src) < length) {
         return -1;
+    }
+    if (length == 0) {
+        return 0;                        /* begin may legitimately be NULL when empty */
     }
 
     struct pj_byte_vector *v = (struct pj_byte_vector *)(intptr_t)handle;
