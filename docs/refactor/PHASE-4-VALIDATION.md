@@ -314,4 +314,110 @@ breakage, not a crash.
 
 ## Wave 3 — `phase-4-wave-3` (GW-42)
 
-*To be completed when the wave lands.*
+468 tests, 0 failures, lint green (baseline not regenerated), `assembleDebug` green.
+Nothing on hardware.
+
+**Test this on a phone you are willing to re-provision.** The wizard grants permissions and
+changes the default dialer role. Changing that role stops `GatewayInCallService` binding — if
+a device stops answering GSM calls during this section, check the role before assuming a UI
+bug.
+
+The wizard is `exported="false"`. To launch it directly:
+```
+adb -s <dev> shell su -c 'am start -n org.onetwoone.gateway/.ui.setup.SetupActivity'
+```
+
+### 1. The stranding test — run this before anything else
+
+The single thing this issue exists to prevent is a half-provisioned phone standing behind a
+wizard it cannot get past.
+
+1. Fresh install, or clear `setup_completed`. Launch the app. The wizard should appear **over**
+   a drawn main screen, not instead of it.
+2. Press **Skip** on all five steps. You must reach the end and land on a usable console.
+3. Kill and relaunch. **The wizard must not reappear** — skipping counts as dismissal.
+4. Repeat, but press **Close** on step 1. Same result: usable console, no reappearance.
+5. Repeat, but press **system back** on step 1. Same result.
+6. Re-run it from the System section. It must open every time, unconditionally.
+
+If any of these leaves you unable to reach the main screen, stop and report — nothing else in
+this section matters.
+
+### 2. Re-running must not wipe a working gateway
+
+On a **configured** device, with a known-good SIP account:
+
+1. Note the current server, port, user and SIM destinations.
+2. Re-run the wizard from the System section.
+3. On the account step, confirm every field is **pre-filled** with the stored values and the
+   callout names the existing `user@server`.
+4. **Clear the password box**, press Next, `force-stop`, relaunch.
+5. The stored password must have survived — blank means "keep", not "clear".
+6. Re-run again, press **Skip** on the account step, and confirm nothing at all changed.
+7. Confirm the gateway still registers afterwards.
+
+The JVM tests prove the merge logic. Only the force-stop proves the preference.
+
+### 3. The dialer step — the one that can silently invert
+
+`PermissionState.isDefaultDialer` was dead code until this wave: declared, defaulted `false`,
+never written. It is now answered from `TelecomManager`. **If that read misbehaves on an OEM
+build, the step tells a correctly-provisioned phone that it is not the dialer.**
+
+Cross-check the step's verdict against the system on both devices:
+```
+adb -s <dev> shell cmd role get-role-holders android.app.role.DIALER
+```
+The screen and that command must agree, both before and after using the step's own button.
+
+Also: root is re-checked uncached on each visit, deliberately, so that granting in Magisk
+mid-wizard is picked up. Confirm that works — deny root, reach step 1, grant in Magisk,
+re-check, and see it flip.
+
+The doze-whitelist button is new and has **never been pressed on either bench phone**.
+`disableBatteryOptimizationAsync`'s own javadoc warns it can freeze some devices. Press it
+deliberately, with the phone in a state you can recover.
+
+### 4. The verification step, and re-testing its central assumption
+
+**Re-test the `*43` claim on the live PBX first.** The whole step is designed around the trunk
+being unable to dial feature codes (`from-gsm-gateway` rejects them). If that context has since
+been changed, the callout is now misleading and the fallback is unnecessary.
+
+Then:
+1. On a fresh handset, confirm the default destination is **not** `*43` — it should fall
+   through to the SIM1 destination. The shipped `GatewayConfig` default *is* `*43`, and a test
+   guards that it never leaks through; confirm on glass.
+2. Type a `*` or `#` destination deliberately. A callout should explain the limitation, and
+   the call button and Next must **stay enabled**. It informs, it does not block.
+3. Confirm the SIM1 default is actually dialable *outbound* from the trunk. It should be — it
+   is where inbound GSM calls already go — but that direction has never been exercised.
+4. Run the call. The transcript is shown beside the verdict; confirm the markers `verdictOf`
+   looks for actually appear against this FreePBX.
+5. Fail a call on purpose (bad destination), then retry with a good one.
+   `SipTestCallManager` refuses a start while a call is live — confirm the second attempt is
+   accepted once the first tears down, and that Hang Up releases it.
+6. Confirm the registration chip and the call verdict are visibly **separate claims**, and
+   that the "this cannot confirm audio" callout is present and legible.
+
+Mode is `tone`, not `bridge` — no GSM leg, no ALSA tap. That is deliberate: it exercises
+exactly the part a handset can check while commissioning.
+
+### 5. Presentation
+
+- **Header height** on the 5-inch panel and at maximum font scale. The app bar was removed to
+  buy back ~56dp but the summary strings are long, and this has never been laid out on glass.
+- **Both themes** for the two new drawables (`gw_panel`, `gw_callout`) and the four chip
+  states. `gw_primary_container` behind `gw_on_primary_container` has never been read at night.
+- **Rotation mid-wizard**: step, outcomes and destination survive; **unsaved typing in the
+  account form does not** — the `FormGuard` dirty set is per-activity, the same as the main
+  screen. Confirm that is tolerable rather than surprising. If it is surprising, it is a
+  finding.
+
+### 6. Not verifiable here
+
+- That `reloadConfig()` from the wizard both re-registers with the new account **and** bumps
+  the config generation so the main screen behind it repaints within a second (GW-14's path).
+  Nothing binds the service in Robolectric.
+- Whether the wizard opening over `MainActivity` reads as a wizard over a console, or as a
+  flash of the wrong screen.
