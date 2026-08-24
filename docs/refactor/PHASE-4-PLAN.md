@@ -63,6 +63,21 @@ not be solved inside a 565-line layout rewrite.
 
 → **New issue GW-45**, wave 1, prerequisite for GW-41. See §4.
 
+**The same defect has a second half, and it is not ours.** AUDIT **H16**, filed after this
+plan's first draft: `GatewayStatus.toBundle()` — the flattened form built specifically for the
+`GET_STATUS` broadcast — has no consumer either. `GatewayControlReceiver`'s handler is
+`Log.i(TAG, "GET_STATUS not yet implemented")`. So the snapshot is computed in full and
+discarded at *both* exits: the UI keeps three fields, and the broadcast keeps none.
+
+That half belongs to **GW-30** (Phase 3), with an ordering constraint worth repeating here
+because it also protects Phase 4's gate: **permission-gate the receiver before wiring the
+broadcast.** `GatewayControlReceiver` is exported with no permission (S1), so implementing
+`GET_STATUS` first would hand the gateway's full runtime state — registration, call state,
+call counters, watchdog findings — to any app on the device.
+
+GW-45 and H16 do not overlap in code. GW-45 is the in-process LiveData surface; H16 is the
+`Bundle` on the exported receiver. Fixing either does not fix the other.
+
 ### C2 — String-extraction scope is 68 literals, not 43
 
 Measured at `b3b2c0e`:
