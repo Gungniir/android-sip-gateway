@@ -159,17 +159,19 @@ public class SipEndpointManager {
         if (ep == null) {
             return false;
         }
+        // Owned native memory. This used to be a bare delete() inside the try, which the
+        // brief cited as the codebase's correct pattern - it was not: if size() threw, the
+        // delete was skipped. try/finally is the pattern (AUDIT H7, plan §2.3).
+        IntVector transports = null;
         try {
             // Use transportEnum() to get list of transport IDs
-            IntVector transports = ep.transportEnum();
-            boolean hasTransports = transports != null && transports.size() > 0;
-            if (transports != null) {
-                transports.delete();
-            }
-            return hasTransports;
+            transports = ep.transportEnum();
+            return transports != null && transports.size() > 0;
         } catch (Exception e) {
             Log.w(TAG, "Error checking transport: " + e.getMessage());
             return false;
+        } finally {
+            Pjsua2Lifetime.delete(transports);
         }
     }
 
@@ -512,10 +514,12 @@ public class SipEndpointManager {
      * Disable video codecs to save resources.
      */
     private void disableVideoCodecs() {
+        // Owned native memory; the CodecInfo elements it hands out are not (AUDIT H7).
+        CodecInfoVector2 videoCodecs = null;
         try {
             // Snapshot: one object for the enum and every setPriority below it.
             Endpoint ep = endpoint;
-            CodecInfoVector2 videoCodecs = ep.videoCodecEnum2();
+            videoCodecs = ep.videoCodecEnum2();
             for (int i = 0; i < videoCodecs.size(); i++) {
                 CodecInfo codec = videoCodecs.get(i);
                 ep.videoCodecSetPriority(codec.getCodecId(), (short) 0);
@@ -523,6 +527,8 @@ public class SipEndpointManager {
             Log.d(TAG, "Video codecs disabled");
         } catch (Exception e) {
             Log.w(TAG, "Error disabling video codecs: " + e.getMessage());
+        } finally {
+            Pjsua2Lifetime.delete(videoCodecs);
         }
     }
 

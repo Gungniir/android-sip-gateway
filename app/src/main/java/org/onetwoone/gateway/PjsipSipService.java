@@ -28,6 +28,7 @@ import org.onetwoone.gateway.core.GatewayStatus;
 import org.onetwoone.gateway.diag.SipTestCallManager;
 import org.onetwoone.gateway.diag.SipUriBuilder;
 import org.onetwoone.gateway.power.PowerController;
+import org.onetwoone.gateway.sip.Pjsua2Lifetime;
 import org.onetwoone.gateway.sip.ReconnectionStrategy;
 import org.onetwoone.gateway.sip.ServiceWatchdog;
 import org.onetwoone.gateway.sip.SipAccountManager;
@@ -843,6 +844,8 @@ public class PjsipSipService extends Service implements SipCallService {
         // (a user stop(), the watchdog, a GSM-side hangup) can dispose it.
         if (call.isDisposed()) {
             Log.d(TAG, "Incoming SIP call was disposed before it could be handled");
+            // CallManager never saw it, so nothing else will ever free it (AUDIT H7).
+            callManager.buryCall(call, "incoming call disposed before handling");
             return;
         }
         powerController.wakeScreen();
@@ -980,13 +983,22 @@ public class PjsipSipService extends Service implements SipCallService {
             return;
         }
 
+        // Owned native memory - deleted before startBridge's own getInfo() takes another
+        // (AUDIT H7). startBridge is deliberately inside the try, not after it: it must not
+        // run when getInfo() threw.
+        CallInfo info = null;
         try {
-            CallInfo info = call.getInfo();
-            if (info.getState() == pjsip_inv_state.PJSIP_INV_STATE_CONFIRMED) {
+            info = call.getInfo();
+            int callState = info.getState();
+            Pjsua2Lifetime.delete(info);
+            info = null;
+            if (callState == pjsip_inv_state.PJSIP_INV_STATE_CONFIRMED) {
                 audioBridge.startBridge(call);
             }
         } catch (Exception e) {
             Log.e(TAG, "Error handling media state: " + e.getMessage());
+        } finally {
+            Pjsua2Lifetime.delete(info);
         }
         publishStatus();
     }
@@ -1464,6 +1476,9 @@ public class PjsipSipService extends Service implements SipCallService {
     @ControlThread
     public void makeSipCallWithCallerId(String destination, String callerId, int simSlot) {
         control.assertOnControlThread("makeSipCallWithCallerId");
+        CallOpParam prm = null;
+        SipHeaderVector headers = null;
+        SipHeader callerIdHeader = null;
         try {
             GatewayAccount account = accountManager.getAccount();
             if (account == null) {
@@ -1486,22 +1501,29 @@ public class PjsipSipService extends Service implements SipCallService {
 
             GatewayCall call = new GatewayCall(this, account);
 
-            CallOpParam prm = new CallOpParam(true);  // true = use default values
+            // prm / headers / callerIdHeader are Java-created and therefore ours to delete
+            // (AUDIT H7). txOpt is NOT - CallOpParam.getTxOption() hands back a view into prm
+            // ((ptr, false)); deleting it would free part of prm.
+            prm = new CallOpParam(true);  // true = use default values
 
             // Add custom SIP headers (Asterisk reads via PJSIP_HEADER())
             SipTxOption txOpt = prm.getTxOption();
-            SipHeaderVector headers = new SipHeaderVector();
+            headers = new SipHeaderVector();
 
             // Add CallerID header
             if (callerId != null && !callerId.isEmpty()) {
-                SipHeader callerIdHeader = new SipHeader();
+                callerIdHeader = new SipHeader();
                 callerIdHeader.setHName("X-GSM-CallerID");
                 callerIdHeader.setHValue(callerId);
-                headers.add(callerIdHeader);
+                headers.add(callerIdHeader);  // copies, so the header may be freed after
                 Log.d(TAG, "Added X-GSM-CallerID: " + callerId);
             }
 
-            txOpt.setHeaders(headers);
+            txOpt.setHeaders(headers);  // copy-assigns the vector, so ditto
+            Pjsua2Lifetime.delete(callerIdHeader);
+            callerIdHeader = null;
+            Pjsua2Lifetime.delete(headers);
+            headers = null;
 
             // The call MUST be registered with CallManager before makeCall() runs: PJSIP can
             // still deliver onCallState(DISCONNECTED) synchronously on this thread (immediate
@@ -1511,7 +1533,10 @@ public class PjsipSipService extends Service implements SipCallService {
             // top of this method is load-bearing: it is what puts the handler behind the dial
             // in a single queue instead of on a second thread. placeOutgoingSipCall owns the
             // ordering and the compare-and-clear on failure - see AUDIT D2 / GW-06.
-            if (!callManager.placeOutgoingSipCall(call, c -> c.makeCall(uri, prm))) {
+            // `prm` is a reassignable local now (the finally below deletes it), so the lambda
+            // captures an effectively-final alias instead.
+            final CallOpParam callParam = prm;
+            if (!callManager.placeOutgoingSipCall(call, c -> c.makeCall(uri, callParam))) {
                 Log.e(TAG, "SIP call to " + uri + " was not placed");
                 return;
             }
@@ -1520,6 +1545,12 @@ public class PjsipSipService extends Service implements SipCallService {
 
         } catch (Exception e) {
             Log.e(TAG, "Failed to make SIP call: " + e.getMessage());
+        } finally {
+            // makeCall() has returned by now (placeOutgoingSipCall runs the lambda inline), and
+            // pjsua2 retains nothing from any of these.
+            Pjsua2Lifetime.delete(callerIdHeader);
+            Pjsua2Lifetime.delete(headers);
+            Pjsua2Lifetime.delete(prm);
         }
     }
 
@@ -1912,7 +1943,7 @@ public class PjsipSipService extends Service implements SipCallService {
     private void publishStatus() {
         control.assertOnControlThread("publishStatus");
         status = GatewayStatus.capture(isRunning, accountManager, callManager, audioBridge,
-                configGeneration);
+                configGeneration, GatewayCall.getCallsCreated(), GatewayCall.getCallsDeleted());
     }
 
     /** The composite the UI shows. Reads the snapshot, never the live managers. */

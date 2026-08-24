@@ -277,14 +277,18 @@ public class SipAccountManager {
 
         @Override
         public void onRegState(OnRegStateParam prm) {
+            // Owned native memory (Account.getInfo() -> (ptr, true)). AUDIT H7.
+            AccountInfo info = null;
             try {
-                AccountInfo info = getInfo();
+                info = getInfo();
                 boolean isReg = (info.getRegStatus() == pjsip_status_code.PJSIP_SC_OK);
                 String reason = info.getRegStatusText();
 
                 SipAccountManager.this.onRegState(isReg, reason);
             } catch (Exception e) {
                 Log.e(TAG, "Error in onRegState: " + e.getMessage());
+            } finally {
+                Pjsua2Lifetime.delete(info);
             }
         }
 

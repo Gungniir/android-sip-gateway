@@ -2,6 +2,7 @@ package org.onetwoone.gateway;
 
 import android.util.Log;
 
+import org.onetwoone.gateway.sip.Pjsua2Lifetime;
 import org.pjsip.pjsua2.*;
 
 /**
@@ -23,14 +24,20 @@ public class GatewayAccount extends Account {
 
     @Override
     public void onRegState(OnRegStateParam prm) {
+        // Owned native memory (Account.getInfo() -> (ptr, true)). AUDIT H7. Reached only when
+        // a subclass does NOT override this - SipAccountManager's wrapper does, and deletes
+        // its own.
+        AccountInfo info = null;
         try {
-            AccountInfo info = getInfo();
+            info = getInfo();
             boolean registered = (info.getRegStatus() == pjsip_status_code.PJSIP_SC_OK);
             String reason = info.getRegStatusText();
             Log.d(TAG, "Registration state: " + info.getRegStatus() + " - " + reason);
             // Subclasses should override to handle
         } catch (Exception e) {
             Log.e(TAG, "Error in onRegState: " + e.getMessage());
+        } finally {
+            Pjsua2Lifetime.delete(info);
         }
     }
 
