@@ -10,6 +10,7 @@ import org.pjsip.pjsua2.*;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Custom AudioMediaPort for bridging GSM call audio to SIP.
@@ -157,11 +158,21 @@ public class GsmAudioPort extends AudioMediaPort {
     private final byte[] captureBuffer;
     private final byte[] playbackBuffer;
 
-    // Statistics
-    private long framesRequested = 0;
-    private long framesReceived = 0;
-    private long captureErrors = 0;
-    private long playbackErrors = 0;
+    /**
+     * Frame statistics. Written only by the pjmedia RT thread (once per frame per
+     * direction), read and reset by {@link #stopCapture()} on the GatewayControl thread,
+     * and readable at any time through the accessors below.
+     *
+     * <p>They were plain non-volatile {@code long}s, so the reset in {@code stopCapture()}
+     * and every off-thread read were unsafely published. {@link AtomicLong} fixes that
+     * without adding a lock: there is exactly ONE writer, the increments are uncontended,
+     * and nothing here can park the RT thread behind {@code close()}'s drain - which is
+     * what PHASE-1-PLAN §3b forbids and why GW-25 was told to stay out of this file.
+     */
+    private final AtomicLong framesRequested = new AtomicLong();
+    private final AtomicLong framesReceived = new AtomicLong();
+    private final AtomicLong captureErrors = new AtomicLong();
+    private final AtomicLong playbackErrors = new AtomicLong();
 
     public GsmAudioPort(Context context, GatewayConfig config) {
         super();
@@ -242,7 +253,7 @@ public class GsmAudioPort extends AudioMediaPort {
      */
     @Override
     public void onFrameRequested(MediaFrame frame) {
-        framesRequested++;
+        final long requested = framesRequested.incrementAndGet();
 
         try {
             ByteVector buf = frame.getBuf();
@@ -259,7 +270,7 @@ public class GsmAudioPort extends AudioMediaPort {
                     frame.setSize(frameSize);
                     frame.setType(pjmedia_frame_type.PJMEDIA_FRAME_TYPE_AUDIO);
                 } else {
-                    captureErrors++;
+                    captureErrors.incrementAndGet();
                     // Send silence on error
                     for (int i = 0; i < frameSize; i++) buf.add((short) 0);
                     frame.setSize(frameSize);
@@ -273,8 +284,8 @@ public class GsmAudioPort extends AudioMediaPort {
             }
 
             // Log every 500 frames (~10 seconds)
-            if (framesRequested % 500 == 0) {
-                Log.d(TAG, "onFrameRequested: " + framesRequested + " frames, errors=" + captureErrors);
+            if (requested % 500 == 0) {
+                Log.d(TAG, "onFrameRequested: " + requested + " frames, errors=" + captureErrors.get());
             }
         } catch (Exception e) {
             Log.e(TAG, "Error in onFrameRequested: " + e.getMessage());
@@ -286,7 +297,7 @@ public class GsmAudioPort extends AudioMediaPort {
      */
     @Override
     public void onFrameReceived(MediaFrame frame) {
-        framesReceived++;
+        final long received = framesReceived.incrementAndGet();
 
         try {
             if (!isCapturing.get() || !GsmAudioNative.isOpen()) {
@@ -305,13 +316,13 @@ public class GsmAudioPort extends AudioMediaPort {
                 // Write to native ALSA
                 int bytesWritten = GsmAudioNative.writeFrame(playbackBuffer);
                 if (bytesWritten < 0) {
-                    playbackErrors++;
+                    playbackErrors.incrementAndGet();
                 }
             }
 
             // Log every 500 frames (~10 seconds)
-            if (framesReceived % 500 == 0) {
-                Log.d(TAG, "onFrameReceived: " + framesReceived + " frames, errors=" + playbackErrors);
+            if (received % 500 == 0) {
+                Log.d(TAG, "onFrameReceived: " + received + " frames, errors=" + playbackErrors.get());
             }
         } catch (Exception e) {
             Log.e(TAG, "Error in onFrameReceived: " + e.getMessage());
@@ -636,15 +647,12 @@ public class GsmAudioPort extends AudioMediaPort {
             releaseLocked(ended);
         }
 
-        Log.d(TAG, "Native audio stopped. Stats: requested=" + framesRequested +
-              ", received=" + framesReceived +
-              ", captureErr=" + captureErrors + ", playbackErr=" + playbackErrors);
-
-        // Reset statistics
-        framesRequested = 0;
-        framesReceived = 0;
-        captureErrors = 0;
-        playbackErrors = 0;
+        // Read and reset in one step so a frame delivered between the log and the reset
+        // is not silently discarded from the next session's counts.
+        Log.d(TAG, "Native audio stopped. Stats: requested=" + framesRequested.getAndSet(0) +
+              ", received=" + framesReceived.getAndSet(0) +
+              ", captureErr=" + captureErrors.getAndSet(0) +
+              ", playbackErr=" + playbackErrors.getAndSet(0));
     }
 
     public void stop() {
@@ -653,5 +661,32 @@ public class GsmAudioPort extends AudioMediaPort {
 
     public boolean isCapturing() {
         return isCapturing.get();
+    }
+
+    /**
+     * Frames pjmedia has asked us for in the current capture session (GSM&rarr;SIP).
+     *
+     * <p>Safe to call from any thread and cheap - a single volatile read, no lock. It is
+     * the "is the bridge actually moving audio" signal AUDIT D6 / GW-25 wanted; combined
+     * with {@link #isCapturing()} it distinguishes "streams running and pumping" from
+     * "streams running and silent". Reset to 0 by {@link #stopCapture()}.
+     */
+    public long getFramesRequested() {
+        return framesRequested.get();
+    }
+
+    /** Frames pjmedia has handed us in the current capture session (SIP&rarr;GSM). */
+    public long getFramesReceived() {
+        return framesReceived.get();
+    }
+
+    /** Failed native reads in the current capture session. */
+    public long getCaptureErrors() {
+        return captureErrors.get();
+    }
+
+    /** Failed native writes in the current capture session. */
+    public long getPlaybackErrors() {
+        return playbackErrors.get();
     }
 }
