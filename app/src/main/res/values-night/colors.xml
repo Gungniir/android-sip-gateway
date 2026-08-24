@@ -14,7 +14,8 @@
   renders the day palette unconditionally. That is a consequence of the night-mode decision
   recorded in the commit that introduced this file, not an oversight.
 -->
-<resources>
+<resources xmlns:tools="http://schemas.android.com/tools"
+           tools:ignore="UnusedResources">
 
     <!-- Structure. Near-black rather than grey: this is a device read in a dim room, and
          the state colours need somewhere dark to sit. -->

@@ -14,7 +14,7 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="GSM-SIP Gateway"
+            android:text="@string/app_name"
             android:textSize="24sp"
             android:textStyle="bold"
             android:gravity="center"
@@ -24,14 +24,14 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Status:"
+            android:text="@string/label_status"
             android:textStyle="bold"/>
 
         <TextView
             android:id="@+id/statusText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Not started"
+            android:text="@string/status_not_started"
             android:background="#f0f0f0"
             android:padding="8dp"
             android:fontFamily="monospace"
@@ -41,14 +41,14 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Permissions (via root):"
+            android:text="@string/label_permissions"
             android:textStyle="bold"/>
 
         <TextView
             android:id="@+id/permissionsText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Checking..."
+            android:text="@string/status_checking"
             android:background="#f0f0f0"
             android:padding="8dp"
             android:fontFamily="monospace"
@@ -59,56 +59,56 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="SIP Configuration:"
+            android:text="@string/section_sip_config"
             android:textStyle="bold"/>
 
         <EditText
             android:id="@+id/sipServer"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="SIP Server"
+            android:hint="@string/hint_sip_server"
             android:inputType="text"/>
 
         <EditText
             android:id="@+id/sipPort"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="SIP Port"
+            android:hint="@string/hint_sip_port"
             android:inputType="number"/>
 
         <EditText
             android:id="@+id/sipUser"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="SIP Username"
+            android:hint="@string/hint_sip_user"
             android:inputType="text"/>
 
         <EditText
             android:id="@+id/sipPassword"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="SIP Password"
+            android:hint="@string/hint_sip_password"
             android:inputType="textPassword"/>
 
         <CheckBox
             android:id="@+id/useTls"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Use TLS (port 5061)"
+            android:text="@string/option_use_tls"
             android:layout_marginTop="4dp"/>
 
         <EditText
             android:id="@+id/sipRealm"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="SIP Realm (empty = any)"
+            android:hint="@string/hint_sip_realm"
             android:inputType="text"/>
 
         <!-- Incoming GSM calls/SMS destination per SIM -->
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Incoming GSM → SIP routing:"
+            android:text="@string/label_gsm_routing"
             android:layout_marginTop="8dp"/>
 
         <LinearLayout
@@ -121,7 +121,7 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:hint="SIM1 → ext"
+                android:hint="@string/hint_sim1_destination"
                 android:inputType="text"/>
 
             <EditText
@@ -129,7 +129,7 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:hint="SIM2 → ext"
+                android:hint="@string/hint_sim2_destination"
                 android:inputType="text"
                 android:layout_marginStart="8dp"/>
         </LinearLayout>
@@ -137,7 +137,7 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Leave SIM2 empty if single-SIM phone"
+            android:text="@string/help_sim2_optional"
             android:textSize="11sp"
             android:textColor="#666666"
             android:layout_marginBottom="8dp"/>
@@ -146,7 +146,7 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Incoming call mode:"
+            android:text="@string/label_incoming_mode"
             android:layout_marginTop="8dp"/>
 
         <RadioGroup
@@ -159,14 +159,14 @@
                 android:id="@+id/modeSipFirst"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Start SIP → Answer GSM when connected (30s timeout)"
+                android:text="@string/option_mode_sip_first"
                 android:textSize="13sp"/>
 
             <RadioButton
                 android:id="@+id/modeAnswerFirst"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Answer GSM → Start SIP (30s timeout)"
+                android:text="@string/option_mode_answer_first"
                 android:textSize="13sp"/>
         </RadioGroup>
 
@@ -182,35 +182,35 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:text="Save Settings"/>
+                android:text="@string/action_save_settings"/>
 
             <Button
                 android:id="@+id/connectButton"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:text="Connect"/>
+                android:text="@string/action_connect"/>
 
             <Button
                 android:id="@+id/disconnectButton"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:text="Disconnect"/>
+                android:text="@string/action_disconnect"/>
         </LinearLayout>
 
         <!-- SIP Diagnostics: test call without a GSM leg -->
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="SIP Diagnostics:"
+            android:text="@string/section_sip_diagnostics"
             android:textStyle="bold"
             android:layout_marginTop="8dp"/>
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Places a SIP call with no GSM leg. *43 is the FreePBX echo test."
+            android:text="@string/help_test_call"
             android:textSize="11sp"
             android:textColor="#666666"
             android:layout_marginBottom="4dp"/>
@@ -226,7 +226,7 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:hint="Destination"
+                android:hint="@string/hint_test_destination"
                 android:inputType="text"
                 android:importantForAutofill="no"/>
 
@@ -248,35 +248,35 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:text="Test Call"/>
+                android:text="@string/action_test_call"/>
 
             <Button
                 android:id="@+id/testHangupButton"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:text="Hang Up"/>
+                android:text="@string/action_hang_up"/>
         </LinearLayout>
 
         <CheckBox
             android:id="@+id/verboseSipLogCheckbox"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Verbose PJSIP logging (level 5, needs restart)"
+            android:text="@string/option_verbose_sip_log"
             android:textSize="12sp"/>
 
         <CheckBox
             android:id="@+id/dtmfRelayCheckbox"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Relay DTMF from SIP to GSM (far-end voice menus)"
+            android:text="@string/option_dtmf_relay"
             android:textSize="12sp"/>
 
         <TextView
             android:id="@+id/testReportText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="No test call yet"
+            android:text="@string/status_no_test_call"
             android:background="#f0f0f0"
             android:padding="8dp"
             android:fontFamily="monospace"
@@ -288,14 +288,14 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Battery Charge Limit:"
+            android:text="@string/section_battery_limit"
             android:textStyle="bold"
             android:layout_marginTop="8dp"/>
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Stop charging at specified level (requires root)"
+            android:text="@string/help_battery_limit"
             android:textSize="11sp"
             android:textColor="#666666"
             android:layout_marginBottom="4dp"/>
@@ -312,28 +312,28 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:text="60%"/>
+                android:text="@string/option_battery_limit_60"/>
 
             <RadioButton
                 android:id="@+id/limit100"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:text="100% (no limit)"/>
+                android:text="@string/option_battery_limit_none"/>
         </RadioGroup>
 
         <!-- Audio Configuration -->
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Audio Configuration:"
+            android:text="@string/section_audio_config"
             android:textStyle="bold"
             android:layout_marginTop="8dp"/>
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Qualcomm: capture=VOC_REC, playback=Incall_Music"
+            android:text="@string/help_audio_qualcomm"
             android:textSize="11sp"
             android:textColor="#666666"
             android:layout_marginBottom="4dp"/>
@@ -342,7 +342,7 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Sound Card:"/>
+            android:text="@string/label_sound_card"/>
 
         <Spinner
             android:id="@+id/cardSpinner"
@@ -355,7 +355,7 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Capture Device (GSM→SIP):"/>
+            android:text="@string/label_capture_device"/>
 
         <Spinner
             android:id="@+id/captureSpinner"
@@ -369,7 +369,7 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Playback Device (SIP→GSM):"/>
+            android:text="@string/label_playback_device"/>
 
         <Spinner
             android:id="@+id/playbackSpinner"
@@ -383,7 +383,7 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Mixer Route:"/>
+            android:text="@string/label_mixer_route"/>
 
         <Spinner
             android:id="@+id/mixerRouteSpinner"
@@ -397,7 +397,7 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Audio Gain (dB):"
+            android:text="@string/section_audio_gain"
             android:textStyle="bold"/>
 
         <LinearLayout
@@ -416,14 +416,14 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="TX (GSM→SIP)"/>
+                    android:text="@string/label_tx_gain"/>
 
                 <EditText
                     android:id="@+id/txGainEdit"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:inputType="numberDecimal|numberSigned"
-                    android:hint="-6"/>
+                    android:hint="@string/hint_tx_gain_default"/>
             </LinearLayout>
 
             <LinearLayout
@@ -435,14 +435,14 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="RX (SIP→GSM)"/>
+                    android:text="@string/label_rx_gain"/>
 
                 <EditText
                     android:id="@+id/rxGainEdit"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:inputType="numberDecimal|numberSigned"
-                    android:hint="0"/>
+                    android:hint="@string/hint_rx_gain_default"/>
             </LinearLayout>
         </LinearLayout>
 
@@ -450,13 +450,13 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Device Mute Preset:"
+            android:text="@string/section_device_mute"
             android:textStyle="bold"/>
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Mutes speaker/mic on gateway during calls (enforced every 3s)"
+            android:text="@string/help_device_mute"
             android:textSize="11sp"
             android:textColor="#666666"
             android:layout_marginBottom="4dp"/>
@@ -480,7 +480,7 @@
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Detected mixer controls (tap to toggle):"
+                android:text="@string/label_detected_controls"
                 android:textSize="12sp"
                 android:textColor="#666666"
                 android:layout_marginBottom="4dp"/>
@@ -494,7 +494,7 @@
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Manual controls (comma-separated, for controls not in list):"
+                android:text="@string/label_manual_controls"
                 android:textSize="12sp"
                 android:textColor="#666666"
                 android:layout_marginTop="8dp"
@@ -504,14 +504,14 @@
                 android:id="@+id/manualMuteControls"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:hint="e.g. DEC1 Volume, EAR_S, ADC1 MUX"
+                android:hint="@string/hint_manual_controls"
                 android:inputType="text"
                 android:textSize="13sp"/>
 
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Use 'Volume' suffix for INT controls (→0), others are ENUM (→ZERO)"
+                android:text="@string/help_manual_controls"
                 android:textSize="10sp"
                 android:textColor="#999999"/>
 
@@ -530,14 +530,14 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:text="Save Audio"/>
+                android:text="@string/action_save_audio"/>
 
             <Button
                 android:id="@+id/restartButton"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:text="Restart"/>
+                android:text="@string/action_restart"/>
         </LinearLayout>
 
         <!-- Web Interface Toggle -->
@@ -557,7 +557,7 @@
                 android:id="@+id/webInterfaceLabel"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Web Interface (port 8080)"
+                android:text="@string/label_web_interface"
                 android:layout_marginStart="8dp"/>
         </LinearLayout>
 

@@ -24,7 +24,21 @@
   therefore low-chroma for everything structural, and saves saturation entirely for the
   four state colours - because on a status console the state colours are the interface.
 -->
-<resources>
+<!--
+  UnusedResources is suppressed for this file, deliberately and temporarily.
+
+  A design system defines its vocabulary one wave before anything consumes it: GW-40 ships
+  the tokens and styles, GW-41 rewrites res/layout and applies them (PHASE-4-PLAN section 6).
+  Between those two waves lint sees ~50 resources with no reference and is, narrowly, right.
+
+  Suppressing here rather than regenerating lint-baseline.xml keeps the suppression visible,
+  scoped to the four design-system files, and easy to remove - which is the point.
+
+  GW-41 / GW-42: delete this tools:ignore once the layouts consume the vocabulary. After
+  that, an unused token is a real finding - a role nobody needed - and lint should say so.
+-->
+<resources xmlns:tools="http://schemas.android.com/tools"
+           tools:ignore="UnusedResources">
 
     <!-- ==================================================================================
          Structure

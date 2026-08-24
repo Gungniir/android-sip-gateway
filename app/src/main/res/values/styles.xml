@@ -26,7 +26,8 @@
   Colour discipline: nothing in this file names a hex value. Everything routes through
   @color/gw_* so values-night is the only thing that has to change for dark.
 -->
-<resources>
+<resources xmlns:tools="http://schemas.android.com/tools"
+           tools:ignore="UnusedResources">
 
     <!-- ==================================================================================
          Theme

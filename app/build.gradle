@@ -81,6 +81,16 @@ android {
     packagingOptions {
         pickFirst 'lib/arm64-v8a/libc++_shared.so'
     }
+
+    // Robolectric needs the MERGED resource table and manifest to resolve R.string /
+    // R.style / R.color. Without this AGP does not emit
+    // com/android/tools/test_config.properties and every app resource lookup in a unit test
+    // throws Resources$NotFoundException. GW-40 needs it for the theme-resolution tests.
+    testOptions {
+        unitTests {
+            includeAndroidResources = true
+        }
+    }
 }
 
 configurations.all {

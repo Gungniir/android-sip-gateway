@@ -19,6 +19,7 @@ import org.onetwoone.gateway.BatteryLimitService;
 import org.onetwoone.gateway.BatteryWatchdog;
 import org.onetwoone.gateway.DeviceMuteManager;
 import org.onetwoone.gateway.PjsipSipService;
+import org.onetwoone.gateway.R;
 import org.onetwoone.gateway.config.GatewayConfig;
 import org.onetwoone.gateway.core.GatewayStatus;
 
@@ -39,7 +40,8 @@ public class MainViewModel extends AndroidViewModel {
 
     // Service state
     private final MutableLiveData<ServiceState> serviceState = new MutableLiveData<>(new ServiceState());
-    private final MutableLiveData<String> statusText = new MutableLiveData<>("Not connected");
+    private final MutableLiveData<String> statusText = new MutableLiveData<>(
+            getApplication().getString(R.string.status_not_connected));
     private final MutableLiveData<Boolean> isRegistered = new MutableLiveData<>(false);
 
     // Configuration (observed from GatewayConfig)
@@ -57,7 +59,8 @@ public class MainViewModel extends AndroidViewModel {
     private final MutableLiveData<List<TinymixManager.MixerControl>> availableControls = new MutableLiveData<>();
 
     // SIP diagnostics (test call)
-    private final MutableLiveData<String> testReport = new MutableLiveData<>("No test call yet");
+    private final MutableLiveData<String> testReport = new MutableLiveData<>(
+            getApplication().getString(R.string.status_no_test_call));
 
     // Managers
     private final TinymixManager tinymixManager;
@@ -221,7 +224,7 @@ public class MainViewModel extends AndroidViewModel {
         }
 
         bindToService();
-        toastMessage.setValue("Connecting to SIP server...");
+        toastMessage.setValue(getApplication().getString(R.string.toast_connecting));
     }
 
     public void stopService() {
@@ -233,20 +236,20 @@ public class MainViewModel extends AndroidViewModel {
         }
 
         unbindFromService();
-        toastMessage.setValue("Disconnected");
-        statusText.setValue("Service: Stopped");
+        toastMessage.setValue(getApplication().getString(R.string.toast_disconnected));
+        statusText.setValue(getApplication().getString(R.string.status_service_stopped));
     }
 
     public void restartService() {
         Log.d(TAG, "Restarting service");
-        toastMessage.setValue("Restarting...");
+        toastMessage.setValue(getApplication().getString(R.string.toast_restarting));
 
         stopService();
 
         // Wait for PJSIP cleanup
         statusHandler.postDelayed(() -> {
             startService();
-            toastMessage.setValue("Restarted");
+            toastMessage.setValue(getApplication().getString(R.string.toast_restarted));
         }, 2000);
     }
 
@@ -347,7 +350,7 @@ public class MainViewModel extends AndroidViewModel {
      */
     public void startTestCall(String destination, String mode) {
         if (pjsipService == null) {
-            toastMessage.setValue("Service not connected");
+            toastMessage.setValue(getApplication().getString(R.string.toast_service_not_connected));
             return;
         }
 
@@ -356,7 +359,8 @@ public class MainViewModel extends AndroidViewModel {
         config.setTestMode(mode);
 
         pjsipService.startTestCall(destination, mode, 0);
-        toastMessage.setValue("Test call to " + destination + " (" + mode + ")");
+        toastMessage.setValue(
+                getApplication().getString(R.string.toast_test_call, destination, mode));
     }
 
     public void stopTestCall() {
@@ -367,14 +371,15 @@ public class MainViewModel extends AndroidViewModel {
 
     public void setVerboseSipLog(boolean enabled) {
         GatewayConfig.getInstance().setVerboseSipLog(enabled);
-        toastMessage.setValue(enabled
-                ? "Verbose PJSIP logging on (restart service to apply)"
-                : "Verbose PJSIP logging off (restart service to apply)");
+        toastMessage.setValue(getApplication().getString(enabled
+                ? R.string.toast_verbose_sip_log_on
+                : R.string.toast_verbose_sip_log_off));
     }
 
     public void setDtmfRelay(boolean enabled) {
         GatewayConfig.getInstance().setDtmfRelayEnabled(enabled);
-        toastMessage.setValue(enabled ? "DTMF relay on" : "DTMF relay off");
+        toastMessage.setValue(getApplication().getString(
+                enabled ? R.string.toast_dtmf_relay_on : R.string.toast_dtmf_relay_off));
     }
 
     // ========== Configuration ==========
@@ -428,25 +433,21 @@ public class MainViewModel extends AndroidViewModel {
         // Refresh LiveData
         loadConfig();
 
-        toastMessage.setValue("SIP settings saved");
+        toastMessage.setValue(getApplication().getString(R.string.toast_sip_settings_saved));
         Log.d(TAG, "SIP config saved: " + user + "@" + server);
     }
 
     /**
      * What an audio save actually promises, stated precisely (AUDIT H4b).
      *
-     * <p>It used to be a flat "Restart to apply", which was honest when the profile
-     * snapshotted its whole configuration in its constructor. Now the route, the capture and
-     * playback devices and the mute-control list are re-read by
-     * {@code QualcommAudioProfile.setupMixer} on every call, so they take effect on the next
-     * one. Two things still do not, because {@code GsmAudioPort} reads them once and its port
-     * is never replaced ({@code AudioBridgeManager.Wiring}): the sound card, and which SoC
-     * profile is selected. Saying "restart" for everything would now under-claim; saying
-     * "applied" for everything would over-claim, which is the failure H4b is about.
+     * <p>The text, and the reasoning behind every clause of it, moved to
+     * {@code R.string.toast_audio_settings_saved} in GW-40 - the argument about which
+     * settings apply on the next call and which need a restart belongs next to the words
+     * that make the claim. Read the comment above that resource before changing the string.
      */
-    static final String AUDIO_SAVED_TOAST =
-            "Audio settings saved. Route, devices and mute controls apply on the next call; "
-            + "sound card and SoC profile need a restart.";
+    private String audioSavedToast() {
+        return getApplication().getString(R.string.toast_audio_settings_saved);
+    }
 
     public void saveAudioConfig(int card, int capture, int playback, String route,
                                 float txGain, float rxGain, Set<String> muteControls,
@@ -459,7 +460,7 @@ public class MainViewModel extends AndroidViewModel {
         config.setManualMuteControls(manualControls);
 
         loadConfig();
-        toastMessage.setValue(AUDIO_SAVED_TOAST);
+        toastMessage.setValue(audioSavedToast());
         Log.d(TAG, "Audio config saved: card=" + card + ", capture=" + capture +
               ", playback=" + playback + ", route=" + route +
               ", txGain=" + txGain + ", rxGain=" + rxGain +
@@ -473,7 +474,7 @@ public class MainViewModel extends AndroidViewModel {
         GatewayConfig config = GatewayConfig.getInstance();
         config.updateAudioConfig(card, capture, playback, route);
         loadConfig();
-        toastMessage.setValue(AUDIO_SAVED_TOAST);
+        toastMessage.setValue(audioSavedToast());
     }
 
     private void applySavedConfig() {
@@ -524,10 +525,12 @@ public class MainViewModel extends AndroidViewModel {
         if (pjsipService != null) {
             if (enabled) {
                 pjsipService.startWebServer();
-                toastMessage.setValue("Web interface enabled on port 8080");
+                toastMessage.setValue(
+                        getApplication().getString(R.string.toast_web_interface_enabled));
             } else {
                 pjsipService.stopWebServer();
-                toastMessage.setValue("Web interface disabled");
+                toastMessage.setValue(
+                        getApplication().getString(R.string.toast_web_interface_disabled));
             }
         }
 

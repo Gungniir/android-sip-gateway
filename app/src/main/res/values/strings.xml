@@ -1,7 +1,174 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
+<!--
+  GW-40 - every user-facing string in the app, in one place.
+
+  Before this commit there were 4 entries here and 68 literals hardcoded elsewhere:
+  43 android:text and 11 android:hint in activity_main.xml (which contained ZERO @string
+  references for text or hint), 4 in MainActivity and 10 setValue sites in MainViewModel.
+
+  Naming convention - prefix by ROLE, not by screen, because GW-41 is about to move most of
+  these to different screens in wave 2:
+
+    section_   a section header
+    label_     the label of a control or a status field
+    option_    one choice inside a radio group / checkbox / spinner
+    hint_      an EditText hint
+    help_      explanatory text under a control
+    action_    a button
+    status_    a status value the UI shows, including its initial placeholder
+    toast_     a transient message
+    select_    a Spinner dialog prompt (android:prompt)
+
+  Localisation is explicitly out of scope for Phase 4 (PHASE-4-PLAN section 8). Extracting
+  the strings is what makes it possible later; we ship English.
+-->
+<resources xmlns:tools="http://schemas.android.com/tools">
+
     <string name="app_name">GSM-SIP Gateway</string>
+
+    <!-- ==================================================================================
+         Status
+         ================================================================================== -->
+    <string name="label_status">Status:</string>
+    <string name="status_not_started">Not started</string>
+    <string name="status_not_connected">Not connected</string>
+    <string name="status_service_stopped">Service: Stopped</string>
+
+    <string name="label_permissions">Permissions (via root):</string>
+    <string name="status_checking">Checking…</string>
+    <string name="status_no_mixer_controls">No mixer controls found. Check root permissions.</string>
+
+    <!-- ==================================================================================
+         SIP configuration
+         ================================================================================== -->
+    <string name="section_sip_config">SIP Configuration:</string>
+    <string name="hint_sip_server">SIP Server</string>
+    <string name="hint_sip_port">SIP Port</string>
+    <string name="hint_sip_user">SIP Username</string>
+    <string name="hint_sip_password">SIP Password</string>
+    <string name="hint_sip_realm">SIP Realm (empty = any)</string>
+    <string name="option_use_tls">Use TLS (port 5061)</string>
+
+    <!-- SIM1 / SIM2 are the hardware slot names the modem and the PBX use
+         (X-GSM-SIM: 1 or 2). Lint's spell checker reads them as "SIM!", so the three
+         strings that carry them opt out of Typos rather than being reworded. -->
+    <string name="label_gsm_routing">Incoming GSM → SIP routing:</string>
+    <string name="hint_sim1_destination" tools:ignore="Typos">SIM1 → ext</string>
+    <string name="hint_sim2_destination" tools:ignore="Typos">SIM2 → ext</string>
+    <string name="help_sim2_optional" tools:ignore="Typos">Leave SIM2 empty if single-SIM phone</string>
+
+    <string name="label_incoming_mode">Incoming call mode:</string>
+    <string name="option_mode_sip_first">Start SIP → Answer GSM when connected (30s timeout)</string>
+    <string name="option_mode_answer_first">Answer GSM → Start SIP (30s timeout)</string>
+
+    <string name="action_save_settings">Save Settings</string>
+    <string name="action_connect">Connect</string>
+    <string name="action_disconnect">Disconnect</string>
+
+    <!-- ==================================================================================
+         SIP diagnostics
+         ================================================================================== -->
+    <string name="section_sip_diagnostics">SIP Diagnostics:</string>
+    <string name="help_test_call">Places a SIP call with no GSM leg. *43 is the FreePBX echo test.</string>
+    <string name="hint_test_destination">Destination</string>
+    <string name="action_test_call">Test Call</string>
+    <string name="action_hang_up">Hang Up</string>
+    <string name="option_verbose_sip_log">Verbose PJSIP logging (level 5, needs restart)</string>
+    <string name="option_dtmf_relay">Relay DTMF from SIP to GSM (far-end voice menus)</string>
+    <string name="status_no_test_call">No test call yet</string>
+
+    <!-- ==================================================================================
+         Battery
+         ================================================================================== -->
+    <string name="section_battery_limit">Battery Charge Limit:</string>
+    <string name="help_battery_limit">Stop charging at specified level (requires root)</string>
+    <string name="option_battery_limit_60">60%</string>
+    <string name="option_battery_limit_none">100% (no limit)</string>
+
+    <!-- ==================================================================================
+         Audio configuration
+
+         The device numbers and the mixer route are Qualcomm/MediaTek ALSA identifiers, not
+         prose - they stay as values in code and config, never as display strings.
+         ================================================================================== -->
+    <string name="section_audio_config">Audio Configuration:</string>
+    <string name="help_audio_qualcomm">Qualcomm: capture=VOC_REC, playback=Incall_Music</string>
+
+    <string name="label_sound_card">Sound Card:</string>
+    <string name="label_capture_device">Capture Device (GSM→SIP):</string>
+    <string name="label_playback_device">Playback Device (SIP→GSM):</string>
+    <string name="label_mixer_route">Mixer Route:</string>
+
+    <!-- Spinner dialog prompts. These three predate GW-40 and are LIVE: activity_main.xml
+         references them from android:prompt on the capture, playback and mixer spinners.
+         PHASE-4-PLAN section C2 records them as dead because it only counted
+         android:text and android:hint references; they are not. -->
     <string name="select_capture">Select Capture Device (GSM→SIP)</string>
     <string name="select_playback">Select Playback Device (SIP→GSM)</string>
     <string name="select_mixer">Select Mixer Route</string>
+
+    <string name="section_audio_gain">Audio Gain (dB):</string>
+    <string name="label_tx_gain">TX (GSM→SIP)</string>
+    <string name="label_rx_gain">RX (SIP→GSM)</string>
+    <!-- Hints here show the default value that applies when the field is left empty. -->
+    <string name="hint_tx_gain_default">-6</string>
+    <string name="hint_rx_gain_default">0</string>
+
+    <string name="action_save_audio">Save Audio</string>
+    <string name="action_restart">Restart</string>
+
+    <!-- ==================================================================================
+         Device mute preset
+         ================================================================================== -->
+    <string name="section_device_mute">Device Mute Preset:</string>
+    <string name="help_device_mute">Mutes speaker/mic on gateway during calls (enforced every 3s)</string>
+    <string name="label_detected_controls">Detected mixer controls (tap to toggle):</string>
+    <string name="label_manual_controls">Manual controls (comma-separated, for controls not in list):</string>
+    <!-- DEC1 / ADC1 are Qualcomm ALSA mixer control names; the spell checker reads the
+         trailing digit as "!". Same reason as the SIM1/SIM2 opt-out above. -->
+    <string name="hint_manual_controls" tools:ignore="Typos">e.g. DEC1 Volume, EAR_S, ADC1 MUX</string>
+    <string name="help_manual_controls">Use \'Volume\' suffix for INT controls (→0), others are ENUM (→ZERO)</string>
+
+    <!-- ==================================================================================
+         Web interface
+         ================================================================================== -->
+    <string name="label_web_interface">Web Interface (port 8080)</string>
+    <string name="label_web_interface_enabled">Web Interface: http://%1$s:8080</string>
+    <string name="label_web_interface_disabled">Web Interface (disabled)</string>
+
+    <!-- ==================================================================================
+         Transient messages
+         ================================================================================== -->
+    <string name="toast_connecting">Connecting to SIP server…</string>
+    <string name="toast_disconnected">Disconnected</string>
+    <string name="toast_restarting">Restarting…</string>
+    <string name="toast_restarted">Restarted</string>
+    <string name="toast_service_not_connected">Service not connected</string>
+    <string name="toast_test_call">Test call to %1$s (%2$s)</string>
+    <string name="toast_verbose_sip_log_on">Verbose PJSIP logging on (restart service to apply)</string>
+    <string name="toast_verbose_sip_log_off">Verbose PJSIP logging off (restart service to apply)</string>
+    <string name="toast_dtmf_relay_on">DTMF relay on</string>
+    <string name="toast_dtmf_relay_off">DTMF relay off</string>
+    <string name="toast_sip_settings_saved">SIP settings saved</string>
+    <string name="toast_web_interface_enabled">Web interface enabled on port 8080</string>
+    <string name="toast_web_interface_disabled">Web interface disabled</string>
+    <string name="toast_mute_preset">Preset: %1$s</string>
+
+    <!--
+      What an audio save actually promises, stated precisely (AUDIT H4b).
+
+      This used to be a flat "Restart to apply", which was honest when the profile
+      snapshotted its whole configuration in its constructor. Now the route, the capture and
+      playback devices and the mute-control list are re-read by QualcommAudioProfile.
+      setupMixer on every call, so they take effect on the next one. Two things still do
+      not, because GsmAudioPort reads them once and its port is never replaced
+      (AudioBridgeManager.Wiring): the sound card, and which SoC profile is selected. Saying
+      "restart" for everything would now under-claim; saying "applied" for everything would
+      over-claim, which is the failure H4b is about.
+
+      Moved here verbatim from MainViewModel.AUDIO_SAVED_TOAST by GW-40. The reasoning
+      belongs next to the words it is reasoning about.
+    -->
+    <string name="toast_audio_settings_saved">Audio settings saved. Route, devices and mute controls apply on the next call; sound card and SoC profile need a restart.</string>
+
 </resources>
