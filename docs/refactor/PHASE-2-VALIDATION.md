@@ -88,20 +88,37 @@ not count, is what settles the acceptance question.
   known PJSIP codec-lock UPDATE behaviour, working as designed.
 - Zero crashes, zero tombstones, zero main-thread stalls, `errors=0` on every frame counter.
 
+**GW-23a: CLOSED.** `Profile=MediaTek card=0 capture=5@8000/1ch playback=2@48000/1ch
+frame=320B bulkCopy=true` — the fast path is active, and the operator confirmed audio was
+good on every call in the run, both directions. Frame counters ended `captureErr=0,
+playbackErr=0` throughout.
+
+> Getting that line is fiddlier than it looks: it is logged **once per process**, when
+> `AudioBridgeManager` constructs the port. A STOP/START of the *service* does not re-emit it
+> because the process survives, so `am force-stop` is required. Clearing the logcat buffer
+> after the gateway is already running loses it until the next process death.
+
+**E5 across 8 calls: 52.12 s, 3.19 s, 0.00 s, 0.011 s (SIP-initiated) against 0.00 s ×4
+(GSM-initiated).** The spread is the point. Nothing in the code produces "52 seconds" as a
+value — `conf->mutex` is a plain non-FIFO `pthread_mutex`, so the BYE handler waiting in
+`pjmedia_conf_remove_port` is not queued; it re-contends against a callback that re-enters
+every 20 ms and can lose arbitrarily many times. Sometimes it wins immediately, which is why
+half the SIP-initiated hangups were instant. This is a lock-fairness lottery, not a timeout,
+and it is **expected on wave 3** — GW-23b is the fix and is deliberately not landed.
+
 **New finding: H18** — the silent-bridge detector fires on any inbound call whose SIP leg
 rings longer than 12 s, because `BRIDGED` is reached when the INVITE goes out, not when the
 SIP side answers. Detection-only, so no call is harmed, but it pollutes the very counter
 GW-25 §2 designates as the evidence base for promoting the rule to auto-terminating.
 
+The threshold behaviour is now confirmed across 8 calls, and it tracks the ring gap exactly:
+fired on rings of **29.7 s** and **20.6 s**; stayed silent on **9.6 s, 4.3 s, 2.5 s, 2.2 s**.
+Nothing else correlates.
+
 ### NOT covered — still needs a human placing calls
 
 After the 6-call run above, what is still open:
 
-- **GW-23a** — `bulkCopy=true` is **still unconfirmed**. The line is a one-shot logged when
-  `GsmAudioPort` is constructed, which happens lazily on the *first* call of a service
-  lifetime; clearing the logcat buffer after the service was already up loses it. Restart the
-  gateway, place **one** call, then grep `GsmAudioPort: Profile=`. Audio quality is still a
-  judgement only the operator's ears can make.
 - **GW-22** — the graveyard under a longer soak.
 - **GW-21** — the 20-SMS burst, SMS during a bridged call, PBX-down backoff.
 - **lavender** has had no calls at all; the Qualcomm audio path is unexercised. Its B1e
