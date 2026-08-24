@@ -223,13 +223,26 @@ of this.
 A watchdog that kills healthy calls is worse than no watchdog, so run this **before** trying
 to provoke any of the rules.
 
-**Score it from the snapshot, not from logcat.** GW-25 put the counter in the bundle for
-exactly this:
+> **CORRECTION — do not use `GET_STATUS`.** An earlier draft of this section said to score
+> the run from the `GET_STATUS` broadcast. **That broadcast is an unimplemented stub**
+> (`GatewayControlReceiver`: `Log.i(TAG, "GET_STATUS not yet implemented")`). GW-25 did put
+> `watchdog_terminations` and `silent_bridge_episodes` into `GatewayStatus.toBundle()`, but
+> nothing delivers that bundle, so the counters are computed and never surfaced. Filed as
+> **H16** / GW-30. Score from logcat instead.
+
+**Score it from logcat.** Every termination logs at ERROR with an `INVARIANT` prefix, and
+that is the only reachable signal today:
 
 ```
-adb shell am broadcast -p org.onetwoone.gateway -a org.onetwoone.gateway.GET_STATUS
-# watchdog_terminations must be 0; silent_bridge_episodes may be non-zero (detection only)
+adb -s <dev> logcat -c                      # clear before the run
+# ... place the 30 calls ...
+adb -s <dev> logcat -d | grep -c 'INVARIANT'          # must be 0
+adb -s <dev> logcat -d | grep -E 'INVARIANT|Silent bridge'
 ```
+`INVARIANT (AUDIT H9)` is the reverse orphan; a bare `INVARIANT:` is one of the other four
+rules. **Any hit at all is a false positive and a fail** — every one of the 30 calls is a
+healthy call. Silent-bridge lines are detection-only and are not failures, but a *repeating*
+one every 3 s means the once-per-episode latch broke.
 
 1. **30 normal calls of varying length, both directions, zero terminations.** Vary the
    length deliberately — 5 s, 30 s, several minutes — because the max-duration anchor is
