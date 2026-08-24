@@ -35,3 +35,8 @@ crash.log
 !docs/**
 openvpn_configs
 wireguard/
+
+# Agent worktrees and captured device logs: never commit these.
+# Phase 1 lesson - a bare `git add -A` swept 14 worktrees in as embedded git repos.
+.claude/worktrees/
+logs/
