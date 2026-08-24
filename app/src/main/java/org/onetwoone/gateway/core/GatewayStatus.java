@@ -39,7 +39,8 @@ public final class GatewayStatus {
 
     /** What the UI sees before the service has ever published anything. */
     public static final GatewayStatus UNAVAILABLE = new GatewayStatus(
-            false, false, "Not configured", "Idle", "Not initialized", "IDLE", 0L, 0L, 0L);
+            false, false, "Not configured", "Idle", "Not initialized", "IDLE", 0L, 0L,
+            0L, 0L, 0L);
 
     private final boolean running;
     private final boolean sipRegistered;
@@ -59,12 +60,20 @@ public final class GatewayStatus {
      */
     private final long configGeneration;
 
+    /**
+     * Process-wide counts of pjsua2 {@code Call} objects constructed and destroyed. See
+     * {@link #getCallsAlive()}.
+     */
+    private final long callsCreated;
+    private final long callsDeleted;
+
     /** Wall-clock instant this snapshot was taken, for staleness diagnostics. */
     private final long capturedAtWallMs;
 
     GatewayStatus(boolean running, boolean sipRegistered, String sipStatus, String callStatus,
                   String audioStatus, String callState, long gsmCallPlacedAtWallMs,
-                  long configGeneration, long capturedAtWallMs) {
+                  long configGeneration, long callsCreated, long callsDeleted,
+                  long capturedAtWallMs) {
         this.running = running;
         this.sipRegistered = sipRegistered;
         this.sipStatus = sipStatus;
@@ -73,6 +82,8 @@ public final class GatewayStatus {
         this.callState = callState;
         this.gsmCallPlacedAtWallMs = gsmCallPlacedAtWallMs;
         this.configGeneration = configGeneration;
+        this.callsCreated = callsCreated;
+        this.callsDeleted = callsDeleted;
         this.capturedAtWallMs = capturedAtWallMs;
     }
 
@@ -84,13 +95,18 @@ public final class GatewayStatus {
      *
      * @param configGeneration the service's reload counter - a plain value, not a manager
      *                         read, so it is passed in rather than captured here
+     * @param callsCreated     {@code GatewayCall.getCallsCreated()} - process-wide and static,
+     *                         so it is passed in for the same reason as the reload counter
+     * @param callsDeleted     {@code GatewayCall.getCallsDeleted()}
      */
     @ControlThread
     public static GatewayStatus capture(boolean running,
                                         SipAccountManager account,
                                         CallManager calls,
                                         AudioBridgeManager audio,
-                                        long configGeneration) {
+                                        long configGeneration,
+                                        long callsCreated,
+                                        long callsDeleted) {
         return new GatewayStatus(
                 running,
                 account != null && account.isRegistered(),
@@ -100,6 +116,8 @@ public final class GatewayStatus {
                 calls == null ? CallManager.CallState.IDLE.name() : calls.getState().name(),
                 calls == null ? 0L : calls.getGsmCallPlacedAtWallMs(),
                 configGeneration,
+                callsCreated,
+                callsDeleted,
                 System.currentTimeMillis());
     }
 
@@ -160,6 +178,31 @@ public final class GatewayStatus {
         return configGeneration;
     }
 
+    /** Process-wide count of pjsua2 {@code Call} objects constructed. */
+    public long getCallsCreated() {
+        return callsCreated;
+    }
+
+    /** Process-wide count of pjsua2 {@code Call} objects destroyed. */
+    public long getCallsDeleted() {
+        return callsDeleted;
+    }
+
+    /**
+     * How many pjsua2 {@code Call} objects exist right now (AUDIT H7).
+     *
+     * <p>The acceptance number for GW-22's soak: it must equal the number of currently active
+     * calls - 0 or 1 - once the gateway settles, and a value that climbs across a soak means
+     * {@code CallGraveyard} is abandoning calls to the finalizer instead of deleting them.
+     *
+     * <p>Derived rather than snapshotted for the same reason as {@link #isInGracePeriod()}:
+     * both halves come from the same capture, so the difference is consistent, but computing it
+     * here keeps the two raw counts available for a rate.
+     */
+    public long getCallsAlive() {
+        return callsCreated - callsDeleted;
+    }
+
     /**
      * True while the GSM leg is still inside its post-dial grace period.
      *
@@ -194,6 +237,9 @@ public final class GatewayStatus {
         b.putString("call_state", callState);
         b.putBoolean("in_grace_period", isInGracePeriod());
         b.putLong("config_generation", configGeneration);
+        b.putLong("calls_created", callsCreated);
+        b.putLong("calls_deleted", callsDeleted);
+        b.putLong("calls_alive", getCallsAlive());
         b.putLong("captured_at_wall_ms", capturedAtWallMs);
         return b;
     }
@@ -204,6 +250,8 @@ public final class GatewayStatus {
                 + ", sipRegistered=" + sipRegistered
                 + ", configGeneration=" + configGeneration
                 + ", callState=" + callState
+                + ", calls=" + callsCreated + "/" + callsDeleted
+                + " (alive " + getCallsAlive() + ")"
                 + ", sip=" + sipStatus
                 + ", call=" + callStatus
                 + ", audio=" + audioStatus + "}";

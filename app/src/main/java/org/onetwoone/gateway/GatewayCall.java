@@ -3,6 +3,7 @@ package org.onetwoone.gateway;
 import android.os.SystemClock;
 import android.util.Log;
 
+import org.onetwoone.gateway.call.CallGraveyard;
 import org.onetwoone.gateway.sip.Pjsua2Lifetime;
 import org.pjsip.pjsua2.*;
 
@@ -16,8 +17,15 @@ import java.util.concurrent.atomic.AtomicLong;
  * Every value object pulled out of a call - {@link CallInfo} above all - is owned native
  * memory the Java side must release. See {@link Pjsua2Lifetime} for which pjsua2 objects those
  * are and why the finalizer is not good enough.
+ *
+ * <p>The {@code Call} itself is a SWIG <em>director</em> with {@code swigCMemOwn = true} and a
+ * <b>weak</b> director global ref, so this object is collectible and its {@code finalize()}
+ * would run {@code delete_Call} on the FinalizerDaemon thread, which is not registered with
+ * pjlib. {@link CallGraveyard} deletes it deterministically on the control thread instead;
+ * this class implements {@link CallGraveyard.Doomed} for it and counts every creation and
+ * every deletion, whoever performs it.
  */
-public class GatewayCall extends Call {
+public class GatewayCall extends Call implements CallGraveyard.Doomed {
     private static final String TAG = "GatewayCall";
 
     /** pjmedia_stream_dtmf_event_flags - set on the last packet of an RFC4733 event. */
@@ -101,6 +109,25 @@ public class GatewayCall extends Call {
     private final long generation = GENERATIONS.getAndIncrement();
 
     /**
+     * Process-wide counts of {@code Call} objects constructed and destroyed, published in the
+     * status snapshot as {@code callsCreated} / {@code callsDeleted} (AUDIT H7).
+     *
+     * <p>Their difference is the number of {@code Call} objects still alive, which is the one
+     * number that says whether the graveyard is keeping up. It should equal the number of
+     * active calls - 0 or 1 - whenever the gateway is idle.
+     *
+     * <p>{@code callsDeleted} is bumped from the {@link #delete()} override below, so it counts
+     * <em>every</em> deletion, including one performed by the finalizer if {@link CallGraveyard}
+     * ever gives up on a call. That is deliberate: a widening gap and a "Call deleted on thread
+     * FinalizerDaemon" line together are the exact evidence that the deterministic path failed.
+     */
+    private static final AtomicLong CALLS_CREATED = new AtomicLong();
+    private static final AtomicLong CALLS_DELETED = new AtomicLong();
+
+    /** Guards {@link #CALLS_DELETED} against {@code delete()}'s idempotence. Monitor-guarded. */
+    private boolean counted = false;
+
+    /**
      * Constructor for outgoing gateway calls.
      */
     public GatewayCall(SipCallService service, Account account) {
@@ -114,6 +141,7 @@ public class GatewayCall extends Call {
         super(account);
         this.service = service;
         this.owner = owner == null ? Owner.GATEWAY : owner;
+        CALLS_CREATED.incrementAndGet();
     }
 
     /**
@@ -124,6 +152,36 @@ public class GatewayCall extends Call {
         super(account, callId);
         this.service = service;
         this.owner = Owner.GATEWAY;
+        CALLS_CREATED.incrementAndGet();
+    }
+
+    /**
+     * Count the destruction wherever it happens, then destroy.
+     *
+     * <p>{@code Call.delete()} is idempotent and reachable from three directions -
+     * {@link CallGraveyard}, {@code swigDirectorDisconnect()}, and {@code finalize()} on the
+     * FinalizerDaemon thread - so the count is guarded by {@link #counted} and taken under the
+     * same monitor the superclass uses.
+     */
+    @Override
+    public synchronized void delete() {
+        super.delete();
+        if (!counted) {
+            counted = true;
+            long total = CALLS_DELETED.incrementAndGet();
+            Log.i(TAG, "Call deleted on " + Thread.currentThread().getName()
+                    + " (created=" + CALLS_CREATED.get() + " deleted=" + total + ")");
+        }
+    }
+
+    /** Process-wide count of {@code Call} objects constructed. See {@link #CALLS_CREATED}. */
+    public static long getCallsCreated() {
+        return CALLS_CREATED.get();
+    }
+
+    /** Process-wide count of {@code Call} objects destroyed. See {@link #CALLS_CREATED}. */
+    public static long getCallsDeleted() {
+        return CALLS_DELETED.get();
     }
 
     /** Never null, never changes. See {@link Owner}. */

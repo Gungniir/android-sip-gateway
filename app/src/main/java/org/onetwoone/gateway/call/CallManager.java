@@ -71,6 +71,14 @@ public class CallManager {
     private final GsmDtmfSender dtmfSender;
     private final GatewayControlThread control;
 
+    /**
+     * Where finished gateway {@code Call} objects go to be deleted on the control thread
+     * instead of on the FinalizerDaemon. See {@link CallGraveyard} - including why its timing
+     * is a heuristic and what to revert if it misbehaves on hardware. AUDIT H7.
+     */
+    @ControlThread
+    private final CallGraveyard graveyard;
+
     // Current calls. Confined to the control thread: every writer and every reader asserts
     // it. `volatile` is kept deliberately - assertOnControlThread throws only in debug
     // builds, and in release it merely logs, so a stray off-thread read must at least be a
@@ -174,6 +182,32 @@ public class CallManager {
         this.config = config;
         this.control = control;
         this.dtmfSender = dtmfSender;
+        this.graveyard = new CallGraveyard(control);
+    }
+
+    /**
+     * Hand a finished call to the graveyard. Idempotent by identity, so a call that reaches
+     * two burial sites is buried once.
+     *
+     * <p>The caller must already have disposed it and dropped every reference to it. Public
+     * because {@code PjsipSipService} owns one path - an incoming call disposed before it could
+     * be handled - that never reaches this class any other way.
+     */
+    @ControlThread
+    public void buryCall(GatewayCall call, String why) {
+        control.assertOnControlThread("CallManager.buryCall");
+        graveyard.bury(call, why);
+    }
+
+    /**
+     * How many calls the graveyard has deleted deterministically. Visible for testing - the
+     * status snapshot publishes {@code GatewayCall}'s process-wide counters instead, because
+     * those also catch a deletion the finalizer performed, which is the failure this is
+     * watching for.
+     */
+    @ControlThread
+    long getCallsBuried() {
+        return graveyard.getDeletedCount();
     }
 
     /**
@@ -457,6 +491,10 @@ public class CallManager {
         } catch (Exception e) {
             Log.w(TAG, "Error disposing SIP call: " + e.getMessage());
         }
+        // An outgoing call whose makeCall() threw never took a pjsua slot, so its id is still
+        // PJSUA_INVALID_ID from construction and the graveyard will free it on the first
+        // sweep. Before GW-22 nothing ever did.
+        graveyard.bury(call, "outgoing call failed");
     }
 
     /**
@@ -613,10 +651,6 @@ public class CallManager {
                 currentSipCall = null;
             }
 
-            // DON'T delete the call object - PJSIP manages the native lifecycle.
-            // Calling delete() crashes because PJSIP may still reference it.
-            // The call object will be GC'd eventually - the disposed flag prevents callback issues.
-
             // Identity guard (GW-10). The clear above always had one; the teardown below did
             // not. That was survivable only while this callback ran inline on the pjsua
             // worker. Now it arrives by control.post(...), so a DISCONNECTED queued for call
@@ -629,6 +663,16 @@ public class CallManager {
                 Log.d(TAG, "Disconnect is for a call that no longer holds the slot, "
                         + "leaving the current session alone");
             }
+
+            // The call is finished and nothing holds it any more. This used to read "DON'T
+            // delete the call object - PJSIP manages the native lifecycle ... it will be GC'd
+            // eventually", which had it backwards: being GC'd is exactly the problem, because
+            // the finalizer runs delete_Call on a thread pjlib does not know. The graveyard
+            // does the same deletion later, on this thread, and only once pjsua has released
+            // the call slot. AUDIT H7; see CallGraveyard for why that is a heuristic.
+            // Deliberately unguarded by wasCurrent: a rejected incoming call never held the
+            // slot, and it is just as finished.
+            graveyard.bury(call, "DISCONNECTED");
         }
     }
 
@@ -921,8 +965,11 @@ public class CallManager {
             Pjsua2Lifetime.delete(prm);
         }
 
-        // DON'T delete - let PJSIP manage the native object lifecycle
-        // The disposed flag prevents any further callback processing
+        // Nothing else references this call now. It is very likely still holding its pjsua
+        // slot at this instant - the BYE above has only just gone out - so the graveyard will
+        // re-probe until pjsua invalidates the id, and abandon it to the finalizer if that
+        // never happens. AUDIT H7.
+        graveyard.bury(callToDispose, "hangupSipCall");
     }
 
     /**

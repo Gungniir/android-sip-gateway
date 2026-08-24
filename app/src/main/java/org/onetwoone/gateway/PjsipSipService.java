@@ -844,6 +844,8 @@ public class PjsipSipService extends Service implements SipCallService {
         // (a user stop(), the watchdog, a GSM-side hangup) can dispose it.
         if (call.isDisposed()) {
             Log.d(TAG, "Incoming SIP call was disposed before it could be handled");
+            // CallManager never saw it, so nothing else will ever free it (AUDIT H7).
+            callManager.buryCall(call, "incoming call disposed before handling");
             return;
         }
         powerController.wakeScreen();
@@ -1941,7 +1943,7 @@ public class PjsipSipService extends Service implements SipCallService {
     private void publishStatus() {
         control.assertOnControlThread("publishStatus");
         status = GatewayStatus.capture(isRunning, accountManager, callManager, audioBridge,
-                configGeneration);
+                configGeneration, GatewayCall.getCallsCreated(), GatewayCall.getCallsDeleted());
     }
 
     /** The composite the UI shows. Reads the snapshot, never the live managers. */

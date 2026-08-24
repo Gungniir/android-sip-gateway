@@ -699,11 +699,59 @@ nulls it; `onCallState` (`:79`) and `onCallMediaState` (`:97`) do
 `if (service != null) service.…` — TOCTOU. `relayDtmf` (`:158`) gets this right by
 copying to a local; the others don't.
 
-#### H7. pjsua2 objects are never deleted
+#### H7. pjsua2 objects are never deleted — ✅ FIXED (GW-22)
 No `Call.delete()` (deliberate, `CallManager.java:258-260`), no `delete()` on the
 `CallInfo` / `CallMediaInfoVector` / `AudioMedia` values pulled per callback.
 Each call leaks a SWIG director plus several C++ shadow objects. Over days of unattended
 operation this is unbounded.
+
+> **AMENDED by GW-22 on three counts.**
+>
+> - **"Unbounded" is wrong.** Every SWIG proxy's `finalize()` calls `delete()`, so these were
+>   *finalizer-deferred releases*, not permanent leaks. The soak's native-heap slope will be
+>   far flatter than this text implies, and the finding must not be sold on unboundedness. The
+>   real cost is non-determinism: native memory the GC heuristic cannot see, a finalizer queue
+>   growing at ~30 owned objects per completed call, and — for `Call` — a native destructor on
+>   an unregistered thread.
+> - **Half the named objects are not ours.** `CallMediaInfoVector` (`CallInfo.getMedia()`),
+>   `CallMediaInfo` and the `AudioMedia` from `typecastFromMedia` are all constructed
+>   `(ptr, **false**)` — views into something pjsua owns. Deleting them is a no-op at best.
+>   The owned set is `CallInfo`, `AccountInfo`, `AudioMediaVector2`, `ConfPortInfo`,
+>   `StreamInfo`, `StreamStat`, `CodecInfoVector2`, `IntVector` *from `transportEnum()`*, and
+>   anything the Java side constructs.
+> - **The two hottest sites are not in this text.** `GatewayCall.onCallState` takes a `CallInfo`
+>   on *every* SIP state change (~5–6 per call), and `AudioBridgeManager.startBridge` called
+>   `SipDiagnostics.dumpAndLog` unconditionally on every successful wiring — a **production**
+>   path costing ~8 owned objects and ~20 logcat lines per call for a diagnostic. It now asks
+>   `isTransmitting` and dumps only when the answer is wrong.
+>
+> **"It will be GC'd eventually" cuts the opposite way, and that is the headline for `Call`.**
+> `Call(Account)` is constructed with `swigCMemOwn = true` and
+> `director_connect(..., true, true)` — a **weak** global ref. The Java object *is* collectible,
+> so `finalize()` runs `delete_Call` on the **FinalizerDaemon thread, which is not registered
+> with pjlib** — the same thread class behind all eight historical tombstones. The "never
+> delete" policy never prevented deletion; it deferred it to an unpredictable moment on the
+> worst possible thread.
+>
+> **The brief's safety argument for deleting was false and was not built on.** "Callbacks are
+> posted, so the disconnect handler runs after the pjsua worker returned" confuses queue entry
+> with stack unwind; **E5** measured that worker inside `pjsua_media_channel_deinit` for up to
+> 50 s around exactly this point. `call/CallGraveyard` therefore defers the delete onto the
+> control thread (which *is* pjlib-registered) and gates it on the only checkable signal the
+> bindings expose, `Call.getId() == PJSUA_INVALID_ID`. That is **evidence, not proof**, and the
+> class says so: ROADMAP rule 4's "no window" cannot be satisfied here. A call whose id never
+> goes invalid within 60 s is **abandoned to the finalizer, never force-deleted** — refusing to
+> delete is always an option that deleting a live call is not.
+>
+> `GatewayCall` now counts every construction and every destruction, whoever performs it, and
+> `GatewayStatus` publishes them as `callsCreated` / `callsDeleted` (`getCallsAlive()` is the
+> difference). A widening gap plus a `Call deleted on FinalizerDaemon` line is the exact
+> evidence that the deterministic path failed.
+>
+> **Owed on hardware:** the 500-cycle soak, `callsAlive` equal to the number of active calls at
+> the end, and **zero tombstones** — a premature delete presents as a native crash, so the soak
+> is the safety test as much as the leak test. Unmeasured until then. `PjsipLogWriter`'s strong
+> reference is deliberately untouched.
 
 #### H8. `onDestroy` has no null-guards for a partially constructed service — ✅ FIXED (GW-26)
 `PjsipSipService.onDestroy:177` calls `watchdog.stop()`, `reconnection.setEnabled(false)`,

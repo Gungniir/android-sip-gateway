@@ -65,13 +65,20 @@ native heap growth.
 
 ## Acceptance criteria
 
-- [ ] The lifetime rule is documented in `CLAUDE.md`.
-- [ ] Every repeating-path value object (`CallInfo`, `*Vector`, `AudioMedia`,
-      `AudioMediaVector2`) is deleted in a `finally`.
-- [ ] `Call` objects are deleted via a deferred queue on the control thread, never from
-      inside a pjsua callback.
-- [ ] `callsCreated` / `callsDeleted` counters are exposed in the status string.
-- [ ] `PjsipLogWriter`'s strong reference is untouched.
+- [x] The lifetime rule is documented in `CLAUDE.md`, and codified in `sip/Pjsua2Lifetime`.
+- [x] Every repeating-path **owned** value object is deleted in a `finally`. Note the
+      correction in PHASE-2-PLAN §2.3: `CallMediaInfoVector`, `CallMediaInfo` and the
+      `AudioMedia` from `typecastFromMedia` are `(ptr, false)` and are deliberately **not**
+      deleted.
+- [x] `Call` objects are deleted by `call/CallGraveyard` on the control thread, never from
+      inside a pjsua callback — gated on `getId() == PJSUA_INVALID_ID`, which is a labelled
+      heuristic, not the "no window" proof ROADMAP rule 4 asks for.
+- [x] `callsCreated` / `callsDeleted` counters are exposed — as fields on `GatewayStatus`
+      (with `getCallsAlive()`), in `toBundle()` and in `toString()`. Not added to the three-line
+      UI composite, which is unchanged.
+- [x] `PjsipLogWriter`'s strong reference is untouched.
+- [ ] **Owed on hardware:** the 500-cycle soak, `callsAlive` == active calls at the end, and
+      zero tombstones. Unmeasured.
 
 ## Verification
 

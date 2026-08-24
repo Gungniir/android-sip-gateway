@@ -9,6 +9,7 @@ import org.onetwoone.gateway.GatewayAccount;
 import org.onetwoone.gateway.GatewayCall;
 import org.onetwoone.gateway.SipCallService;
 import org.onetwoone.gateway.audio.AudioBridgeManager;
+import org.onetwoone.gateway.call.CallGraveyard;
 import org.onetwoone.gateway.config.GatewayConfig;
 import org.onetwoone.gateway.core.GatewayControlThread;
 import org.onetwoone.gateway.sip.Pjsua2Lifetime;
@@ -96,6 +97,13 @@ public class SipTestCallManager {
      */
     private final GatewayControlThread control;
 
+    /**
+     * The diagnostic call's own graveyard. Separate from {@code CallManager}'s only because
+     * each manager buries the calls it is responsible for; the counters they feed
+     * ({@code GatewayCall.getCallsCreated/Deleted}) are process-wide either way. AUDIT H7.
+     */
+    private final CallGraveyard graveyard;
+
     private final StringBuilder report = new StringBuilder();
 
     /**
@@ -166,6 +174,21 @@ public class SipTestCallManager {
         this.callbackService = callbackService;
         this.mainHandler = mainHandler;
         this.control = control;
+        this.graveyard = new CallGraveyard(control);
+    }
+
+    /**
+     * Hand a finished diagnostic call to the graveyard.
+     *
+     * <p>Always a hop: this manager is main-bound and the graveyard is control-thread state.
+     * Fire-and-forget, like the two BRIDGE-mode calls above - main must never block waiting on
+     * the control thread (plan §3).
+     */
+    private void bury(GatewayCall finished, String why) {
+        if (finished == null) {
+            return;
+        }
+        control.post(() -> graveyard.bury(finished, why));
     }
 
     // ========== Public API (any thread) ==========
@@ -279,6 +302,10 @@ public class SipTestCallManager {
         } catch (Exception e) {
             append("ERROR: makeCall failed: " + e.getMessage());
             Log.e(TAG, "makeCall failed", e);
+            // Nothing else will ever reference this call: the demux runs off its immutable
+            // Owner, and the manager's own field is being cleared here. Before GW-22 it was
+            // simply dropped and left to the finalizer (AUDIT H7).
+            bury(call, "diagnostic dial failed");
             call = null;
             return;
         } finally {
@@ -492,9 +519,12 @@ public class SipTestCallManager {
             Pjsua2Lifetime.delete(prm);
         }
 
-        // Don't delete() the Call - PJSIP owns the native lifecycle (same rule as
-        // CallManager.hangupSipCall). dispose() stops further callbacks.
+        // dispose() stops further callbacks; the graveyard performs the delete() later, on
+        // the control thread, once pjsua has released the call slot. The comment that used to
+        // sit here ("PJSIP owns the native lifecycle") was wrong in the same way
+        // CallManager's was - see CallGraveyard. AUDIT H7.
         current.dispose();
+        bury(current, "test call ended");
         call = null;
         mediaWired = false;
         mediaValid = false;

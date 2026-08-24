@@ -13,11 +13,13 @@ import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
 import org.robolectric.shadows.ShadowLog;
+import org.robolectric.shadows.ShadowLooper;
 
 import org.onetwoone.gateway.GatewayCall;
 import org.pjsip.pjsua2.pjsip_inv_state;
 
 import java.lang.reflect.Method;
+import java.time.Duration;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -28,7 +30,10 @@ import static org.junit.Assert.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.robolectric.Shadows.shadowOf;
 
 /**
  * Unit tests for CallManager: phone-number validation, URI parsing, the outgoing-call
@@ -300,6 +305,50 @@ public class CallManagerTest {
         when(call.isDisposed()).thenAnswer(inv -> disposed.get());
         when(call.isActive()).thenReturn(false);
         return call;
+    }
+
+    /**
+     * GW-22 / AUDIT H7: the burial wiring, end to end, through the real looper.
+     *
+     * <p>{@link CallGraveyard} is unit-tested on its own; what this pins down is that
+     * {@code hangupSipCall} actually hands the call over, and that the sweep the graveyard
+     * schedules really runs on the control thread. The fake reports
+     * {@code PJSUA_INVALID_ID}, i.e. pjsua has released the slot - the case where deletion is
+     * allowed.
+     */
+    @Test
+    public void hangupHandsTheCallToTheGraveyardAndItIsDeletedOnTheControlThread() {
+        ShadowLooper looper = shadowOf(Looper.getMainLooper());
+        GatewayCall call = fakeCall();
+        when(call.getId()).thenReturn(CallGraveyard.PJSUA_INVALID_ID);
+
+        assertTrue(callManager.setOutgoingSipCall(call));
+        callManager.hangupSipCall();
+
+        assertEquals("not deleted from inside hangupSipCall", 0L, callManager.getCallsBuried());
+
+        looper.idleFor(Duration.ofSeconds(5));
+
+        assertEquals(1L, callManager.getCallsBuried());
+        verify(call).delete();
+    }
+
+    /**
+     * The safety half. A call still holding a pjsua slot must not be deleted, however long the
+     * looper runs - deleting one presents as a tombstone, not an exception.
+     */
+    @Test
+    public void aCallStillHoldingItsPjsuaSlotIsNeverDeleted() {
+        ShadowLooper looper = shadowOf(Looper.getMainLooper());
+        GatewayCall call = fakeCall();
+        when(call.getId()).thenReturn(9);
+
+        assertTrue(callManager.setOutgoingSipCall(call));
+        callManager.hangupSipCall();
+        looper.idleFor(Duration.ofSeconds(30));
+
+        assertEquals(0L, callManager.getCallsBuried());
+        verify(call, never()).delete();
     }
 
     private void forceState(CallManager.CallState state) throws Exception {
