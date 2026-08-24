@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GW-41 - diagnostics: the SIP-only test call, its report, the two logging switches, and the
+  root permission status.
+
+  Permissions moved in here from the top of the old screen. They are a commissioning and
+  fault-finding fact, not an at-a-glance one: once a phone is provisioned the block says the
+  same thing forever, and it was occupying the second-most valuable position on the screen.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    style="@style/Widget.Gateway.Panel.Section">
+
+    <LinearLayout
+        android:id="@+id/diagnosticsSectionHeader"
+        style="@style/Widget.Gateway.SectionTitleRow"
+        android:contentDescription="@string/cd_section_toggle">
+
+        <TextView
+            style="@style/Widget.Gateway.SectionTitle"
+            android:text="@string/section_sip_diagnostics"/>
+
+        <TextView
+            android:id="@+id/diagnosticsSectionChevron"
+            style="@style/Widget.Gateway.SectionChevron"
+            android:text="@string/label_section_collapsed"/>
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/diagnosticsSectionBody"
+        style="@style/Widget.Gateway.SectionBody"
+        android:visibility="gone">
+
+        <TextView
+            style="@style/Widget.Gateway.Caption"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/help_test_call"/>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:baselineAligned="false">
+
+            <EditText
+                android:id="@+id/testDestination"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:hint="@string/hint_test_destination"
+                android:inputType="text"
+                android:importantForAutofill="no"/>
+
+            <Spinner
+                android:id="@+id/testModeSpinner"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="@dimen/gw_space_sm"/>
+        </LinearLayout>
+
+        <LinearLayout
+            style="@style/Widget.Gateway.ButtonBar"
+            android:layout_marginTop="@dimen/gw_row_gap">
+
+            <Button
+                android:id="@+id/testCallButton"
+                style="@style/Widget.Gateway.Button"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/action_test_call"/>
+
+            <Button
+                android:id="@+id/testHangupButton"
+                style="@style/Widget.Gateway.Button.Destructive"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="@dimen/gw_space_sm"
+                android:text="@string/action_hang_up"/>
+        </LinearLayout>
+
+        <CheckBox
+            android:id="@+id/verboseSipLogCheckbox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/option_verbose_sip_log"/>
+
+        <CheckBox
+            android:id="@+id/dtmfRelayCheckbox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/option_dtmf_relay"/>
+
+        <TextView
+            android:id="@+id/testReportText"
+            style="@style/Widget.Gateway.Console.Dense"
+            android:layout_marginTop="@dimen/gw_space_sm"
+            android:text="@string/status_no_test_call"/>
+
+        <View style="@style/Widget.Gateway.Divider"/>
+
+        <TextView
+            style="@style/Widget.Gateway.SectionHeader"
+            android:text="@string/label_permissions"/>
+
+        <TextView
+            android:id="@+id/permissionsText"
+            style="@style/Widget.Gateway.Console.Dense"
+            android:text="@string/status_checking"/>
+
+    </LinearLayout>
+</LinearLayout>

@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GW-41 - the two settings that are about the handset rather than about the gateway: the
+  battery charge limit and the web interface.
+
+  The web interface switch is a SwitchMaterial rather than the raw android.widget.Switch the
+  old layout used (lint UseSwitchCompatOrMaterialXml / ...Code, both baselined against that
+  file). GW-40 defined Widget.Gateway.Switch for exactly this swap.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    style="@style/Widget.Gateway.Panel.Section">
+
+    <LinearLayout
+        android:id="@+id/systemSectionHeader"
+        style="@style/Widget.Gateway.SectionTitleRow"
+        android:contentDescription="@string/cd_section_toggle">
+
+        <TextView
+            style="@style/Widget.Gateway.SectionTitle"
+            android:text="@string/section_system"/>
+
+        <TextView
+            android:id="@+id/systemSectionChevron"
+            style="@style/Widget.Gateway.SectionChevron"
+            android:text="@string/label_section_collapsed"/>
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/systemSectionBody"
+        style="@style/Widget.Gateway.SectionBody"
+        android:visibility="gone">
+
+        <TextView
+            style="@style/Widget.Gateway.SectionHeader"
+            android:text="@string/section_battery_limit"/>
+
+        <TextView
+            style="@style/Widget.Gateway.Caption"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/help_battery_limit"/>
+
+        <RadioGroup
+            android:id="@+id/batteryLimitRadioGroup"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <RadioButton
+                android:id="@+id/limit60"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/option_battery_limit_60"/>
+
+            <RadioButton
+                android:id="@+id/limit100"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/option_battery_limit_none"/>
+        </RadioGroup>
+
+        <View style="@style/Widget.Gateway.Divider"/>
+
+        <TextView
+            style="@style/Widget.Gateway.SectionHeader"
+            android:text="@string/label_web_interface"/>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:baselineAligned="false"
+            android:gravity="center_vertical">
+
+            <com.google.android.material.switchmaterial.SwitchMaterial
+                android:id="@+id/webInterfaceSwitch"
+                style="@style/Widget.Gateway.Switch"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"/>
+
+            <TextView
+                android:id="@+id/webInterfaceLabel"
+                style="@style/Widget.Gateway.Body"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="@dimen/gw_space_sm"
+                android:text="@string/label_web_interface"/>
+        </LinearLayout>
+
+    </LinearLayout>
+</LinearLayout>

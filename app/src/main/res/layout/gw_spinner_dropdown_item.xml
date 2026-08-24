@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GW-41 - one row inside an open Spinner popup.
+
+  Same reasoning as gw_spinner_item.xml, and this is the half that actually goes invisible:
+  the popup paints on Widget.Gateway.Spinner's android:popupBackground (gw_surface_variant),
+  while android.R.layout.simple_spinner_dropdown_item takes its text colour from the
+  framework's dropdown item style. Both tokens are named here so the pair cannot drift into
+  white-on-white or black-on-black in either theme.
+-->
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@android:id/text1"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:minHeight="@dimen/gw_touch_target"
+    android:gravity="center_vertical"
+    android:paddingStart="@dimen/gw_space_lg"
+    android:paddingEnd="@dimen/gw_space_lg"
+    android:background="?attr/selectableItemBackground"
+    android:textAppearance="@style/TextAppearance.Gateway.Body"
+    android:textColor="@color/gw_on_surface"/>

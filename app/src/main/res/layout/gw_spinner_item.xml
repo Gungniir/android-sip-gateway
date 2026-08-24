@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GW-41 - the closed state of every Spinner on this screen.
+
+  android.R.layout.simple_spinner_item resolves its colour through the framework's
+  ?android:attr/spinnerItemStyle, which is exactly the indirection behind the "popup
+  blindness" failure class PHASE-4-VALIDATION section 0 names: a spinner that renders its
+  text in a colour inherited from somewhere other than the app's palette, and so goes
+  invisible in exactly one theme. Naming the token here removes the indirection.
+
+  paddingStart is 0 on purpose: the Spinner's own background already insets its content on
+  that side. It is stated rather than omitted so the start/end pair reads as deliberate.
+-->
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@android:id/text1"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:minHeight="@dimen/gw_control_height"
+    android:gravity="center_vertical"
+    android:paddingTop="@dimen/gw_space_sm"
+    android:paddingBottom="@dimen/gw_space_sm"
+    android:paddingStart="0dp"
+    android:paddingEnd="@dimen/gw_space_lg"
+    android:textAppearance="@style/TextAppearance.Gateway.Body"
+    android:textColor="@color/gw_on_surface"
+    android:ellipsize="end"
+    android:singleLine="true"/>

@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GW-41 - SIP account, per-SIM routing, incoming call mode, and the service controls.
+
+  Commissioning lives here: this is the section you open on a phone that has never
+  registered, which is why it is the one that starts expanded.
+
+  Every EditText in this file is guarded by ui/FormGuard against being overwritten while
+  someone is typing into it. The old screen rebound all eight of these from the getSipConfig
+  observer with no guard at all, so a config save from the web interface - which fires that
+  observer through the snapshot's generation counter - threw away the phone-holder's
+  in-progress edit one field at a time.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    style="@style/Widget.Gateway.Panel.Section">
+
+    <LinearLayout
+        android:id="@+id/sipSectionHeader"
+        style="@style/Widget.Gateway.SectionTitleRow"
+        android:contentDescription="@string/cd_section_toggle">
+
+        <TextView
+            style="@style/Widget.Gateway.SectionTitle"
+            android:text="@string/section_sip_config"/>
+
+        <TextView
+            android:id="@+id/sipSectionChevron"
+            style="@style/Widget.Gateway.SectionChevron"
+            android:text="@string/label_section_expanded"/>
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/sipSectionBody"
+        style="@style/Widget.Gateway.SectionBody">
+
+        <EditText
+            android:id="@+id/sipServer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/hint_sip_server"
+            android:inputType="text"
+            android:importantForAutofill="no"/>
+
+        <EditText
+            android:id="@+id/sipPort"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/hint_sip_port"
+            android:inputType="number"
+            android:importantForAutofill="no"/>
+
+        <EditText
+            android:id="@+id/sipUser"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/hint_sip_user"
+            android:inputType="text"
+            android:autofillHints="username"/>
+
+        <EditText
+            android:id="@+id/sipPassword"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/hint_sip_password"
+            android:inputType="textPassword"
+            android:autofillHints="password"/>
+
+        <EditText
+            android:id="@+id/sipRealm"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/hint_sip_realm"
+            android:inputType="text"
+            android:importantForAutofill="no"/>
+
+        <CheckBox
+            android:id="@+id/useTls"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="@dimen/gw_space_xs"
+            android:text="@string/option_use_tls"/>
+
+        <TextView
+            style="@style/Widget.Gateway.FieldLabel"
+            android:text="@string/label_gsm_routing"/>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:baselineAligned="false">
+
+            <EditText
+                android:id="@+id/sim1Destination"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:hint="@string/hint_sim1_destination"
+                android:inputType="text"
+                android:importantForAutofill="no"/>
+
+            <EditText
+                android:id="@+id/sim2Destination"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="@dimen/gw_space_sm"
+                android:hint="@string/hint_sim2_destination"
+                android:inputType="text"
+                android:importantForAutofill="no"/>
+        </LinearLayout>
+
+        <TextView
+            style="@style/Widget.Gateway.Caption"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/help_sim2_optional"/>
+
+        <TextView
+            style="@style/Widget.Gateway.FieldLabel"
+            android:text="@string/label_incoming_mode"/>
+
+        <RadioGroup
+            android:id="@+id/incomingModeRadioGroup"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <RadioButton
+                android:id="@+id/modeSipFirst"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/option_mode_sip_first"/>
+
+            <RadioButton
+                android:id="@+id/modeAnswerFirst"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/option_mode_answer_first"/>
+        </RadioGroup>
+
+        <LinearLayout
+            style="@style/Widget.Gateway.ButtonBar"
+            android:layout_marginTop="@dimen/gw_row_gap">
+
+            <Button
+                android:id="@+id/saveButton"
+                style="@style/Widget.Gateway.Button"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/action_save_settings"/>
+
+            <Button
+                android:id="@+id/connectButton"
+                style="@style/Widget.Gateway.Button.Secondary"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="@dimen/gw_space_sm"
+                android:text="@string/action_connect"/>
+
+            <Button
+                android:id="@+id/disconnectButton"
+                style="@style/Widget.Gateway.Button.Destructive"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="@dimen/gw_space_sm"
+                android:text="@string/action_disconnect"/>
+        </LinearLayout>
+
+    </LinearLayout>
+</LinearLayout>

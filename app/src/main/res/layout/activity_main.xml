@@ -1,565 +1,66 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<!--
+  GW-41 - the status-first main screen.
+
+  What was here: 565 lines, 14 unlabelled groups of stock widgets stacked in declaration
+  order inside twelve nested LinearLayouts and one ScrollView. Title, status, permissions,
+  SIP config, SIM routing, call mode, save/connect/disconnect, SIP diagnostics, battery
+  limit, audio config, gain, mute preset, save-audio/restart, web interface - in that order,
+  with nothing to say where one ended and the next began.
+
+  What it is now: a persistent status header that never scrolls, over four collapsible
+  sections. That shape comes from what the device is (PHASE-4-UI-PLAN section 2) - a rooted
+  phone in a drawer with three jobs: commissioning, at-a-glance health, and diagnostics when
+  something has broken and you are holding the phone. Health is the header, which is why it
+  is pinned; commissioning is the SIP section, which is why it is the one that starts open;
+  diagnostics is one tap away rather than a scroll away.
+
+  Density is deliberate. This is a bench instrument, not a consumer app, and whitespace-heavy
+  styling would put fewer facts in front of someone standing over a phone with a fault.
+
+  Section expansion is view state and lives in MainViewModel, not here and not in
+  MainActivity - see MainViewModel.Section.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/mainRoot"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:padding="16dp">
+    android:orientation="vertical"
+    android:paddingStart="@dimen/gw_screen_margin"
+    android:paddingEnd="@dimen/gw_screen_margin"
+    android:paddingTop="@dimen/gw_space_sm">
 
-    <LinearLayout
+    <include layout="@layout/view_status_header"/>
+
+    <ScrollView
+        android:id="@+id/sectionScroll"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:focusable="true"
-        android:focusableInTouchMode="true">
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:fillViewport="true"
+        android:scrollbarStyle="outsideOverlay">
 
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/app_name"
-            android:textSize="24sp"
-            android:textStyle="bold"
-            android:gravity="center"
-            android:layout_marginBottom="16dp"/>
-
-        <!-- Status -->
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/label_status"
-            android:textStyle="bold"/>
-
-        <TextView
-            android:id="@+id/statusText"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/status_not_started"
-            android:background="#f0f0f0"
-            android:padding="8dp"
-            android:fontFamily="monospace"
-            android:layout_marginBottom="8dp"/>
-
-        <!-- Permissions Status -->
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/label_permissions"
-            android:textStyle="bold"/>
-
-        <TextView
-            android:id="@+id/permissionsText"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/status_checking"
-            android:background="#f0f0f0"
-            android:padding="8dp"
-            android:fontFamily="monospace"
-            android:textSize="10sp"
-            android:layout_marginBottom="16dp"/>
-
-        <!-- SIP Configuration -->
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/section_sip_config"
-            android:textStyle="bold"/>
-
-        <EditText
-            android:id="@+id/sipServer"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="@string/hint_sip_server"
-            android:inputType="text"/>
-
-        <EditText
-            android:id="@+id/sipPort"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="@string/hint_sip_port"
-            android:inputType="number"/>
-
-        <EditText
-            android:id="@+id/sipUser"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="@string/hint_sip_user"
-            android:inputType="text"/>
-
-        <EditText
-            android:id="@+id/sipPassword"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="@string/hint_sip_password"
-            android:inputType="textPassword"/>
-
-        <CheckBox
-            android:id="@+id/useTls"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/option_use_tls"
-            android:layout_marginTop="4dp"/>
-
-        <EditText
-            android:id="@+id/sipRealm"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="@string/hint_sip_realm"
-            android:inputType="text"/>
-
-        <!-- Incoming GSM calls/SMS destination per SIM -->
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/label_gsm_routing"
-            android:layout_marginTop="8dp"/>
-
+        <!-- focusable/focusableInTouchMode so the first EditText does not take focus and
+             raise the keyboard the moment the screen opens; carried over from the old
+             layout, where it was the only piece of deliberate behaviour in the file. -->
         <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal">
-
-            <EditText
-                android:id="@+id/sim1Destination"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:hint="@string/hint_sim1_destination"
-                android:inputType="text"/>
-
-            <EditText
-                android:id="@+id/sim2Destination"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:hint="@string/hint_sim2_destination"
-                android:inputType="text"
-                android:layout_marginStart="8dp"/>
-        </LinearLayout>
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/help_sim2_optional"
-            android:textSize="11sp"
-            android:textColor="#666666"
-            android:layout_marginBottom="8dp"/>
-
-        <!-- Incoming Call Mode -->
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/label_incoming_mode"
-            android:layout_marginTop="8dp"/>
-
-        <RadioGroup
-            android:id="@+id/incomingModeRadioGroup"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginBottom="16dp">
-
-            <RadioButton
-                android:id="@+id/modeSipFirst"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="@string/option_mode_sip_first"
-                android:textSize="13sp"/>
-
-            <RadioButton
-                android:id="@+id/modeAnswerFirst"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="@string/option_mode_answer_first"
-                android:textSize="13sp"/>
-        </RadioGroup>
-
-        <!-- Control Buttons -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginBottom="16dp">
-
-            <Button
-                android:id="@+id/saveButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="@string/action_save_settings"/>
-
-            <Button
-                android:id="@+id/connectButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="@string/action_connect"/>
-
-            <Button
-                android:id="@+id/disconnectButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="@string/action_disconnect"/>
-        </LinearLayout>
-
-        <!-- SIP Diagnostics: test call without a GSM leg -->
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/section_sip_diagnostics"
-            android:textStyle="bold"
-            android:layout_marginTop="8dp"/>
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/help_test_call"
-            android:textSize="11sp"
-            android:textColor="#666666"
-            android:layout_marginBottom="4dp"/>
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginBottom="4dp">
-
-            <EditText
-                android:id="@+id/testDestination"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:hint="@string/hint_test_destination"
-                android:inputType="text"
-                android:importantForAutofill="no"/>
-
-            <Spinner
-                android:id="@+id/testModeSpinner"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"/>
-        </LinearLayout>
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginBottom="4dp">
-
-            <Button
-                android:id="@+id/testCallButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="@string/action_test_call"/>
-
-            <Button
-                android:id="@+id/testHangupButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="@string/action_hang_up"/>
-        </LinearLayout>
-
-        <CheckBox
-            android:id="@+id/verboseSipLogCheckbox"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/option_verbose_sip_log"
-            android:textSize="12sp"/>
-
-        <CheckBox
-            android:id="@+id/dtmfRelayCheckbox"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/option_dtmf_relay"
-            android:textSize="12sp"/>
-
-        <TextView
-            android:id="@+id/testReportText"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/status_no_test_call"
-            android:background="#f0f0f0"
-            android:padding="8dp"
-            android:fontFamily="monospace"
-            android:textSize="9sp"
-            android:textIsSelectable="true"
-            android:layout_marginBottom="16dp"/>
-
-        <!-- Battery Charge Limit -->
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/section_battery_limit"
-            android:textStyle="bold"
-            android:layout_marginTop="8dp"/>
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/help_battery_limit"
-            android:textSize="11sp"
-            android:textColor="#666666"
-            android:layout_marginBottom="4dp"/>
-
-        <RadioGroup
-            android:id="@+id/batteryLimitRadioGroup"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginBottom="16dp">
-
-            <RadioButton
-                android:id="@+id/limit60"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="@string/option_battery_limit_60"/>
-
-            <RadioButton
-                android:id="@+id/limit100"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="@string/option_battery_limit_none"/>
-        </RadioGroup>
-
-        <!-- Audio Configuration -->
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/section_audio_config"
-            android:textStyle="bold"
-            android:layout_marginTop="8dp"/>
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/help_audio_qualcomm"
-            android:textSize="11sp"
-            android:textColor="#666666"
-            android:layout_marginBottom="4dp"/>
-
-        <!-- Sound Card -->
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/label_sound_card"/>
-
-        <Spinner
-            android:id="@+id/cardSpinner"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:spinnerMode="dialog"
-            android:layout_marginBottom="8dp"/>
-
-        <!-- Capture Device -->
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/label_capture_device"/>
-
-        <Spinner
-            android:id="@+id/captureSpinner"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:spinnerMode="dialog"
-            android:prompt="@string/select_capture"
-            android:layout_marginBottom="8dp"/>
-
-        <!-- Playback Device -->
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/label_playback_device"/>
-
-        <Spinner
-            android:id="@+id/playbackSpinner"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:spinnerMode="dialog"
-            android:prompt="@string/select_playback"
-            android:layout_marginBottom="8dp"/>
-
-        <!-- Mixer Route -->
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/label_mixer_route"/>
-
-        <Spinner
-            android:id="@+id/mixerRouteSpinner"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:spinnerMode="dialog"
-            android:prompt="@string/select_mixer"
-            android:layout_marginBottom="16dp"/>
-
-        <!-- Audio Gain -->
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/section_audio_gain"
-            android:textStyle="bold"/>
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginBottom="16dp">
-
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="vertical"
-                android:layout_marginEnd="8dp">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/label_tx_gain"/>
-
-                <EditText
-                    android:id="@+id/txGainEdit"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:inputType="numberDecimal|numberSigned"
-                    android:hint="@string/hint_tx_gain_default"/>
-            </LinearLayout>
-
-            <LinearLayout
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="vertical">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/label_rx_gain"/>
-
-                <EditText
-                    android:id="@+id/rxGainEdit"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:inputType="numberDecimal|numberSigned"
-                    android:hint="@string/hint_rx_gain_default"/>
-            </LinearLayout>
-        </LinearLayout>
-
-        <!-- Device Mute Preset -->
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/section_device_mute"
-            android:textStyle="bold"/>
-
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="@string/help_device_mute"
-            android:textSize="11sp"
-            android:textColor="#666666"
-            android:layout_marginBottom="4dp"/>
-
-        <Spinner
-            android:id="@+id/devicePresetSpinner"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:spinnerMode="dropdown"
-            android:layout_marginBottom="8dp"/>
-
-        <!-- Custom controls (visible only when Custom preset selected) -->
-        <LinearLayout
-            android:id="@+id/customMuteContainer"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:visibility="gone"
-            android:layout_marginBottom="8dp">
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:paddingTop="@dimen/gw_panel_gap"
+            android:paddingBottom="@dimen/gw_space_xxl">
 
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="@string/label_detected_controls"
-                android:textSize="12sp"
-                android:textColor="#666666"
-                android:layout_marginBottom="4dp"/>
+            <include layout="@layout/section_sip"/>
 
-            <LinearLayout
-                android:id="@+id/micMuteCheckboxContainer"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"/>
+            <include layout="@layout/section_audio"/>
 
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="@string/label_manual_controls"
-                android:textSize="12sp"
-                android:textColor="#666666"
-                android:layout_marginTop="8dp"
-                android:layout_marginBottom="4dp"/>
+            <include layout="@layout/section_diagnostics"/>
 
-            <EditText
-                android:id="@+id/manualMuteControls"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:hint="@string/hint_manual_controls"
-                android:inputType="text"
-                android:textSize="13sp"/>
-
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="@string/help_manual_controls"
-                android:textSize="10sp"
-                android:textColor="#999999"/>
+            <include layout="@layout/section_system"/>
 
         </LinearLayout>
+    </ScrollView>
 
-        <!-- Save / Restart buttons at bottom -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:layout_marginTop="8dp"
-            android:layout_marginBottom="16dp">
-
-            <Button
-                android:id="@+id/saveAudioButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="@string/action_save_audio"/>
-
-            <Button
-                android:id="@+id/restartButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="@string/action_restart"/>
-        </LinearLayout>
-
-        <!-- Web Interface Toggle -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical"
-            android:layout_marginBottom="16dp">
-
-            <Switch
-                android:id="@+id/webInterfaceSwitch"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"/>
-
-            <TextView
-                android:id="@+id/webInterfaceLabel"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="@string/label_web_interface"
-                android:layout_marginStart="8dp"/>
-        </LinearLayout>
-
-    </LinearLayout>
-</ScrollView>
+</LinearLayout>

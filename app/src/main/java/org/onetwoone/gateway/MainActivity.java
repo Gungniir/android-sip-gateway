@@ -11,19 +11,24 @@ import android.widget.LinearLayout;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.Spinner;
-import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.lifecycle.ViewModelProvider;
 
+import com.google.android.material.switchmaterial.SwitchMaterial;
+
 import org.onetwoone.gateway.config.GatewayConfig;
+import org.onetwoone.gateway.core.GatewayStatus;
 import org.onetwoone.gateway.ui.AudioDeviceManager;
+import org.onetwoone.gateway.ui.CollapsibleSection;
+import org.onetwoone.gateway.ui.FormGuard;
 import org.onetwoone.gateway.ui.MainViewModel;
-import org.onetwoone.gateway.ui.PermissionManager;
+import org.onetwoone.gateway.ui.StatusHeaderBinder;
 import org.onetwoone.gateway.ui.TinymixManager;
 
+import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -31,22 +36,56 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Main activity for GSM-SIP Gateway.
+ * The gateway's main screen (GW-41).
  *
- * Responsibilities (UI only):
- * - Find views
- * - Setup observers for ViewModel LiveData
- * - Setup click handlers (delegate to ViewModel)
- * - Setup spinners
+ * <h2>What this activity is</h2>
+ *
+ * <p>A view. It finds views, binds them to {@code MainViewModel}'s LiveData, and forwards
+ * gestures back. It holds no gateway state, reads no manager, and - since this wave - reads
+ * no {@code SharedPreferences} either: every configuration value arrives through the
+ * ViewModel, which is the only owner of {@code GatewayConfig} on this path.
+ *
+ * <h2>The shape of the screen</h2>
+ *
+ * <p>A persistent status header over four collapsible sections. The header renders the whole
+ * {@link GatewayStatus} snapshot that GW-45 published and nothing consumed - including the
+ * watchdog findings, which are the reason it exists (see {@link StatusHeaderBinder}).
+ *
+ * <h2>The four hazards this rewrite had to clear (PHASE-4-PLAN §4)</h2>
+ *
+ * <ul>
+ *   <li><b>H-a, hardcoded state colours.</b> {@code setTextColor(0xFF228B22 / 0xFFCC0000)} and
+ *       {@code setTextColor(0xFF999999)} were the app's only state colours, as literal ints in
+ *       Java where {@code res/values-night} could never reach them. They are gone; every
+ *       colour on this screen now comes from the palette, through
+ *       {@link StatusHeaderBinder} or a style.
+ *   <li><b>H-b, unguarded rebinding.</b> See {@link FormGuard}. Every rebindable input on the
+ *       screen goes through it, not just the one field that used to check {@code hasFocus()}.
+ *   <li><b>H-c, toasts through LiveData.</b> {@code getToastMessage()} now carries
+ *       {@code Event<String>} and is consumed once; a replay after a configuration change is
+ *       a no-op instead of a message about something that did not just happen.
+ *   <li><b>H-d, mirrored selection state.</b> {@code selectedCard},
+ *       {@code selectedCaptureDevice}, {@code selectedPlaybackDevice},
+ *       {@code selectedMixerRoute} and the {@code isRefreshing} flag are gone from this class.
+ *       They live in the ViewModel, whose setters are idempotent - which is what makes them
+ *       safe against {@code Spinner.setSelection()}'s asynchronous callback, something no
+ *       flag in an activity could be.
+ * </ul>
  */
 public class MainActivity extends AppCompatActivity {
     private static final String TAG = "GatewayMain";
 
     private MainViewModel viewModel;
 
-    // SIP config views
-    private TextView statusText;
-    private TextView permissionsText;
+    /** H-b: the one thing standing between a remote config save and the operator's typing. */
+    private final FormGuard formGuard = new FormGuard();
+
+    private StatusHeaderBinder statusHeader;
+
+    private final Map<MainViewModel.Section, CollapsibleSection> sections =
+            new EnumMap<>(MainViewModel.Section.class);
+
+    // SIP account and routing
     private EditText sipServerEdit;
     private EditText sipPortEdit;
     private EditText sipUserEdit;
@@ -67,7 +106,8 @@ public class MainActivity extends AppCompatActivity {
     private RadioButton limit60;
     private RadioButton limit100;
 
-    // Audio config
+    // Audio bridge
+    private Spinner socProfileSpinner;
     private Spinner cardSpinner;
     private Spinner captureSpinner;
     private Spinner playbackSpinner;
@@ -82,13 +122,14 @@ public class MainActivity extends AppCompatActivity {
     private LinearLayout customMuteContainer;
     private LinearLayout micMuteCheckboxContainer;
     private EditText manualMuteControlsEdit;
-    private Map<String, CheckBox> decCheckboxes = new HashMap<>();
+    private final Map<String, CheckBox> decCheckboxes = new HashMap<>();
 
     // Web interface
-    private Switch webInterfaceSwitch;
+    private SwitchMaterial webInterfaceSwitch;
     private TextView webInterfaceLabel;
 
-    // SIP diagnostics (test call)
+    // Diagnostics
+    private TextView permissionsText;
     private EditText testDestinationEdit;
     private Spinner testModeSpinner;
     private Button testCallButton;
@@ -96,15 +137,6 @@ public class MainActivity extends AppCompatActivity {
     private CheckBox verboseSipLogCheckbox;
     private CheckBox dtmfRelayCheckbox;
     private TextView testReportText;
-
-    private static final String[] TEST_MODES = {"tone", "loopback", "bridge"};
-
-    // Selected values (for spinners)
-    private int selectedCard = 0;
-    private int selectedCaptureDevice = 0;
-    private int selectedPlaybackDevice = 0;
-    private String selectedMixerRoute = "MultiMedia1";
-    private boolean isRefreshing = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -114,12 +146,11 @@ public class MainActivity extends AppCompatActivity {
         viewModel = new ViewModelProvider(this).get(MainViewModel.class);
 
         findViews();
-        setupObservers();
+        setupSections();
+        setupSpinnerAdapters();
+        setupGuards();
         setupClickHandlers();
-        setupSpinners();
-        setupDevicePresetSpinner();
-        setupWebInterfaceSwitch();
-        setupTestCallControls();
+        setupObservers();
 
         // Initialize permissions via root
         viewModel.initPermissions();
@@ -143,31 +174,31 @@ public class MainActivity extends AppCompatActivity {
         viewModel.unbindFromService();
     }
 
-    // ========== View Setup ==========
+    // ========== View setup ==========
 
     private void findViews() {
-        statusText = findViewById(R.id.statusText);
-        permissionsText = findViewById(R.id.permissionsText);
+        statusHeader = new StatusHeaderBinder(findViewById(R.id.statusHeader));
+
         sipServerEdit = findViewById(R.id.sipServer);
         sipPortEdit = findViewById(R.id.sipPort);
         sipUserEdit = findViewById(R.id.sipUser);
         sipPasswordEdit = findViewById(R.id.sipPassword);
         useTlsCheckbox = findViewById(R.id.useTls);
         sipRealmEdit = findViewById(R.id.sipRealm);
-        saveButton = findViewById(R.id.saveButton);
-        connectButton = findViewById(R.id.connectButton);
-        disconnectButton = findViewById(R.id.disconnectButton);
-
         sim1DestinationEdit = findViewById(R.id.sim1Destination);
         sim2DestinationEdit = findViewById(R.id.sim2Destination);
         incomingModeRadioGroup = findViewById(R.id.incomingModeRadioGroup);
         modeAnswerFirst = findViewById(R.id.modeAnswerFirst);
         modeSipFirst = findViewById(R.id.modeSipFirst);
+        saveButton = findViewById(R.id.saveButton);
+        connectButton = findViewById(R.id.connectButton);
+        disconnectButton = findViewById(R.id.disconnectButton);
 
         batteryLimitRadioGroup = findViewById(R.id.batteryLimitRadioGroup);
         limit60 = findViewById(R.id.limit60);
         limit100 = findViewById(R.id.limit100);
 
+        socProfileSpinner = findViewById(R.id.socProfileSpinner);
         cardSpinner = findViewById(R.id.cardSpinner);
         captureSpinner = findViewById(R.id.captureSpinner);
         playbackSpinner = findViewById(R.id.playbackSpinner);
@@ -185,6 +216,7 @@ public class MainActivity extends AppCompatActivity {
         webInterfaceSwitch = findViewById(R.id.webInterfaceSwitch);
         webInterfaceLabel = findViewById(R.id.webInterfaceLabel);
 
+        permissionsText = findViewById(R.id.permissionsText);
         testDestinationEdit = findViewById(R.id.testDestination);
         testModeSpinner = findViewById(R.id.testModeSpinner);
         testCallButton = findViewById(R.id.testCallButton);
@@ -194,87 +226,78 @@ public class MainActivity extends AppCompatActivity {
         testReportText = findViewById(R.id.testReportText);
     }
 
-    private void setupObservers() {
-        // Service state
-        viewModel.getServiceState().observe(this, state -> {
-            statusText.setText(state.statusMessage);
-            statusText.setTextColor(state.isRegistered ? 0xFF228B22 : 0xFFCC0000);
-            connectButton.setEnabled(!state.isRunning);
-            disconnectButton.setEnabled(state.isRunning);
+    private void setupSections() {
+        attachSection(MainViewModel.Section.SIP, R.id.sipSectionHeader,
+                R.id.sipSectionChevron, R.id.sipSectionBody);
+        attachSection(MainViewModel.Section.AUDIO, R.id.audioSectionHeader,
+                R.id.audioSectionChevron, R.id.audioSectionBody);
+        attachSection(MainViewModel.Section.DIAGNOSTICS, R.id.diagnosticsSectionHeader,
+                R.id.diagnosticsSectionChevron, R.id.diagnosticsSectionBody);
+        attachSection(MainViewModel.Section.SYSTEM, R.id.systemSectionHeader,
+                R.id.systemSectionChevron, R.id.systemSectionBody);
+    }
+
+    private void attachSection(MainViewModel.Section section, int headerId, int chevronId,
+                               int bodyId) {
+        sections.put(section, CollapsibleSection.attach(
+                findViewById(headerId),
+                findViewById(chevronId),
+                findViewById(bodyId),
+                () -> viewModel.toggleSection(section)));
+    }
+
+    /**
+     * Adapters whose contents are fixed. The three device spinners are filled from a root
+     * device scan instead and are populated in {@link #updateAudioSpinners}.
+     */
+    private void setupSpinnerAdapters() {
+        socProfileSpinner.setAdapter(adapter(new String[]{
+                getString(R.string.option_soc_profile_auto),
+                getString(R.string.option_soc_profile_qualcomm),
+                getString(R.string.option_soc_profile_mediatek)}));
+
+        mixerRouteSpinner.setAdapter(adapter(MainViewModel.MIXER_ROUTES));
+        testModeSpinner.setAdapter(adapter(MainViewModel.TEST_MODES));
+        devicePresetSpinner.setAdapter(adapter(DeviceMuteManager.getPresetDescriptions()));
+    }
+
+    /**
+     * H-b, and the compound-button half of it.
+     *
+     * <p>Every rebindable input is registered with the guard here, before any observer can
+     * fire. A {@code CompoundButton} has one listener slot, so the guard owns it and forwards
+     * genuine user changes on; the TLS checkbox passes {@code null} because it is only read
+     * at save time.
+     */
+    private void setupGuards() {
+        formGuard.watch(sipServerEdit);
+        formGuard.watch(sipPortEdit);
+        formGuard.watch(sipUserEdit);
+        formGuard.watch(sipPasswordEdit);
+        formGuard.watch(sipRealmEdit);
+        formGuard.watch(sim1DestinationEdit);
+        formGuard.watch(sim2DestinationEdit);
+        formGuard.watch(txGainEdit);
+        formGuard.watch(rxGainEdit);
+        formGuard.watch(manualMuteControlsEdit);
+        formGuard.watch(testDestinationEdit);
+
+        // TLS is the only one of the four that waits for the Save button, so it is the only
+        // one that stays dirty. The other three write through on change: the instant they
+        // have, there is no unsaved work to protect, and leaving them marked would mean a
+        // later change made on the web interface could never repaint them.
+        formGuard.watch(useTlsCheckbox, null);
+        formGuard.watch(verboseSipLogCheckbox, (button, checked) -> {
+            viewModel.setVerboseSipLog(checked);
+            formGuard.clean(button);
         });
-
-        // SIP config
-        viewModel.getSipConfig().observe(this, config -> {
-            sipServerEdit.setText(config.server);
-            sipPortEdit.setText(String.valueOf(config.port));
-            sipUserEdit.setText(config.user);
-            sipPasswordEdit.setText(config.password);
-            sipRealmEdit.setText(config.realm);
-            useTlsCheckbox.setChecked(config.useTls);
-            sim1DestinationEdit.setText(config.sim1Destination);
-            sim2DestinationEdit.setText(config.sim2Destination);
-
-            if (config.incomingCallMode == GatewayInCallService.MODE_SIP_FIRST) {
-                modeSipFirst.setChecked(true);
-            } else {
-                modeAnswerFirst.setChecked(true);
-            }
+        formGuard.watch(dtmfRelayCheckbox, (button, checked) -> {
+            viewModel.setDtmfRelay(checked);
+            formGuard.clean(button);
         });
-
-        // Audio config
-        viewModel.getAudioConfig().observe(this, config -> {
-            selectedCard = config.card;
-            selectedCaptureDevice = config.captureDevice;
-            selectedPlaybackDevice = config.playbackDevice;
-            selectedMixerRoute = config.multimediaRoute;
-            txGainEdit.setText(String.valueOf(config.txGain));
-            rxGainEdit.setText(String.valueOf(config.rxGain));
-        });
-
-        // Battery limit
-        viewModel.getBatteryLimit().observe(this, limit -> {
-            if (limit >= 100) {
-                limit100.setChecked(true);
-            } else {
-                limit60.setChecked(true);
-            }
-        });
-
-        // Permission state
-        viewModel.getPermissionState().observe(this, state -> {
-            permissionsText.setText(state.toDisplayString());
-        });
-
-        // Audio devices
-        viewModel.getAudioDevices().observe(this, this::updateAudioSpinners);
-
-        // Mute preset
-        viewModel.getShowCustomControls().observe(this, show -> {
-            customMuteContainer.setVisibility(show ? View.VISIBLE : View.GONE);
-        });
-
-        // Manual mute controls text
-        viewModel.getManualMuteControls().observe(this, controls -> {
-            if (controls != null && !manualMuteControlsEdit.hasFocus()) {
-                manualMuteControlsEdit.setText(controls);
-            }
-        });
-
-        // Available mixer controls
-        viewModel.getAvailableControls().observe(this, this::populateMuteCheckboxes);
-
-        // SIP diagnostics report
-        viewModel.getTestReport().observe(this, report -> {
-            if (report != null && !report.isEmpty()) {
-                testReportText.setText(report);
-            }
-        });
-
-        // Toast messages
-        viewModel.getToastMessage().observe(this, msg -> {
-            if (msg != null && !msg.isEmpty()) {
-                Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
-            }
+        formGuard.watch(webInterfaceSwitch, (button, checked) -> {
+            viewModel.setWebInterfaceEnabled(checked);
+            formGuard.clean(button);
         });
     }
 
@@ -285,203 +308,244 @@ public class MainActivity extends AppCompatActivity {
         saveAudioButton.setOnClickListener(v -> saveAudioConfig());
         restartButton.setOnClickListener(v -> viewModel.restartService());
 
-        testCallButton.setOnClickListener(v -> viewModel.startTestCall(
-                testDestinationEdit.getText().toString().trim(),
-                TEST_MODES[testModeSpinner.getSelectedItemPosition()]));
+        testCallButton.setOnClickListener(v -> {
+            viewModel.startTestCall(testDestinationEdit.getText().toString().trim(),
+                    selectedTestMode());
+            // Placing the call persists the destination, so it stops being unsaved work.
+            formGuard.clean(testDestinationEdit);
+        });
         testHangupButton.setOnClickListener(v -> viewModel.stopTestCall());
 
-        // Incoming call mode
+        // Both radio groups write straight through to config, so the binding window matters:
+        // without it, repainting the group from the ViewModel would write the value back as
+        // if a person had picked it.
         incomingModeRadioGroup.setOnCheckedChangeListener((group, checkedId) -> {
-            int mode = (checkedId == R.id.modeSipFirst) ?
-                GatewayInCallService.MODE_SIP_FIRST : GatewayInCallService.MODE_ANSWER_FIRST;
-            GatewayConfig.getInstance().setIncomingCallMode(mode);
+            if (formGuard.isBinding()) {
+                return;
+            }
+            viewModel.setIncomingCallMode(checkedId == R.id.modeSipFirst
+                    ? GatewayInCallService.MODE_SIP_FIRST
+                    : GatewayInCallService.MODE_ANSWER_FIRST);
         });
 
-        // Battery limit
         batteryLimitRadioGroup.setOnCheckedChangeListener((group, checkedId) -> {
-            int limit = (checkedId == R.id.limit100) ? 100 : 60;
-            viewModel.setBatteryLimit(limit);
+            if (formGuard.isBinding()) {
+                return;
+            }
+            viewModel.setBatteryLimit(checkedId == R.id.limit100 ? 100 : 60);
         });
+
+        onSelected(socProfileSpinner, position -> viewModel.setSelectedAudioProfile(
+                MainViewModel.AUDIO_PROFILES[position]));
+
+        onSelected(cardSpinner, viewModel::setSelectedCard);
+
+        onSelected(captureSpinner, position -> {
+            AudioDeviceManager.AudioDevices devices = viewModel.getAudioDevices().getValue();
+            if (devices != null && position < devices.captureDevices.size()) {
+                viewModel.setSelectedCaptureDevice(AudioDeviceManager.parseDeviceNumber(
+                        devices.captureDevices.get(position)));
+            }
+        });
+
+        onSelected(playbackSpinner, position -> {
+            AudioDeviceManager.AudioDevices devices = viewModel.getAudioDevices().getValue();
+            if (devices != null && position < devices.playbackDevices.size()) {
+                viewModel.setSelectedPlaybackDevice(AudioDeviceManager.parseDeviceNumber(
+                        devices.playbackDevices.get(position)));
+            }
+        });
+
+        onSelected(mixerRouteSpinner, position ->
+                viewModel.setSelectedMixerRoute(MainViewModel.MIXER_ROUTES[position]));
+
+        onSelected(devicePresetSpinner, this::onMutePresetSelected);
     }
 
-    private void setupSpinners() {
-        // Card spinner
-        cardSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            @Override
-            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                if (isRefreshing) return;
-                if (selectedCard != position) {
-                    selectedCard = position;
-                    viewModel.getAudioDeviceManager().refreshDevices(position);
-                }
+    // ========== Observers ==========
+
+    private void setupObservers() {
+        // The status surface (GW-45). Both halves render the same header: the snapshot says
+        // what the gateway is doing, and serviceConnected says whether there is anything to
+        // ask - a freshly created service publishes UNAVAILABLE too.
+        viewModel.getGatewayStatus().observe(this, status -> renderStatus());
+        viewModel.getServiceConnected().observe(this, connected -> renderStatus());
+
+        // SIP config. Every field guarded (H-b).
+        viewModel.getSipConfig().observe(this, config -> {
+            if (config == null) {
+                return;
             }
-            @Override
-            public void onNothingSelected(AdapterView<?> parent) {}
+            formGuard.bind(sipServerEdit, config.server);
+            formGuard.bind(sipPortEdit, String.valueOf(config.port));
+            formGuard.bind(sipUserEdit, config.user);
+            formGuard.bind(sipPasswordEdit, config.password);
+            formGuard.bind(sipRealmEdit, config.realm);
+            formGuard.bind(useTlsCheckbox, config.useTls);
+            formGuard.bind(sim1DestinationEdit, config.sim1Destination);
+            formGuard.bind(sim2DestinationEdit, config.sim2Destination);
+
+            final int checkedId = config.incomingCallMode == GatewayInCallService.MODE_SIP_FIRST
+                    ? R.id.modeSipFirst
+                    : R.id.modeAnswerFirst;
+            formGuard.bindQuietly(() -> incomingModeRadioGroup.check(checkedId));
         });
 
-        // Capture spinner
-        captureSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            @Override
-            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                AudioDeviceManager.AudioDevices devices = viewModel.getAudioDevices().getValue();
-                if (devices != null && position < devices.captureDevices.size()) {
-                    selectedCaptureDevice = AudioDeviceManager.parseDeviceNumber(devices.captureDevices.get(position));
-                }
+        // Audio config: the two typed values. The chosen card, devices, route and profile are
+        // separate LiveData now (H-d) and are observed below.
+        viewModel.getAudioConfig().observe(this, config -> {
+            if (config == null) {
+                return;
             }
-            @Override
-            public void onNothingSelected(AdapterView<?> parent) {}
+            formGuard.bind(txGainEdit, String.valueOf(config.txGain));
+            formGuard.bind(rxGainEdit, String.valueOf(config.rxGain));
         });
 
-        // Playback spinner
-        playbackSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            @Override
-            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                AudioDeviceManager.AudioDevices devices = viewModel.getAudioDevices().getValue();
-                if (devices != null && position < devices.playbackDevices.size()) {
-                    selectedPlaybackDevice = AudioDeviceManager.parseDeviceNumber(devices.playbackDevices.get(position));
-                }
+        viewModel.getSelectedAudioProfile().observe(this, profile ->
+                setSpinnerToValue(socProfileSpinner, MainViewModel.AUDIO_PROFILES, profile));
+        viewModel.getSelectedMixerRoute().observe(this, route ->
+                setSpinnerToValue(mixerRouteSpinner, MainViewModel.MIXER_ROUTES, route));
+        viewModel.getSelectedCard().observe(this, card -> applyDeviceSelections());
+        viewModel.getSelectedCaptureDevice().observe(this, device -> applyDeviceSelections());
+        viewModel.getSelectedPlaybackDevice().observe(this, device -> applyDeviceSelections());
+
+        viewModel.getBatteryLimit().observe(this, limit -> {
+            if (limit == null) {
+                return;
             }
-            @Override
-            public void onNothingSelected(AdapterView<?> parent) {}
+            final int checkedId = limit >= 100 ? R.id.limit100 : R.id.limit60;
+            formGuard.bindQuietly(() -> batteryLimitRadioGroup.check(checkedId));
         });
 
-        // Mixer route spinner
-        String[] routes = {"MultiMedia1", "MultiMedia2", "MultiMedia3", "MultiMedia4"};
-        ArrayAdapter<String> routeAdapter = new ArrayAdapter<>(this,
-            android.R.layout.simple_spinner_item, routes);
-        routeAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        mixerRouteSpinner.setAdapter(routeAdapter);
-        mixerRouteSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            @Override
-            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                if (position < routes.length) {
-                    selectedMixerRoute = routes[position];
-                }
+        viewModel.getPermissionState().observe(this, state ->
+                permissionsText.setText(state.toDisplayString()));
+
+        viewModel.getAudioDevices().observe(this, this::updateAudioSpinners);
+
+        viewModel.getShowCustomControls().observe(this, show ->
+                customMuteContainer.setVisibility(
+                        Boolean.TRUE.equals(show) ? View.VISIBLE : View.GONE));
+
+        viewModel.getCurrentMutePreset().observe(this, preset ->
+                setSpinnerToValue(devicePresetSpinner, DeviceMuteManager.getPresetNames(), preset));
+
+        viewModel.getManualMuteControls().observe(this, controls ->
+                formGuard.bind(manualMuteControlsEdit, controls));
+
+        viewModel.getAvailableControls().observe(this, this::populateMuteCheckboxes);
+
+        viewModel.getDiagnosticsConfig().observe(this, config -> {
+            if (config == null) {
+                return;
             }
-            @Override
-            public void onNothingSelected(AdapterView<?> parent) {}
+            formGuard.bind(testDestinationEdit, config.testDestination);
+            setSpinnerToValue(testModeSpinner, MainViewModel.TEST_MODES, config.testMode);
+            formGuard.bind(verboseSipLogCheckbox, config.verboseSipLog);
+            formGuard.bind(dtmfRelayCheckbox, config.dtmfRelay);
         });
-    }
 
-    private void setupDevicePresetSpinner() {
-        String[] presetNames = DeviceMuteManager.getPresetNames();
-        String[] presetDescriptions = DeviceMuteManager.getPresetDescriptions();
+        viewModel.getWebInterfaceEnabled().observe(this, enabled -> {
+            boolean on = Boolean.TRUE.equals(enabled);
+            formGuard.bind(webInterfaceSwitch, on);
+            updateWebInterfaceLabel(on);
+        });
 
-        ArrayAdapter<String> adapter = new ArrayAdapter<>(this,
-            android.R.layout.simple_spinner_item, presetDescriptions);
-        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        devicePresetSpinner.setAdapter(adapter);
-
-        // Load current preset
-        String currentPreset = GatewayConfig.getInstance().getMutePreset();
-        for (int i = 0; i < presetNames.length; i++) {
-            if (presetNames[i].equals(currentPreset)) {
-                devicePresetSpinner.setSelection(i);
-                break;
+        viewModel.getTestReport().observe(this, report -> {
+            if (report != null && !report.isEmpty()) {
+                testReportText.setText(report);
             }
+        });
+
+        for (MainViewModel.Section section : MainViewModel.Section.values()) {
+            CollapsibleSection view = sections.get(section);
+            viewModel.getSectionExpanded(section).observe(this, expanded -> {
+                if (view != null) {
+                    view.setExpanded(Boolean.TRUE.equals(expanded));
+                }
+            });
         }
 
-        devicePresetSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
-            @Override
-            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                if (position < presetNames.length) {
-                    String selectedPreset = presetNames[position];
-                    viewModel.selectMutePreset(selectedPreset);
-                    Toast.makeText(MainActivity.this,
-                            getString(R.string.toast_mute_preset, presetDescriptions[position]),
-                            Toast.LENGTH_SHORT).show();
-                }
+        // H-c. The event is consumed here; a value LiveData replays after a configuration
+        // change arrives already handled and shows nothing.
+        viewModel.getToastMessage().observe(this, event -> {
+            if (event == null) {
+                return;
             }
-            @Override
-            public void onNothingSelected(AdapterView<?> parent) {}
+            String message = event.getContentIfNotHandled();
+            if (message != null && !message.isEmpty()) {
+                Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
+            }
         });
     }
 
-    private void setupWebInterfaceSwitch() {
-        boolean webEnabled = GatewayConfig.getInstance().isWebInterfaceEnabled();
-        webInterfaceSwitch.setChecked(webEnabled);
-        updateWebInterfaceLabel(webEnabled);
+    // ========== Rendering ==========
 
-        webInterfaceSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> {
-            viewModel.setWebInterfaceEnabled(isChecked);
-            updateWebInterfaceLabel(isChecked);
-        });
-    }
-
-    private void setupTestCallControls() {
-        GatewayConfig config = GatewayConfig.getInstance();
-
-        testDestinationEdit.setText(config.getTestDestination());
-
-        ArrayAdapter<String> modeAdapter = new ArrayAdapter<>(this,
-            android.R.layout.simple_spinner_item, TEST_MODES);
-        modeAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        testModeSpinner.setAdapter(modeAdapter);
-
-        String savedMode = config.getTestMode();
-        for (int i = 0; i < TEST_MODES.length; i++) {
-            if (TEST_MODES[i].equals(savedMode)) {
-                testModeSpinner.setSelection(i);
-                break;
-            }
+    /**
+     * Draw the status header from the current snapshot.
+     *
+     * <p>Called on every tick, which is the point: {@code getCallDurationMs()} and
+     * {@code isInGracePeriod()} re-read the clock on every call, so the same unchanged
+     * snapshot has to be re-rendered each second or the screen shows a stopwatch that never
+     * advances. Nothing derived from them is kept here or in the binder.
+     */
+    private void renderStatus() {
+        GatewayStatus status = viewModel.getGatewayStatus().getValue();
+        if (status == null) {
+            status = GatewayStatus.UNAVAILABLE;
         }
+        boolean connected = Boolean.TRUE.equals(viewModel.getServiceConnected().getValue());
 
-        // Set the initial value before wiring the listener so restoring it doesn't
-        // count as a user change.
-        verboseSipLogCheckbox.setChecked(config.isVerboseSipLog());
-        verboseSipLogCheckbox.setOnCheckedChangeListener(
-                (button, checked) -> viewModel.setVerboseSipLog(checked));
+        statusHeader.bind(status, connected);
 
-        dtmfRelayCheckbox.setChecked(config.isDtmfRelayEnabled());
-        dtmfRelayCheckbox.setOnCheckedChangeListener(
-                (button, checked) -> viewModel.setDtmfRelay(checked));
+        connectButton.setEnabled(!status.isRunning());
+        disconnectButton.setEnabled(status.isRunning());
     }
-
-    // ========== UI Updates ==========
 
     private void updateAudioSpinners(AudioDeviceManager.AudioDevices devices) {
-        if (devices == null) return;
-        isRefreshing = true;
+        if (devices == null) {
+            return;
+        }
+        cardSpinner.setAdapter(adapter(devices.cards));
+        captureSpinner.setAdapter(adapter(devices.captureDevices));
+        playbackSpinner.setAdapter(adapter(devices.playbackDevices));
+        applyDeviceSelections();
+    }
 
-        // Card spinner
-        ArrayAdapter<String> cardAdapter = new ArrayAdapter<>(this,
-            android.R.layout.simple_spinner_item, devices.cards);
-        cardAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        cardSpinner.setAdapter(cardAdapter);
-        if (selectedCard < devices.cards.size()) {
-            cardSpinner.setSelection(selectedCard);
+    /**
+     * Move the three device spinners onto the ViewModel's selections.
+     *
+     * <p>No "am I repainting" flag guards this, on purpose. {@code Spinner.setSelection()}
+     * delivers {@code onItemSelected} asynchronously, so any such flag would already have
+     * been cleared by the time the callback ran - which is exactly what the old
+     * {@code isRefreshing} field could not cope with. The listeners call idempotent ViewModel
+     * setters instead, so a callback caused by this method changes nothing.
+     */
+    private void applyDeviceSelections() {
+        AudioDeviceManager.AudioDevices devices = viewModel.getAudioDevices().getValue();
+        if (devices == null) {
+            return;
         }
 
-        // Capture spinner
-        ArrayAdapter<String> captureAdapter = new ArrayAdapter<>(this,
-            android.R.layout.simple_spinner_item, devices.captureDevices);
-        captureAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        captureSpinner.setAdapter(captureAdapter);
-        int captureIndex = AudioDeviceManager.findDeviceIndex(devices.captureDevices, selectedCaptureDevice);
-        if (captureIndex >= 0) {
-            captureSpinner.setSelection(captureIndex);
+        Integer card = viewModel.getSelectedCard().getValue();
+        if (card != null && card >= 0 && card < devices.cards.size()) {
+            cardSpinner.setSelection(card);
         }
 
-        // Playback spinner
-        ArrayAdapter<String> playbackAdapter = new ArrayAdapter<>(this,
-            android.R.layout.simple_spinner_item, devices.playbackDevices);
-        playbackAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        playbackSpinner.setAdapter(playbackAdapter);
-        int playbackIndex = AudioDeviceManager.findDeviceIndex(devices.playbackDevices, selectedPlaybackDevice);
-        if (playbackIndex >= 0) {
-            playbackSpinner.setSelection(playbackIndex);
-        }
-
-        // Route spinner selection
-        String[] routes = {"MultiMedia1", "MultiMedia2", "MultiMedia3", "MultiMedia4"};
-        for (int i = 0; i < routes.length; i++) {
-            if (routes[i].equals(selectedMixerRoute)) {
-                mixerRouteSpinner.setSelection(i);
-                break;
+        Integer capture = viewModel.getSelectedCaptureDevice().getValue();
+        if (capture != null) {
+            int index = AudioDeviceManager.findDeviceIndex(devices.captureDevices, capture);
+            if (index >= 0) {
+                captureSpinner.setSelection(index);
             }
         }
 
-        isRefreshing = false;
+        Integer playback = viewModel.getSelectedPlaybackDevice().getValue();
+        if (playback != null) {
+            int index = AudioDeviceManager.findDeviceIndex(devices.playbackDevices, playback);
+            if (index >= 0) {
+                playbackSpinner.setSelection(index);
+            }
+        }
     }
 
     private void populateMuteCheckboxes(List<TinymixManager.MixerControl> controls) {
@@ -491,33 +555,31 @@ public class MainActivity extends AppCompatActivity {
         if (controls == null || controls.isEmpty()) {
             TextView noControlsText = new TextView(this);
             noControlsText.setText(R.string.status_no_mixer_controls);
-            noControlsText.setTextSize(12);
-            noControlsText.setTextColor(0xFF999999);
+            // H-a: this line was setTextColor(0xFF999999) with setTextSize(12), the third
+            // hardcoded colour on the screen. The Footnote step carries both, from the
+            // palette, and follows values-night.
+            noControlsText.setTextAppearance(R.style.TextAppearance_Gateway_Footnote);
             micMuteCheckboxContainer.addView(noControlsText);
             return;
         }
 
-        Set<String> savedControls = GatewayConfig.getInstance().getMicMuteControls();
+        Set<String> savedControls = selectedMuteControls();
 
         for (TinymixManager.MixerControl control : controls) {
-            CheckBox cb = new CheckBox(this);
-            cb.setText(control.toString());
-            cb.setTextSize(14);
-            cb.setChecked(savedControls.contains(control.name));
+            CheckBox checkBox = new CheckBox(this);
+            checkBox.setText(control.toString());
+            checkBox.setChecked(savedControls.contains(control.name));
+            checkBox.setOnCheckedChangeListener((button, checked) ->
+                    viewModel.toggleMuteControl(control.name, checked));
 
-            cb.setOnCheckedChangeListener((buttonView, isChecked) -> {
-                viewModel.toggleMuteControl(control.name, isChecked);
-            });
-
-            decCheckboxes.put(control.name, cb);
-            micMuteCheckboxContainer.addView(cb);
+            decCheckboxes.put(control.name, checkBox);
+            micMuteCheckboxContainer.addView(checkBox);
         }
     }
 
     private void updateWebInterfaceLabel(boolean enabled) {
         if (enabled) {
-            String ip = getDeviceIp();
-            webInterfaceLabel.setText(getString(R.string.label_web_interface_enabled, ip));
+            webInterfaceLabel.setText(getString(R.string.label_web_interface_enabled, getDeviceIp()));
         } else {
             webInterfaceLabel.setText(R.string.label_web_interface_disabled);
         }
@@ -525,7 +587,8 @@ public class MainActivity extends AppCompatActivity {
 
     private String getDeviceIp() {
         try {
-            java.util.Enumeration<java.net.NetworkInterface> interfaces = java.net.NetworkInterface.getNetworkInterfaces();
+            java.util.Enumeration<java.net.NetworkInterface> interfaces =
+                    java.net.NetworkInterface.getNetworkInterfaces();
             while (interfaces.hasMoreElements()) {
                 java.net.NetworkInterface iface = interfaces.nextElement();
                 java.util.Enumeration<java.net.InetAddress> addresses = iface.getInetAddresses();
@@ -536,15 +599,17 @@ public class MainActivity extends AppCompatActivity {
                     }
                 }
             }
-        } catch (Exception ignored) {}
+        } catch (Exception ignored) {
+            // Falls through to the loopback name below; an unreachable address is better
+            // than a crash on a screen someone is using to fix the network.
+        }
         return "localhost";
     }
 
-    // ========== Save Actions ==========
+    // ========== Save actions ==========
 
     private void saveSipSettings() {
         String server = sipServerEdit.getText().toString();
-        int port = Integer.parseInt(sipPortEdit.getText().toString());
         String user = sipUserEdit.getText().toString();
         String password = sipPasswordEdit.getText().toString();
         String realm = sipRealmEdit.getText().toString();
@@ -552,7 +617,30 @@ public class MainActivity extends AppCompatActivity {
         String sim1Dest = sim1DestinationEdit.getText().toString();
         String sim2Dest = sim2DestinationEdit.getText().toString();
 
-        viewModel.saveSipConfig(server, port, user, password, realm, useTls, sim1Dest, sim2Dest);
+        viewModel.saveSipConfig(server, parsedPort(), user, password, realm, useTls,
+                sim1Dest, sim2Dest);
+
+        // What is on screen is what is persisted now, so the guard has nothing left to
+        // protect: release it, or a later save from the web interface could never repaint
+        // these fields again.
+        formGuard.clean(sipServerEdit, sipPortEdit, sipUserEdit, sipPasswordEdit, sipRealmEdit,
+                useTlsCheckbox, sim1DestinationEdit, sim2DestinationEdit);
+    }
+
+    /**
+     * The port field, or the last published one if it cannot be parsed.
+     *
+     * <p>This used to be a bare {@code Integer.parseInt}, which threw
+     * {@code NumberFormatException} on an empty field - a crash on the Save button of the
+     * commissioning screen, reachable by clearing one box.
+     */
+    private int parsedPort() {
+        try {
+            return Integer.parseInt(sipPortEdit.getText().toString().trim());
+        } catch (NumberFormatException ignored) {
+            MainViewModel.SipConfig config = viewModel.getSipConfig().getValue();
+            return config == null ? GatewayConfig.DEFAULT_SIP_PORT : config.port;
+        }
     }
 
     private void saveAudioConfig() {
@@ -563,20 +651,99 @@ public class MainActivity extends AppCompatActivity {
             }
         }
 
-        // Get manual controls
         String manualControls = manualMuteControlsEdit.getText().toString().trim();
 
-        // Parse gain values
-        float txGain = 0.0f;
-        float rxGain = 0.0f;
-        try {
-            txGain = Float.parseFloat(txGainEdit.getText().toString());
-        } catch (NumberFormatException ignored) {}
-        try {
-            rxGain = Float.parseFloat(rxGainEdit.getText().toString());
-        } catch (NumberFormatException ignored) {}
+        viewModel.saveAudioConfig(parsedGain(txGainEdit), parsedGain(rxGainEdit),
+                muteControls, manualControls);
 
-        viewModel.saveAudioConfig(selectedCard, selectedCaptureDevice, selectedPlaybackDevice,
-            selectedMixerRoute, txGain, rxGain, muteControls, manualControls);
+        formGuard.clean(txGainEdit, rxGainEdit, manualMuteControlsEdit);
+    }
+
+    private static float parsedGain(EditText field) {
+        try {
+            return Float.parseFloat(field.getText().toString().trim());
+        } catch (NumberFormatException ignored) {
+            return 0.0f;
+        }
+    }
+
+    // ========== Small helpers ==========
+
+    private void onMutePresetSelected(int position) {
+        String[] presetNames = DeviceMuteManager.getPresetNames();
+        if (position < 0 || position >= presetNames.length) {
+            return;
+        }
+        String preset = presetNames[position];
+        if (preset.equals(viewModel.getCurrentMutePreset().getValue())) {
+            // A repaint, not a choice. Acting on it would re-save the preset and pop a toast
+            // every time the screen rebound.
+            return;
+        }
+        viewModel.selectMutePreset(preset);
+        Toast.makeText(this,
+                getString(R.string.toast_mute_preset,
+                        DeviceMuteManager.getPresetDescriptions()[position]),
+                Toast.LENGTH_SHORT).show();
+    }
+
+    private String selectedTestMode() {
+        int position = testModeSpinner.getSelectedItemPosition();
+        if (position < 0 || position >= MainViewModel.TEST_MODES.length) {
+            return MainViewModel.TEST_MODES[0];
+        }
+        return MainViewModel.TEST_MODES[position];
+    }
+
+    private Set<String> selectedMuteControls() {
+        MainViewModel.AudioConfig config = viewModel.getAudioConfig().getValue();
+        return config == null ? new HashSet<>() : config.micMuteControls;
+    }
+
+    private ArrayAdapter<String> adapter(String[] items) {
+        ArrayAdapter<String> adapter =
+                new ArrayAdapter<>(this, R.layout.gw_spinner_item, items);
+        adapter.setDropDownViewResource(R.layout.gw_spinner_dropdown_item);
+        return adapter;
+    }
+
+    private ArrayAdapter<String> adapter(List<String> items) {
+        ArrayAdapter<String> adapter =
+                new ArrayAdapter<>(this, R.layout.gw_spinner_item, items);
+        adapter.setDropDownViewResource(R.layout.gw_spinner_dropdown_item);
+        return adapter;
+    }
+
+    /** Move a spinner onto the position holding {@code value}, if it has one. */
+    private static void setSpinnerToValue(Spinner spinner, String[] values, String value) {
+        if (value == null) {
+            return;
+        }
+        for (int i = 0; i < values.length; i++) {
+            if (values[i].equals(value)) {
+                if (spinner.getSelectedItemPosition() != i) {
+                    spinner.setSelection(i);
+                }
+                return;
+            }
+        }
+    }
+
+    /** {@code OnItemSelectedListener} without the two methods nothing on this screen needs. */
+    private interface SelectionHandler {
+        void onSelected(int position);
+    }
+
+    private static void onSelected(Spinner spinner, SelectionHandler handler) {
+        spinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                handler.onSelected(position);
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+            }
+        });
     }
 }

@@ -37,8 +37,7 @@
   GW-41 / GW-42: delete this tools:ignore once the layouts consume the vocabulary. After
   that, an unused token is a real finding - a role nobody needed - and lint should say so.
 -->
-<resources xmlns:tools="http://schemas.android.com/tools"
-           tools:ignore="UnusedResources">
+<resources xmlns:tools="http://schemas.android.com/tools">
 
     <!-- ==================================================================================
          Structure

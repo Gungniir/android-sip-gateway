@@ -3,6 +3,7 @@ package org.onetwoone.gateway.ui;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
@@ -24,6 +25,7 @@ import org.robolectric.annotation.Config;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.HashSet;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -361,50 +363,171 @@ public class MainViewModelTest {
         }
     }
 
-    // ========== GW-45: the deprecated surface stays working ==========
+    // ========== GW-41: what replaced the deprecated surface ==========
 
     /**
-     * Plan §4 GW-45 constraint 2. {@code MainActivity} still observes {@code getServiceState()}
-     * and wave 1 must leave a working app; GW-41 deletes it with the screen that reads it.
+     * The GW-45 deprecation is complete.
+     *
+     * <p>Wave 1 kept {@code getServiceState()}, {@code getStatusText()},
+     * {@code getIsRegistered()}, the {@code ServiceState} POJO and
+     * {@code publishLegacyServiceState()} alive so that {@code MainActivity} still worked
+     * while it was rewritten. GW-41 rewrote it and removed them - which was the plan, and is
+     * the kind of thing that quietly does not happen. Reflection rather than a compile error
+     * because a deleted method cannot be named in source.
      */
     @Test
-    @SuppressWarnings("deprecation")
-    public void theDeprecatedSurfaceStillCarriesTheSameStatus() throws Exception {
-        publishGeneration(0L);
-
-        poll();
-
-        MainViewModel.ServiceState state = viewModel.getServiceState().getValue();
-        assertNotNull(state);
-        assertTrue(state.isRunning);
-        assertTrue(state.isRegistered);
-        assertEquals("SIP: Registered\nCall: GSM<->SIP bridged\nAudio: Bridged",
-                state.statusMessage);
-        assertEquals(state.statusMessage, viewModel.getStatusText().getValue());
-        assertTrue(viewModel.getIsRegistered().getValue());
+    public void thePreGw45StatusSurfaceIsGone() {
+        for (String gone : new String[]{"getServiceState", "getStatusText", "getIsRegistered",
+                "publishLegacyServiceState"}) {
+            for (Method method : MainViewModel.class.getDeclaredMethods()) {
+                assertFalse("MainViewModel." + gone + " should have been deleted by GW-41",
+                        method.getName().equals(gone));
+            }
+        }
+        for (Class<?> nested : MainViewModel.class.getDeclaredClasses()) {
+            assertFalse("MainViewModel.ServiceState should have been deleted by GW-41",
+                    "ServiceState".equals(nested.getSimpleName()));
+        }
+        for (Field field : MainViewModel.class.getDeclaredFields()) {
+            assertFalse("DISCONNECTED_STATUS_TEXT should have been deleted by GW-41",
+                    "DISCONNECTED_STATUS_TEXT".equals(field.getName()));
+        }
     }
 
     /**
-     * The unbound case is the one that could have regressed silently: the old code wrote its
-     * own "Service not connected" line, and {@code UNAVAILABLE.getStatusText()} is a different
-     * string ("SIP: Not configured..."). The deprecated surface has to keep saying what it
-     * said.
+     * Plan §4 hazard H-c. A toast is an event, not a state: the value a {@code LiveData}
+     * replays to a new observer - which is what a configuration change produces - must not
+     * fire a second time.
      */
     @Test
-    @SuppressWarnings("deprecation")
-    public void theDeprecatedSurfaceKeepsItsOwnDisconnectedLine() throws Exception {
-        publishGeneration(0L);
-        poll();
+    public void aToastIsDeliveredOnceEvenIfTheLiveDataReplaysIt() {
+        viewModel.stopService();
 
-        loseTheService();
-        poll();
+        Event<String> event = viewModel.getToastMessage().getValue();
+        assertNotNull("stopService posts a message", event);
+        assertNotNull("the first observer gets it", event.getContentIfNotHandled());
+        assertNull("a replay after a configuration change must be a no-op",
+                event.getContentIfNotHandled());
+        assertTrue(event.isHandled());
+    }
 
-        MainViewModel.ServiceState state = viewModel.getServiceState().getValue();
-        assertNotNull(state);
-        assertFalse(state.isRunning);
-        assertFalse(state.isRegistered);
-        assertEquals(MainViewModel.DISCONNECTED_STATUS_TEXT, state.statusMessage);
-        assertEquals("Service not connected", viewModel.getStatusText().getValue());
-        assertFalse(viewModel.getIsRegistered().getValue());
+    /**
+     * Plan §4 hazard H-d, the half that lives here: the four audio selections
+     * {@code MainActivity} used to mirror are ViewModel state now, seeded from config.
+     *
+     * <p>Idempotence is the load-bearing property. {@code Spinner.setSelection()} delivers
+     * {@code onItemSelected} asynchronously, so a repaint arrives at the listener looking
+     * exactly like a choice; the only defence that works is a setter for which the two are
+     * indistinguishable <em>and harmless</em>.
+     */
+    @Test
+    public void theAudioSelectionsAreSeededFromConfigAndSettingThemAgainIsANoOp() {
+        GatewayConfig.getInstance().updateAudioConfig(1, 5, 2, "MultiMedia3");
+        GatewayConfig.getInstance().setAudioProfile("mediatek");
+
+        MainViewModel fresh = new MainViewModel(app);
+
+        assertEquals(Integer.valueOf(1), fresh.getSelectedCard().getValue());
+        assertEquals(Integer.valueOf(5), fresh.getSelectedCaptureDevice().getValue());
+        assertEquals(Integer.valueOf(2), fresh.getSelectedPlaybackDevice().getValue());
+        assertEquals("MultiMedia3", fresh.getSelectedMixerRoute().getValue());
+        assertEquals("mediatek", fresh.getSelectedAudioProfile().getValue());
+
+        final AtomicInteger deliveries = new AtomicInteger();
+        Observer<Integer> observer = card -> deliveries.incrementAndGet();
+        fresh.getSelectedCard().observeForever(observer);
+        deliveries.set(0);
+        try {
+            fresh.setSelectedCard(1);
+            fresh.setSelectedCard(1);
+            assertEquals("re-selecting the same card must not republish", 0, deliveries.get());
+
+            fresh.setSelectedCard(2);
+            assertEquals(1, deliveries.get());
+        } finally {
+            fresh.getSelectedCard().removeObserver(observer);
+        }
+    }
+
+    /**
+     * GW-41 step 4d, and PHASE-4-PLAN §C8: {@code audio_profile} was settable only from the
+     * web page. It has to survive a save from the phone, which means the audio save path has
+     * to carry it - it was not one of the values the old signature took.
+     */
+    @Test
+    public void savingAudioPersistsTheSocProfile() {
+        viewModel.setSelectedAudioProfile("qualcomm");
+        viewModel.setSelectedCard(1);
+        viewModel.setSelectedCaptureDevice(7);
+        viewModel.setSelectedPlaybackDevice(3);
+        viewModel.setSelectedMixerRoute("MultiMedia2");
+
+        viewModel.saveAudioConfig(-6.0f, 1.5f, new HashSet<>(), "DEC1 Volume");
+
+        GatewayConfig config = GatewayConfig.getInstance();
+        assertEquals("qualcomm", config.getAudioProfile());
+        assertEquals(1, config.getAudioCard());
+        assertEquals(7, config.getCaptureDevice());
+        assertEquals(3, config.getPlaybackDevice());
+        assertEquals("MultiMedia2", config.getMultimediaRoute());
+        assertEquals(-6.0f, config.getTxGain(), 0.001f);
+        assertEquals(1.5f, config.getRxGain(), 0.001f);
+        assertEquals("DEC1 Volume", config.getManualMuteControls());
+    }
+
+    /**
+     * The incoming call mode has no Save button - the radio group writes straight through.
+     * What GW-41 added is that the published {@code SipConfig} moves with it, so the value the
+     * screen was last told is the value that is persisted rather than one reload behind.
+     */
+    @Test
+    public void settingTheIncomingCallModeUpdatesBothConfigAndThePublishedForm() {
+        viewModel.setIncomingCallMode(1);
+
+        assertEquals(1, GatewayConfig.getInstance().getIncomingCallMode());
+        assertEquals(1, viewModel.getSipConfig().getValue().incomingCallMode);
+    }
+
+    /**
+     * Section expansion is view state, and it lives here so that recreating the activity -
+     * which a night-mode switch does - does not close what the operator opened.
+     */
+    @Test
+    public void sectionExpansionIsViewModelStateWithSipOpenFirst() {
+        assertTrue("commissioning is the job you cannot do anywhere else",
+                viewModel.getSectionExpanded(MainViewModel.Section.SIP).getValue());
+        for (MainViewModel.Section section : MainViewModel.Section.values()) {
+            if (section != MainViewModel.Section.SIP) {
+                assertFalse(section + " should start collapsed",
+                        viewModel.getSectionExpanded(section).getValue());
+            }
+        }
+
+        viewModel.toggleSection(MainViewModel.Section.AUDIO);
+        assertTrue(viewModel.getSectionExpanded(MainViewModel.Section.AUDIO).getValue());
+        viewModel.toggleSection(MainViewModel.Section.AUDIO);
+        assertFalse(viewModel.getSectionExpanded(MainViewModel.Section.AUDIO).getValue());
+    }
+
+    /**
+     * The diagnostics settings used to be read straight out of {@code GatewayConfig} by the
+     * activity, once, at {@code onCreate}. Publishing them is what puts them on the same
+     * config-generation reload path as everything else.
+     */
+    @Test
+    public void theDiagnosticsSettingsArePublished() {
+        GatewayConfig.getInstance().setTestDestination("*97");
+        GatewayConfig.getInstance().setTestMode("bridge");
+        GatewayConfig.getInstance().setVerboseSipLog(true);
+        GatewayConfig.getInstance().setDtmfRelayEnabled(true);
+
+        MainViewModel fresh = new MainViewModel(app);
+
+        MainViewModel.DiagnosticsConfig diagnostics = fresh.getDiagnosticsConfig().getValue();
+        assertNotNull(diagnostics);
+        assertEquals("*97", diagnostics.testDestination);
+        assertEquals("bridge", diagnostics.testMode);
+        assertTrue(diagnostics.verboseSipLog);
+        assertTrue(diagnostics.dtmfRelay);
     }
 }

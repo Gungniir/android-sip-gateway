@@ -37,8 +37,7 @@
   oversight - and it is why the DAY palette is the one that had to be got right first.
   =======================================================================================
 -->
-<resources xmlns:tools="http://schemas.android.com/tools"
-           tools:ignore="UnusedResources">
+<resources xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Structure. Near-black rather than grey: this is a device read in a dim room, and
          the state colours need somewhere dark to sit. -->

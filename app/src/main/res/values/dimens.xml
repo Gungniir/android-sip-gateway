@@ -19,8 +19,7 @@
   Sizes are tuned for density, not comfort: this is an appliance console read at arm's
   length, and a whitespace-heavy consumer rhythm would fit less of the machine on screen.
 -->
-<resources xmlns:tools="http://schemas.android.com/tools"
-           tools:ignore="UnusedResources">
+<resources xmlns:tools="http://schemas.android.com/tools">
 
     <!-- ==================================================================================
          Spacing - 4dp grid

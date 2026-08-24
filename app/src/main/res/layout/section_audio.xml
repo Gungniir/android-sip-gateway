@@ -1,0 +1,235 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GW-41 - the audio bridge: SoC profile, ALSA card and devices, mixer route, gain, and the
+  device mute preset.
+
+  The SoC profile spinner is new (PHASE-4-PLAN section C8). audio_profile was settable only
+  from the web page, on a device whose entire purpose is a SoC-specific audio tap - so on a
+  phone with no network route to its own web server there was no way to pick it at all.
+  GatewayConfig already owned the key and both surfaces already read it; this is the control
+  and nothing else.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    style="@style/Widget.Gateway.Panel.Section">
+
+    <LinearLayout
+        android:id="@+id/audioSectionHeader"
+        style="@style/Widget.Gateway.SectionTitleRow"
+        android:contentDescription="@string/cd_section_toggle">
+
+        <TextView
+            style="@style/Widget.Gateway.SectionTitle"
+            android:text="@string/section_audio_config"/>
+
+        <TextView
+            android:id="@+id/audioSectionChevron"
+            style="@style/Widget.Gateway.SectionChevron"
+            android:text="@string/label_section_collapsed"/>
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/audioSectionBody"
+        style="@style/Widget.Gateway.SectionBody"
+        android:visibility="gone">
+
+        <TextView
+            style="@style/Widget.Gateway.Caption"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/help_audio_qualcomm"/>
+
+        <TextView
+            style="@style/Widget.Gateway.FieldLabel"
+            android:text="@string/label_soc_profile"/>
+
+        <Spinner
+            android:id="@+id/socProfileSpinner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:spinnerMode="dialog"
+            android:prompt="@string/select_soc_profile"/>
+
+        <TextView
+            style="@style/Widget.Gateway.Caption"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/help_soc_profile"/>
+
+        <TextView
+            style="@style/Widget.Gateway.FieldLabel"
+            android:text="@string/label_sound_card"/>
+
+        <Spinner
+            android:id="@+id/cardSpinner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:spinnerMode="dialog"/>
+
+        <TextView
+            style="@style/Widget.Gateway.FieldLabel"
+            android:text="@string/label_capture_device"/>
+
+        <Spinner
+            android:id="@+id/captureSpinner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:spinnerMode="dialog"
+            android:prompt="@string/select_capture"/>
+
+        <TextView
+            style="@style/Widget.Gateway.FieldLabel"
+            android:text="@string/label_playback_device"/>
+
+        <Spinner
+            android:id="@+id/playbackSpinner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:spinnerMode="dialog"
+            android:prompt="@string/select_playback"/>
+
+        <TextView
+            style="@style/Widget.Gateway.FieldLabel"
+            android:text="@string/label_mixer_route"/>
+
+        <Spinner
+            android:id="@+id/mixerRouteSpinner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:spinnerMode="dialog"
+            android:prompt="@string/select_mixer"/>
+
+        <View style="@style/Widget.Gateway.Divider"/>
+
+        <TextView
+            style="@style/Widget.Gateway.SectionHeader"
+            android:text="@string/section_audio_gain"/>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:baselineAligned="false">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical"
+                android:layout_marginEnd="@dimen/gw_space_sm">
+
+                <TextView
+                    style="@style/Widget.Gateway.Label"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/label_tx_gain"/>
+
+                <EditText
+                    android:id="@+id/txGainEdit"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="@string/hint_tx_gain_default"
+                    android:inputType="numberDecimal|numberSigned"
+                    android:importantForAutofill="no"/>
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    style="@style/Widget.Gateway.Label"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/label_rx_gain"/>
+
+                <EditText
+                    android:id="@+id/rxGainEdit"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:hint="@string/hint_rx_gain_default"
+                    android:inputType="numberDecimal|numberSigned"
+                    android:importantForAutofill="no"/>
+            </LinearLayout>
+        </LinearLayout>
+
+        <View style="@style/Widget.Gateway.Divider"/>
+
+        <TextView
+            style="@style/Widget.Gateway.SectionHeader"
+            android:text="@string/section_device_mute"/>
+
+        <TextView
+            style="@style/Widget.Gateway.Caption"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/help_device_mute"/>
+
+        <Spinner
+            android:id="@+id/devicePresetSpinner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:spinnerMode="dropdown"/>
+
+        <!-- Visible only under the "custom" preset. -->
+        <LinearLayout
+            android:id="@+id/customMuteContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <TextView
+                style="@style/Widget.Gateway.FieldLabel"
+                android:text="@string/label_detected_controls"/>
+
+            <LinearLayout
+                android:id="@+id/micMuteCheckboxContainer"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"/>
+
+            <TextView
+                style="@style/Widget.Gateway.FieldLabel"
+                android:text="@string/label_manual_controls"/>
+
+            <EditText
+                android:id="@+id/manualMuteControls"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="@string/hint_manual_controls"
+                android:inputType="text"
+                android:importantForAutofill="no"/>
+
+            <TextView
+                style="@style/Widget.Gateway.Footnote"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="@string/help_manual_controls"/>
+        </LinearLayout>
+
+        <LinearLayout
+            style="@style/Widget.Gateway.ButtonBar"
+            android:layout_marginTop="@dimen/gw_space_xl">
+
+            <Button
+                android:id="@+id/saveAudioButton"
+                style="@style/Widget.Gateway.Button"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/action_save_audio"/>
+
+            <Button
+                android:id="@+id/restartButton"
+                style="@style/Widget.Gateway.Button.Destructive"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="@dimen/gw_space_sm"
+                android:text="@string/action_restart"/>
+        </LinearLayout>
+
+    </LinearLayout>
+</LinearLayout>
