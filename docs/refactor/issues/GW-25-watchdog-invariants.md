@@ -69,13 +69,39 @@ held wake lock can all persist indefinitely if a state transition is missed.
 
 ## Acceptance criteria
 
-- [ ] Both orphan directions are detected and terminated, respecting the grace period.
-- [ ] A bridged-but-silent call is detected and logged with a full `SipDiagnostics` dump;
-      it does not auto-terminate in the initial version.
-- [ ] All four hard deadlines exist, each with an error-level log naming the invariant.
-- [ ] Watchdog findings appear in the status string.
-- [ ] No dependence on `lastPhoneState`.
-- [ ] `WATCHDOG_INTERVAL_MS` (3 s, `GatewayConfig.java:23`) unchanged.
+- [x] Both orphan directions are detected and terminated, respecting the grace period —
+      **and, on the inbound direction, a 45 s dwell, because the grace period does not
+      exist there.** `gsmCallPlacedTime` is assigned only by `placeGsmCall()`, so
+      `isInGracePeriod()` is permanently false for the whole GSM→SIP direction. The dwell
+      outlasts both mechanisms that are supposed to act first (the ~20 s SIP retry chain
+      and the 30 s `INCOMING_TIMEOUT_MS`).
+- [x] A bridged-but-silent call is detected and logged with a `SipDiagnostics` dump; it does
+      not auto-terminate. The dump is **latched to once per episode** — at a 3 s tick, one
+      per tick would be ~1200 an hour.
+- [x] ~~All four~~ **The two that were missing.** The mute lease (4 h, GW-02) and
+      charging-disabled (12 h, GW-05) already existed with error logs and were not rebuilt.
+      Max call duration (2 h) is new. **TERMINATING dwell is logged only, and that is the
+      honest answer:** `terminateAllCalls()` walks in and out of that state synchronously
+      with no suspension point, `transition()` is private, and there is no API to force
+      `TERMINATING → IDLE`. There is no machinery to build for a state that cannot stick.
+- [x] Watchdog findings appear in the status — as `GatewayStatus.WatchdogFindings`, which
+      also flattens into `GET_STATUS`'s bundle. Nothing time-derived is frozen.
+- [x] No dependence on `lastPhoneState` (already true after GW-13; still true).
+- [x] `WATCHDOG_INTERVAL_MS` (3 s) unchanged.
+- [ ] **30 normal calls, zero watchdog terminations.** Needs hardware. Score it from
+      `GET_STATUS`'s `watchdog_terminations`, which is in the bundle for exactly this.
+- [ ] Silent-bridge detector fires on a deliberately broken bridge. Needs hardware.
+
+## What shipped that the brief did not ask for
+
+**A transient `InCallService` unbind is not an orphan.** `getInstance() == null` reads as
+"no GSM leg" by design, so an unbind was indistinguishable from a real orphan and would have
+terminated a live call because a *Service* was rebound. The orphan rules now skip that tick;
+the max-duration fail-safe still runs, so a permanently unbound service cannot park a call
+forever. The instance is resolved **once** per tick — resolving it twice would put an unbind
+between the two reads, which is the same false positive by another route. `isGsmLegLive()`
+was removed because it folded "unbound" into "no leg", which is precisely the distinction
+the tick has to make.
 
 ## Verification
 

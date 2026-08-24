@@ -336,6 +336,23 @@ public class GatewayInCallService extends InCallService {
             } catch (Exception e) {
                 Log.e(TAG, "Failed to answer GSM call: " + e.getMessage(), e);
                 cancelIncomingTimeout();
+                // AUDIT H9b. Returning here used to leave the leg tracked in currentCall with
+                // no SIP call ever started AND no timeout left to hang it up - so it rang
+                // until the network gave up, and nothing in the app could see it: the SIP
+                // retry chain was never entered, and the watchdog's rules key off
+                // currentGsmCallId, which only STATE_ACTIVE sets. Hang the leg up here, on the
+                // call we were handed rather than on the field, so a racing onCallRemoved
+                // cannot make us disconnect a different one.
+                try {
+                    int state = call.getState();
+                    if (state != Call.STATE_DISCONNECTED && state != Call.STATE_DISCONNECTING) {
+                        call.disconnect();
+                        Log.e(TAG, "GSM leg disconnected after answer() failed (AUDIT H9b)");
+                    }
+                } catch (Exception disconnectFailed) {
+                    Log.e(TAG, "Failed to disconnect the unanswerable GSM leg: "
+                            + disconnectFailed.getMessage(), disconnectFailed);
+                }
                 return;
             }
 

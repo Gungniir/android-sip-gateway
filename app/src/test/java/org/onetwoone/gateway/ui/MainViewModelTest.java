@@ -65,15 +65,18 @@ public class MainViewModelTest {
 
     /** Publish a snapshot with the given reload counter, as {@code publishStatus()} would. */
     private void publishGeneration(long generation) throws Exception {
-        // gsmCallPlacedAtWallMs, configGeneration, callsCreated, callsDeleted, capturedAt.
-        // The two call counters (GW-22) are irrelevant here; only the reload counter is.
+        // gsmCallPlacedAtWallMs, configGeneration, callsCreated, callsDeleted, watchdog,
+        // capturedAt. The call counters (GW-22) and the watchdog findings (GW-25) are
+        // irrelevant here; only the reload counter is.
         Constructor<GatewayStatus> ctor = GatewayStatus.class.getDeclaredConstructor(
                 boolean.class, boolean.class, String.class, String.class, String.class,
-                String.class, long.class, long.class, long.class, long.class, long.class);
+                String.class, long.class, long.class, long.class, long.class,
+                GatewayStatus.WatchdogFindings.class, long.class);
         ctor.setAccessible(true);
         GatewayStatus snapshot = ctor.newInstance(
                 true, true, "Registered", "Idle", "Not initialized", "IDLE",
-                0L, generation, 0L, 0L, System.currentTimeMillis());
+                0L, generation, 0L, 0L, GatewayStatus.WatchdogFindings.NONE,
+                System.currentTimeMillis());
 
         Field statusField = PjsipSipService.class.getDeclaredField("status");
         statusField.setAccessible(true);

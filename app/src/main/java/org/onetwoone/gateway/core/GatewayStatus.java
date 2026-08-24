@@ -40,7 +40,79 @@ public final class GatewayStatus {
     /** What the UI sees before the service has ever published anything. */
     public static final GatewayStatus UNAVAILABLE = new GatewayStatus(
             false, false, "Not configured", "Idle", "Not initialized", "IDLE", 0L, 0L,
-            0L, 0L, 0L);
+            0L, 0L, WatchdogFindings.NONE, 0L);
+
+    /**
+     * What the watchdog has found, as raw values (GW-25 §8).
+     *
+     * <p>Built on the control thread by {@code PjsipSipService} and handed to
+     * {@link #capture} the way {@code configGeneration} is: it is the watchdog's own
+     * bookkeeping, not a manager read, so it is passed in rather than pulled out of a
+     * manager here.
+     *
+     * <p><b>Nothing in here is time-derived.</b> {@link #getCallUpSinceWallMs()} is the raw
+     * instant a call became visible to the watchdog; the duration is derived from the clock
+     * by {@link GatewayStatus#getCallDurationMs()} on every read. Freezing "call is over the
+     * two-hour deadline" into a boolean would be plan §2.7 trap 1 all over again.
+     */
+    public static final class WatchdogFindings {
+
+        /** No watchdog has run yet - what {@link GatewayStatus#UNAVAILABLE} carries. */
+        public static final WatchdogFindings NONE =
+                new WatchdogFindings(0L, 0L, 0L, "", 0L);
+
+        private final long callUpSinceWallMs;
+        private final long terminations;
+        private final long silentBridgeEpisodes;
+        private final String lastFinding;
+        private final long lastFindingAtWallMs;
+
+        public WatchdogFindings(long callUpSinceWallMs, long terminations,
+                                long silentBridgeEpisodes, String lastFinding,
+                                long lastFindingAtWallMs) {
+            this.callUpSinceWallMs = callUpSinceWallMs;
+            this.terminations = terminations;
+            this.silentBridgeEpisodes = silentBridgeEpisodes;
+            this.lastFinding = lastFinding == null ? "" : lastFinding;
+            this.lastFindingAtWallMs = lastFindingAtWallMs;
+        }
+
+        /** Wall-clock instant a call first became visible to the watchdog, or 0. */
+        public long getCallUpSinceWallMs() {
+            return callUpSinceWallMs;
+        }
+
+        /**
+         * How many calls the watchdog has torn down since the gateway started.
+         *
+         * <p>The acceptance number for GW-25's false-positive run: thirty normal calls of
+         * varying length must leave this at <b>zero</b>. It is here rather than only in
+         * logcat precisely so that run can be scored from {@code GET_STATUS}.
+         */
+        public long getTerminations() {
+            return terminations;
+        }
+
+        /**
+         * How many bridged-but-silent episodes have been diagnosed. Detection only - the
+         * watchdog never terminates on this signal (GW-25 §5), so a non-zero count here with
+         * {@link #getTerminations()} still at zero is exactly the evidence the brief asks to
+         * collect before deciding whether to act on it.
+         */
+        public long getSilentBridgeEpisodes() {
+            return silentBridgeEpisodes;
+        }
+
+        /** The last invariant violation the watchdog logged, or "" if there has been none. */
+        public String getLastFinding() {
+            return lastFinding;
+        }
+
+        /** Wall-clock instant of {@link #getLastFinding()}, or 0. */
+        public long getLastFindingAtWallMs() {
+            return lastFindingAtWallMs;
+        }
+    }
 
     private final boolean running;
     private final boolean sipRegistered;
@@ -67,13 +139,16 @@ public final class GatewayStatus {
     private final long callsCreated;
     private final long callsDeleted;
 
+    /** What the watchdog has found. Never null - {@link WatchdogFindings#NONE} instead. */
+    private final WatchdogFindings watchdog;
+
     /** Wall-clock instant this snapshot was taken, for staleness diagnostics. */
     private final long capturedAtWallMs;
 
     GatewayStatus(boolean running, boolean sipRegistered, String sipStatus, String callStatus,
                   String audioStatus, String callState, long gsmCallPlacedAtWallMs,
                   long configGeneration, long callsCreated, long callsDeleted,
-                  long capturedAtWallMs) {
+                  WatchdogFindings watchdog, long capturedAtWallMs) {
         this.running = running;
         this.sipRegistered = sipRegistered;
         this.sipStatus = sipStatus;
@@ -84,6 +159,7 @@ public final class GatewayStatus {
         this.configGeneration = configGeneration;
         this.callsCreated = callsCreated;
         this.callsDeleted = callsDeleted;
+        this.watchdog = watchdog == null ? WatchdogFindings.NONE : watchdog;
         this.capturedAtWallMs = capturedAtWallMs;
     }
 
@@ -98,6 +174,9 @@ public final class GatewayStatus {
      * @param callsCreated     {@code GatewayCall.getCallsCreated()} - process-wide and static,
      *                         so it is passed in for the same reason as the reload counter
      * @param callsDeleted     {@code GatewayCall.getCallsDeleted()}
+     * @param watchdog         the watchdog's own bookkeeping, for the same reason - it lives
+     *                         on {@code PjsipSipService}, not in a manager. Null is read as
+     *                         {@link WatchdogFindings#NONE}.
      */
     @ControlThread
     public static GatewayStatus capture(boolean running,
@@ -106,7 +185,8 @@ public final class GatewayStatus {
                                         AudioBridgeManager audio,
                                         long configGeneration,
                                         long callsCreated,
-                                        long callsDeleted) {
+                                        long callsDeleted,
+                                        WatchdogFindings watchdog) {
         return new GatewayStatus(
                 running,
                 account != null && account.isRegistered(),
@@ -118,6 +198,7 @@ public final class GatewayStatus {
                 configGeneration,
                 callsCreated,
                 callsDeleted,
+                watchdog,
                 System.currentTimeMillis());
     }
 
@@ -204,6 +285,32 @@ public final class GatewayStatus {
     }
 
     /**
+     * What the watchdog has found (GW-25). Never null.
+     */
+    public WatchdogFindings getWatchdog() {
+        return watchdog;
+    }
+
+    /**
+     * How long a call has been up as far as the watchdog is concerned, or 0 when there is
+     * none.
+     *
+     * <p><em>Derived</em>, like {@link #isInGracePeriod()} and for the same reason: the
+     * watchdog's max-call-duration fail-safe is a deadline on this number, and a frozen
+     * duration would answer with however long the call had been up when the snapshot was
+     * taken - which for a 1 Hz UI poll is a stopwatch that never advances, and for the
+     * {@code GET_STATUS} broadcast is simply wrong.
+     */
+    public long getCallDurationMs() {
+        long since = watchdog.getCallUpSinceWallMs();
+        if (since == 0L) {
+            return 0L;
+        }
+        long elapsed = System.currentTimeMillis() - since;
+        return elapsed < 0L ? 0L : elapsed;
+    }
+
+    /**
      * True while the GSM leg is still inside its post-dial grace period.
      *
      * <p>A <em>derived</em> accessor, re-reading the clock on every call - never a frozen
@@ -240,6 +347,12 @@ public final class GatewayStatus {
         b.putLong("calls_created", callsCreated);
         b.putLong("calls_deleted", callsDeleted);
         b.putLong("calls_alive", getCallsAlive());
+        b.putLong("watchdog_terminations", watchdog.getTerminations());
+        b.putLong("silent_bridge_episodes", watchdog.getSilentBridgeEpisodes());
+        b.putString("last_watchdog_finding", watchdog.getLastFinding());
+        b.putLong("last_watchdog_finding_at_wall_ms", watchdog.getLastFindingAtWallMs());
+        b.putLong("call_up_since_wall_ms", watchdog.getCallUpSinceWallMs());
+        b.putLong("call_duration_ms", getCallDurationMs());
         b.putLong("captured_at_wall_ms", capturedAtWallMs);
         return b;
     }
@@ -252,6 +365,8 @@ public final class GatewayStatus {
                 + ", callState=" + callState
                 + ", calls=" + callsCreated + "/" + callsDeleted
                 + " (alive " + getCallsAlive() + ")"
+                + ", watchdogTerminations=" + watchdog.getTerminations()
+                + ", silentBridgeEpisodes=" + watchdog.getSilentBridgeEpisodes()
                 + ", sip=" + sipStatus
                 + ", call=" + callStatus
                 + ", audio=" + audioStatus + "}";
