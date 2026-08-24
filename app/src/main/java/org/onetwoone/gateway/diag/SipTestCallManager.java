@@ -11,6 +11,7 @@ import org.onetwoone.gateway.SipCallService;
 import org.onetwoone.gateway.audio.AudioBridgeManager;
 import org.onetwoone.gateway.config.GatewayConfig;
 import org.onetwoone.gateway.core.GatewayControlThread;
+import org.onetwoone.gateway.sip.Pjsua2Lifetime;
 import org.onetwoone.gateway.sip.SipAccountManager;
 import org.pjsip.pjsua2.AudioMedia;
 import org.pjsip.pjsua2.AudioMediaRecorder;
@@ -261,6 +262,7 @@ public class SipTestCallManager {
         mediaValid = true;
         append("mode=" + mode + " duration=" + seconds + "s uri=" + uri);
 
+        CallOpParam dialParam = null;
         try {
             // Assign `call` BEFORE makeCall - do not "tidy" this into `call = new ...;
             // newCall.makeCall(...)` or move the assignment below. PJSIP can deliver
@@ -269,13 +271,18 @@ public class SipTestCallManager {
             // never reports its failure. Same reasoning as AUDIT D2 / GW-06 on the gateway
             // path; the catch below unregisters it again if makeCall throws.
             call = new GatewayCall(callbackService, account, GatewayCall.Owner.DIAGNOSTIC);
-            call.makeCall(uri, new CallOpParam(true));
+            // Java-created and therefore ours to delete; makeCall marshals it synchronously
+            // and retains nothing (AUDIT H7).
+            dialParam = new CallOpParam(true);
+            call.makeCall(uri, dialParam);
             append("INVITE sent");
         } catch (Exception e) {
             append("ERROR: makeCall failed: " + e.getMessage());
             Log.e(TAG, "makeCall failed", e);
             call = null;
             return;
+        } finally {
+            Pjsua2Lifetime.delete(dialParam);
         }
 
         mainHandler.postDelayed(autoHangup, seconds * 1000L);
@@ -431,8 +438,13 @@ public class SipTestCallManager {
         // No null guard on purpose - a null here behaves exactly as before, i.e. the NPE is
         // caught below and reported.
         GatewayCall current = call;
+        // `info` is owned; `mediaVec`/`mi` are views into it, so it is released only once the
+        // loop is done with them. The returned AudioMedia comes from Call.getMedia(), not from
+        // `info`, so it survives the delete - it is a non-owning view of pjsua's own media.
+        // AUDIT H7.
+        CallInfo info = null;
         try {
-            CallInfo info = current.getInfo();
+            info = current.getInfo();
             CallMediaInfoVector mediaVec = info.getMedia();
             for (int i = 0; i < mediaVec.size(); i++) {
                 CallMediaInfo mi = mediaVec.get(i);
@@ -443,6 +455,8 @@ public class SipTestCallManager {
             }
         } catch (Exception e) {
             append("ERROR: reading media failed: " + e.getMessage());
+        } finally {
+            Pjsua2Lifetime.delete(info);
         }
         return null;
     }
@@ -465,14 +479,17 @@ public class SipTestCallManager {
 
         unwireMedia();
 
+        CallOpParam prm = null;
         try {
             if (mediaValid && current.isActive()) {
-                CallOpParam prm = new CallOpParam();
+                prm = new CallOpParam();
                 prm.setStatusCode(pjsip_status_code.PJSIP_SC_DECLINE);
                 current.hangup(prm);
             }
         } catch (Exception e) {
             append("hangup: " + e.getMessage());
+        } finally {
+            Pjsua2Lifetime.delete(prm);
         }
 
         // Don't delete() the Call - PJSIP owns the native lifecycle (same rule as

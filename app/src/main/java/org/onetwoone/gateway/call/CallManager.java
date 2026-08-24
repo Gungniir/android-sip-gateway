@@ -16,6 +16,7 @@ import org.onetwoone.gateway.GatewayInCallService;
 import org.onetwoone.gateway.config.GatewayConfig;
 import org.onetwoone.gateway.core.ControlThread;
 import org.onetwoone.gateway.core.GatewayControlThread;
+import org.onetwoone.gateway.sip.Pjsua2Lifetime;
 import org.pjsip.pjsua2.*;
 
 import java.util.Collections;
@@ -477,9 +478,12 @@ public class CallManager {
         currentSipCall = call;
         transition(CallState.IDLE, CallState.SIP_INCOMING, "INVITE received from the PBX");
 
+        // Owned native memory (AUDIT H7). extractCallDetails() reads through it, so the
+        // delete waits until that has returned.
+        CallInfo info = null;
         try {
             // Get call info to extract destination
-            CallInfo info = call.getInfo();
+            info = call.getInfo();
             String remoteUri = info.getRemoteUri();
 
             Log.d(TAG, "Incoming SIP call from: " + remoteUri);
@@ -494,6 +498,8 @@ public class CallManager {
             Log.e(TAG, "Error handling incoming SIP call: " + e.getMessage());
             terminateAllCalls();
             notifyError("Failed to handle incoming call: " + e.getMessage());
+        } finally {
+            Pjsua2Lifetime.delete(info);
         }
     }
 
@@ -535,10 +541,16 @@ public class CallManager {
      * Answer a SIP call.
      */
     private void answerSipCall(GatewayCall call) {
+        // Java-created, so ours to delete (AUDIT H7). answer() marshals it synchronously and
+        // retains nothing, so it goes as soon as that has returned - and not before, because
+        // the listener notification further down re-enters this class.
+        CallOpParam prm = null;
         try {
-            CallOpParam prm = new CallOpParam();
+            prm = new CallOpParam();
             prm.setStatusCode(pjsip_status_code.PJSIP_SC_OK);
             call.answer(prm);
+            Pjsua2Lifetime.delete(prm);
+            prm = null;
 
             transition(CallState.SIP_INCOMING, CallState.SIP_ANSWERED, "SIP leg answered");
 
@@ -557,6 +569,8 @@ public class CallManager {
             Log.e(TAG, "Failed to answer SIP call: " + e.getMessage());
             terminateAllCalls();
             notifyError("Failed to answer call: " + e.getMessage());
+        } finally {
+            Pjsua2Lifetime.delete(prm);
         }
     }
 
@@ -564,12 +578,15 @@ public class CallManager {
      * Reject a SIP call.
      */
     private void rejectCall(GatewayCall call) {
+        CallOpParam prm = null;
         try {
-            CallOpParam prm = new CallOpParam();
+            prm = new CallOpParam();
             prm.setStatusCode(pjsip_status_code.PJSIP_SC_BUSY_HERE);
             call.hangup(prm);
         } catch (Exception e) {
             Log.e(TAG, "Error rejecting call: " + e.getMessage());
+        } finally {
+            Pjsua2Lifetime.delete(prm);
         }
     }
 
@@ -890,15 +907,18 @@ public class CallManager {
         // Mark as disposed to prevent further callbacks
         callToDispose.dispose();
 
+        CallOpParam prm = null;
         try {
             // Check if call is still active before hanging up
             if (callToDispose.isActive()) {
-                CallOpParam prm = new CallOpParam();
+                prm = new CallOpParam();
                 prm.setStatusCode(pjsip_status_code.PJSIP_SC_DECLINE);
                 callToDispose.hangup(prm);
             }
         } catch (Exception e) {
             Log.e(TAG, "Error hanging up SIP call: " + e.getMessage());
+        } finally {
+            Pjsua2Lifetime.delete(prm);
         }
 
         // DON'T delete - let PJSIP manage the native object lifecycle

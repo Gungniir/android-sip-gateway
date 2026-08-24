@@ -3,6 +3,7 @@ package org.onetwoone.gateway;
 import android.os.SystemClock;
 import android.util.Log;
 
+import org.onetwoone.gateway.sip.Pjsua2Lifetime;
 import org.pjsip.pjsua2.*;
 
 import java.util.concurrent.atomic.AtomicLong;
@@ -10,6 +11,11 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * PJSIP Call implementation for GSM-SIP Gateway.
  * Handles call state changes and media state.
+ *
+ * <h3>Native lifetime (GW-22 / AUDIT H7)</h3>
+ * Every value object pulled out of a call - {@link CallInfo} above all - is owned native
+ * memory the Java side must release. See {@link Pjsua2Lifetime} for which pjsua2 objects those
+ * are and why the finalizer is not good enough.
  */
 public class GatewayCall extends Call {
     private static final String TAG = "GatewayCall";
@@ -151,8 +157,12 @@ public class GatewayCall extends Call {
             return;
         }
 
+        // Owned native memory (`new CallInfo(ptr, true)`), and this is the highest-frequency
+        // pjsua2 allocation in the app - ~5-6 per call, one per SIP state change. See
+        // Pjsua2Lifetime; AUDIT H7.
+        CallInfo info = null;
         try {
-            CallInfo info = getInfo();
+            info = getInfo();
             int state = info.getState();
             String stateText = info.getStateText();
 
@@ -171,6 +181,8 @@ public class GatewayCall extends Call {
             }
         } catch (Exception e) {
             Log.e(TAG, "Error in onCallState: " + e.getMessage());
+        } finally {
+            Pjsua2Lifetime.delete(info);
         }
     }
 

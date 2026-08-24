@@ -9,6 +9,7 @@ import org.onetwoone.gateway.config.GatewayConfig;
 import org.onetwoone.gateway.core.ControlThread;
 import org.onetwoone.gateway.core.GatewayControlThread;
 import org.onetwoone.gateway.diag.SipDiagnostics;
+import org.onetwoone.gateway.sip.Pjsua2Lifetime;
 import org.pjsip.pjsua2.*;
 
 /**
@@ -248,8 +249,12 @@ public class AudioBridgeManager {
             return;
         }
 
+        // `info` is owned native memory; `mediaVec` and its elements are views INTO it
+        // (CallInfo.getMedia() hands back (ptr, false)), so the delete has to be a finally
+        // around the whole loop - including the early returns inside it. AUDIT H7.
+        CallInfo info = null;
         try {
-            CallInfo info = call.getInfo();
+            info = call.getInfo();
             CallMediaInfoVector mediaVec = info.getMedia();
 
             for (int i = 0; i < mediaVec.size(); i++) {
@@ -323,7 +328,21 @@ public class AudioBridgeManager {
                     // Prove the conference links actually took: a source port with no
                     // listener is never pulled by the bridge, so onFrameRequested would
                     // stay at zero and nothing would ever reach SIP.
-                    SipDiagnostics.dumpAndLog(call, port, "startBridge");
+                    //
+                    // This used to be an unconditional dumpAndLog on every successful wiring -
+                    // a PRODUCTION path running the app's single heaviest diagnostic, ~8 owned
+                    // pjsua2 objects and ~20 logcat lines per call (AUDIT H7, plan §2.3). The
+                    // question it exists to answer is one boolean, so ask that first and pay
+                    // for the full dump only when the answer is wrong. When it IS wrong the
+                    // dump is now strictly more useful, because it is no longer buried in the
+                    // identical dump printed after every healthy call.
+                    if (SipDiagnostics.isTransmitting(port, confSlot)) {
+                        Log.i(TAG, "Conference links verified: local port " + port.getPortId()
+                                + " -> call slot " + confSlot);
+                    } else {
+                        Log.e(TAG, "Conference links did NOT take - dumping SIP media state");
+                        SipDiagnostics.dumpAndLog(call, port, "startBridge");
+                    }
 
                     if (listener != null) {
                         listener.onBridgeStarted();
@@ -339,6 +358,8 @@ public class AudioBridgeManager {
         } catch (Exception e) {
             Log.e(TAG, "Failed to start audio bridge: " + e.getMessage(), e);
             notifyError("Failed to start audio bridge: " + e.getMessage());
+        } finally {
+            Pjsua2Lifetime.delete(info);
         }
     }
 

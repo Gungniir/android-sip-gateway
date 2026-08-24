@@ -2,6 +2,7 @@ package org.onetwoone.gateway.diag;
 
 import android.util.Log;
 
+import org.onetwoone.gateway.sip.Pjsua2Lifetime;
 import org.pjsip.pjsua2.AudioMedia;
 import org.pjsip.pjsua2.AudioMediaVector2;
 import org.pjsip.pjsua2.Call;
@@ -32,6 +33,15 @@ import org.pjsip.pjsua2.pjsua_call_media_status;
  * nothing.
  *
  * Every method swallows its own exceptions - diagnostics must never break a call.
+ *
+ * <h3>Native lifetime (GW-22 / AUDIT H7)</h3>
+ * This is the densest producer of owned pjsua2 objects in the app: one {@link #dump} creates a
+ * {@link CallInfo}, an {@link AudioMediaVector2}, and a {@link ConfPortInfo} per bridge port
+ * plus two per audio stream, and a {@link StreamInfo}/{@link StreamStat} pair. Every one of
+ * them is released in a {@code finally} through {@link Pjsua2Lifetime}, which also records
+ * which pjsua2 objects are <em>not</em> owned - the {@code IntVector}s and {@code RtcpStat}s
+ * read here are views into their parents and must not be deleted. That is why each
+ * {@code finally} wraps the whole block that reads the views, not just the factory call.
  */
 public final class SipDiagnostics {
     private static final String TAG = "SipDiag";
@@ -62,8 +72,11 @@ public final class SipDiagnostics {
             }
         }
 
+        // `info` is owned; `mediaVec` and every CallMediaInfo in it point INTO it, so the
+        // delete has to enclose the whole loop, not just the first read (AUDIT H7).
+        CallInfo info = null;
         try {
-            CallInfo info = call.getInfo();
+            info = call.getInfo();
             sb.append("call: state=").append(info.getStateText())
                     .append(" remote=").append(info.getRemoteUri()).append('\n');
 
@@ -89,26 +102,35 @@ public final class SipDiagnostics {
             }
         } catch (Exception e) {
             sb.append("call info error: ").append(e.getMessage()).append('\n');
+        } finally {
+            Pjsua2Lifetime.delete(info);
         }
 
+        AudioMediaVector2 ports = null;
         try {
             Endpoint ep = Endpoint.instance();
             sb.append("conf bridge: active=").append(ep.mediaActivePorts())
                     .append("/").append(ep.mediaMaxPorts()).append(" ports=[");
-            AudioMediaVector2 ports = ep.mediaEnumPorts2();
+            ports = ep.mediaEnumPorts2();
             for (int i = 0; i < ports.size(); i++) {
+                // Not owned - AudioMediaVector2.get() hands back (ptr, false).
                 AudioMedia m = ports.get(i);
                 if (i > 0) sb.append(", ");
+                ConfPortInfo pi = null;
                 try {
-                    ConfPortInfo pi = m.getPortInfo();
+                    pi = m.getPortInfo();
                     sb.append(pi.getPortId()).append(':').append(pi.getName());
                 } catch (Exception e) {
                     sb.append('?');
+                } finally {
+                    Pjsua2Lifetime.delete(pi);
                 }
             }
             sb.append("]\n");
         } catch (Exception e) {
             sb.append("conf bridge error: ").append(e.getMessage()).append('\n');
+        } finally {
+            Pjsua2Lifetime.delete(ports);
         }
 
         return sb.toString();
@@ -120,15 +142,19 @@ public final class SipDiagnostics {
      */
     public static String dumpCodecs() {
         StringBuilder sb = new StringBuilder("=== audio codecs (id/priority) ===\n");
+        CodecInfoVector2 codecs = null;
         try {
-            CodecInfoVector2 codecs = Endpoint.instance().codecEnum2();
+            codecs = Endpoint.instance().codecEnum2();
             for (int i = 0; i < codecs.size(); i++) {
+                // Not owned - the vector's get() hands back (ptr, false).
                 CodecInfo ci = codecs.get(i);
                 sb.append("  ").append(ci.getCodecId())
                         .append(" prio=").append(ci.getPriority()).append('\n');
             }
         } catch (Exception e) {
             sb.append("  error: ").append(e.getMessage()).append('\n');
+        } finally {
+            Pjsua2Lifetime.delete(codecs);
         }
         return sb.toString();
     }
@@ -145,10 +171,15 @@ public final class SipDiagnostics {
         if (source == null || sinkPortId < 0) {
             return false;
         }
+        // Owned; getListeners() is a view into it, so the delete comes after contains().
+        ConfPortInfo pi = null;
         try {
-            return contains(source.getPortInfo().getListeners(), sinkPortId);
+            pi = source.getPortInfo();
+            return contains(pi.getListeners(), sinkPortId);
         } catch (Exception e) {
             return false;
+        } finally {
+            Pjsua2Lifetime.delete(pi);
         }
     }
 
@@ -168,8 +199,10 @@ public final class SipDiagnostics {
         if (slot < 0) {
             return false;
         }
+        // Owned, and this runs on every bridge teardown - one of the repeating paths H7 names.
+        AudioMediaVector2 ports = null;
         try {
-            AudioMediaVector2 ports = Endpoint.instance().mediaEnumPorts2();
+            ports = Endpoint.instance().mediaEnumPorts2();
             for (int i = 0; i < ports.size(); i++) {
                 if (ports.get(i).getPortId() == slot) {
                     return true;
@@ -177,6 +210,8 @@ public final class SipDiagnostics {
             }
         } catch (Exception e) {
             Log.w(TAG, "Cannot enumerate conference ports: " + e.getMessage());
+        } finally {
+            Pjsua2Lifetime.delete(ports);
         }
         return false;
     }
@@ -197,15 +232,20 @@ public final class SipDiagnostics {
             sb.append("      conf: call media has no conference slot\n");
             return;
         }
+        // Both ConfPortInfos are owned. The second one used to be created anonymously inside
+        // the contains(...) argument, so it could never be released (AUDIT H7).
+        ConfPortInfo callPort = null;
+        ConfPortInfo localPort = null;
         try {
-            ConfPortInfo callPort = AudioMedia.getPortInfoFromId(callSlot);
+            callPort = AudioMedia.getPortInfoFromId(callSlot);
             String callListeners = listenersOf(callPort);
             sb.append("      conf: callPort=").append(callSlot)
                     .append(" name=").append(callPort.getName())
                     .append(" listeners=").append(callListeners).append('\n');
 
             if (localPortId >= 0) {
-                boolean localToCall = contains(AudioMedia.getPortInfoFromId(localPortId).getListeners(), callSlot);
+                localPort = AudioMedia.getPortInfoFromId(localPortId);
+                boolean localToCall = contains(localPort.getListeners(), callSlot);
                 boolean callToLocal = contains(callPort.getListeners(), localPortId);
                 sb.append("      WIRED local->call(TX to SIP)=").append(localToCall)
                         .append("  call->local(RX from SIP)=").append(callToLocal).append('\n');
@@ -216,12 +256,16 @@ public final class SipDiagnostics {
             }
         } catch (Exception e) {
             sb.append("      conf error: ").append(e.getMessage()).append('\n');
+        } finally {
+            Pjsua2Lifetime.delete(localPort);
+            Pjsua2Lifetime.delete(callPort);
         }
     }
 
     private static void appendStreamInfo(StringBuilder sb, Call call, int idx) {
+        StreamInfo si = null;
         try {
-            StreamInfo si = call.getStreamInfo(idx);
+            si = call.getStreamInfo(idx);
             sb.append("      stream: codec=").append(si.getCodecName())
                     .append('/').append(si.getCodecClockRate())
                     .append(" dir=").append(dirName(si.getDir()))
@@ -233,12 +277,17 @@ public final class SipDiagnostics {
             }
         } catch (Exception e) {
             sb.append("      stream info error: ").append(e.getMessage()).append('\n');
+        } finally {
+            Pjsua2Lifetime.delete(si);
         }
     }
 
     private static void appendStreamStat(StringBuilder sb, Call call, int idx) {
+        // `ss` is owned; the RtcpStat and RtcpStreamStats below are views into it, so it must
+        // outlive every read of them.
+        StreamStat ss = null;
         try {
-            StreamStat ss = call.getStreamStat(idx);
+            ss = call.getStreamStat(idx);
             RtcpStat rtcp = ss.getRtcp();
             sb.append("      rtp tx: pkt=").append(rtcp.getTxStat().getPkt())
                     .append(" bytes=").append(rtcp.getTxStat().getBytes())
@@ -251,17 +300,27 @@ public final class SipDiagnostics {
             }
         } catch (Exception e) {
             sb.append("      stream stat error: ").append(e.getMessage()).append('\n');
+        } finally {
+            Pjsua2Lifetime.delete(ss);
         }
     }
 
     private static String listenersOf(AudioMedia media) {
+        ConfPortInfo pi = null;
         try {
-            return listenersOf(media.getPortInfo());
+            pi = media.getPortInfo();
+            return listenersOf(pi);
         } catch (Exception e) {
             return "<error>";
+        } finally {
+            Pjsua2Lifetime.delete(pi);
         }
     }
 
+    /**
+     * The caller owns {@code info} and must delete it. The {@link IntVector} taken here is a
+     * view into it - {@code (ptr, false)} - so it is deliberately NOT deleted.
+     */
     private static String listenersOf(ConfPortInfo info) {
         try {
             IntVector listeners = info.getListeners();
