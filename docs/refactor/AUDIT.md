@@ -734,6 +734,52 @@ half-applied mute.
 > well inside the reported `dsrange 0->124`), so it cannot restore them. A reboot resets
 > the mixer to kernel defaults — verified: `DEC1-5 Volume` back to `84`.
 
+#### B1e. B1c's twin survives in `QualcommAudioProfile`, which fabricates every saved original — NEW, P1
+**Verified on device 2026-08-24, lavender.** `bf22992` migrated `DeviceMuteManager` to the
+native mixer API and closed B1c — but the *same* broken read pattern lives on untouched in
+`QualcommAudioProfile.TinymixControls`, and it is the component that saves the originals
+`setupMixer`/`teardownMixer` restore. Both of its readers are dead:
+
+**`getValue` (INT)** shells out to `su -c 'tinymix -D 0 get "DEC1 Volume"'`. There is **no
+`tinymix` on lavender at all** — running the app's exact command returns
+`/system/bin/sh: tinymix: inaccessible or not found`, exit 127. `readLine()` therefore
+returns null (the message goes to stderr, which this path never drains) and the method
+returns its `fallback` argument. `setupMixer` passes `VOLUME_READ_FALLBACK = 84`
+(`QualcommAudioProfile.java:38`, used at `:123`), so **every DEC control's "original" is
+recorded as 84 without anything ever having been read.**
+
+**`getEnum` (ENUM)** execs `filesDir/tinymix` directly. That file **does not exist**: the
+`tinymix-arm64` asset is only unpacked by `ui/TinymixManager.ensureTinymixExtracted()`, a
+UI-path component reached from the web interface's `/api/mixer-controls` and
+`MainViewModel.detectMixerControls`. `QualcommAudioProfile` never extracts it and never
+checks. On lavender `filesDir` holds only `profileInstalled`, so the exec throws
+`IOException`, is swallowed, and the method returns `""` — which `restoreSaved` skips.
+
+So the Qualcomm profile's saved state is entirely fictional, and note the direction of the
+error: **84 is not a harmless sentinel.** Per
+[[qualcomm-dec-volume-zero-at-rest]] the true resting value of `DEC* Volume` on this device
+is **0**, so teardown attempts to write a value that is wrong, not merely unverified. B1d
+observes that the kernel rejects that write while the decimator is inactive, which is
+probably what has kept this from doing visible damage — the app is being saved by a driver
+refusal, not by correctness.
+
+**Why it is latent rather than firing today:** `setupMixer`'s mute loop iterates
+`config.getAllMuteControls()`, which is empty by default *because of the GW-24 key mismatch*
+(H4). The broken read path only executes once that list is non-empty. **This is a live
+ordering hazard: GW-24's key unification is exactly what arms it.** GW-20's migration of
+`TinymixControls` to `GsmAudioNative.getMixerControl` / `getMixerControlEnum` (both of which
+exist and are already in production use in `DeviceMuteManager`) must land **before, or in
+the same change as**, GW-24's fix.
+
+Also note `getValue`'s `p.waitFor()` has no timeout and neither reader drains stderr — the
+same defects GW-20 §4 lists.
+
+**Common root cause with H13.** Both this and the SMS duplicate bug are a root shell-out to
+a binary that is not present, whose failure the caller cannot distinguish from success. That
+is `RootHelper.execRoot`'s return contract (H13 defect 3) in the shared case, and bare
+`Runtime.exec` + `readLine() == null` here. → **GW-20** owns the mechanism; H13/**GW-27**
+owns the SMS instance.
+
 #### B1d. The mic-volume restore is **rejected by the kernel**, and the failure is discarded — P1
 Found 2026-08-23 on lavender, after B1c and the mixer-handle cache were both in place.
 The mute/restore bookkeeping is now correct — `Lease N muted 12 controls` followed by
