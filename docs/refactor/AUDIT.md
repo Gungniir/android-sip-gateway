@@ -1825,3 +1825,95 @@ call/audio/SIP state) expressed 14 times. The roadmap treats it that way.
 
 See [ROADMAP.md](ROADMAP.md) for the phased plan and [issues/](issues/) for the
 agent-ready work items.
+
+#### H18. The silent-bridge detector false-positives on every slow-answering inbound call — NEW, P2
+Found on hardware during the wave-3 validation run (2026-08-24, merlinx, 6 real calls).
+
+`PjsipSipService.checkSilentBridge` fires when `CallManager` is `BRIDGED`, audio is
+streaming, and `GsmAudioPort.getFramesRequested()` has not moved for 12 s. Its predicate has
+no condition that the **SIP leg has actually answered**.
+
+For an inbound GSM call the state machine is
+`IDLE → GSM_INCOMING → SIP_DIALING → BRIDGED`, and the observed transition to `BRIDGED`
+("both legs up") happens when the INVITE goes out and the audio streams start — **not** when
+the SIP leg confirms. So while the PBX extension is merely *ringing*, the call is `BRIDGED`,
+audio is streaming, and pjmedia has legitimately never asked for a frame. Past 12 s the
+detector fires.
+
+Measured, from the run:
+
+| Call | `BRIDGED` at | SIP `CONFIRMED` at | Ring gap | Detector |
+|---|---|---|---|---|
+| 1 | 21:39:57.565 | 21:40:07.134 | 9.6 s | silent (under 12 s) |
+| 2 | 21:41:18.191 | 21:41:47.883 | **29.7 s** | **fired at 21:41:32.041**, `framesRequested=0` |
+
+Nobody had seen this before because both handsets were `MODE_SIP_FIRST` until this run; it
+needs `MODE_ANSWER_FIRST`, where the GSM leg is answered first and audio starts long before
+the SIP side picks up.
+
+**Why it matters even though it is detection-only.** It does not terminate anything today, so
+no call is harmed. The damage is to the evidence: GW-25 §2 is explicit that
+`silent_bridge_episodes` is where the case for promoting this rule to auto-terminating
+accumulates ("must not auto-terminate until it has been shown not to false-positive over a
+week of real calls"). That counter is now polluted by ordinary ringing, and a decision taken
+on it would ship a rule that **kills healthy inbound calls whose SIP leg rings more than
+12 s**. It also emits a ~20-line conference dump per episode.
+
+**Fix direction.** Gate the rule on the SIP media actually being established — start the
+stall clock at SIP `CONFIRMED` rather than at bridge start — so the ringing window cannot
+count toward the 12 s. Until then, treat any `silent_bridge_episodes` figure gathered in
+`ANSWER_FIRST` as unreliable, and do not use it as promotion evidence.
+
+Related: H16 (the counter has no consumer either), GW-25.
+
+#### H19. D6 fires inside the DISCONNECTING window and misreports it as a missed callback — NEW, P2
+Found on hardware during the wave-3 lavender run (2026-08-24). It did **not** reproduce on
+merlinx, and the reason it did not is the whole finding.
+
+D6's repair fired 103 ms **before** the DISCONNECTED it claimed had been missed:
+
+```
+22:09:48.067  GatewayInCall: Call state changed: DISCONNECTING (gsmCallId=2)
+22:09:48.450  E GatewaySvc: INVARIANT (AUDIT D6): GSM leg 2 is tracked but Telecom no
+              longer has it - a DISCONNECTED was missed ... repairing
+22:09:48.553  GatewayInCall: Call state changed: DISCONNECTED (gsmCallId=2)
+22:09:48.554  GatewaySvc: GSM call 2 already ended (disconnected) - ignoring
+```
+
+Nothing was missed. The leg was mid-teardown, in `DISCONNECTING`, where Telecom no longer
+lists it but the final callback has not yet arrived. D6 has no tolerance for that window, so
+it reads "not in Telecom + still tracked" as a dropped callback.
+
+**Why lavender and not merlinx** — the window is an order of magnitude wider on the older
+device:
+
+| Device | `DISCONNECTING` → `DISCONNECTED` |
+|---|---|
+| merlinx (MT6768) | ~46 ms |
+| lavender (SDM660) | **486 ms** |
+
+At a 3 s tick, a 46 ms window is hit roughly 1.5% of the time and a 486 ms window ~16%. This
+is a race whose probability is set by device speed, so it will look like "an old-phone bug"
+and be dismissed. It is not — merlinx is simply winning the race most of the time.
+
+**Impact is low but not nil.**
+
+1. No healthy call was harmed: the call was already terminating. The repair stopped a port
+   that the normal path had already stopped 288 ms earlier, and `stopCapture()` proved
+   idempotent (no `Starting native audio` in between, second stop clean). The real
+   DISCONNECTED was then correctly absorbed as `already ended - ignoring`.
+2. It logs at **ERROR**, asserting a Telecom defect that did not occur. Anyone debugging a
+   real dropped-callback problem will be chasing this first.
+3. It increments `watchdog_terminations` — the same evidence counter H18 pollutes. Two
+   independent false sources now feed the number that is supposed to decide whether the
+   watchdog rules are trustworthy enough to act automatically.
+4. The repair path runs concurrently with the normal teardown, on the same objects. It was
+   safe here only because the stop is idempotent; that is a property worth keeping
+   deliberately rather than by luck.
+
+**Fix direction.** Require the leg to have been absent from Telecom for more than one tick
+before concluding a callback was missed, or exempt legs whose last known state was
+`DISCONNECTING`. Either removes the race without weakening the genuine D6 case, which is a
+leg that stays untracked indefinitely.
+
+Related: H18 (the other false contributor to `watchdog_terminations`), GW-25.

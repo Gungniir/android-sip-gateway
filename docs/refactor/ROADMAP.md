@@ -112,7 +112,48 @@ The structural work. Land GW-10 first; the rest are mechanical once it exists.
 state-mutating method, and the full Phase 0 call-cycle suite still green with the
 assertion armed.
 
-### Phase 2 — Correctness & resource hygiene
+### Phase 2 — Correctness & resource hygiene — ✅ CLOSED (accepted 2026-08-24), 2 items carried forward
+
+**361 tests, 0 failures; `assembleDebug` + `lintDebug` green.** Eight issues merged across
+three tags (`phase-2-wave-1/2/3`) and validated on both handsets over 12 real calls —
+results in [PHASE-2-VALIDATION.md](PHASE-2-VALIDATION.md).
+
+**Closed by the owner's decision on 2026-08-24** — the gateway works in daily use and the
+phase is not worth holding open. Closed is **not** the same as fully validated, so what was
+accepted rather than verified is listed here instead of being quietly marked green.
+
+**Carried forward, still open:**
+
+1. **GW-23b — the phase's only P0, and a live cost, not a latent bug.** E5 was re-measured
+   during validation at up to **52.12 s** between the SIP party hanging up and the GSM leg
+   being released — that is billed airtime on every SIP-side hangup, today. Its two hardware
+   gates were never attempted. Accepting the phase does not make this stop.
+2. **Four exit criteria were never met** (§5 of the plan) — recorded as unmeasured, not as
+   passed:
+   - **GW-22's 500-cycle soak was not run at all.** 12 calls is not a soak, and no
+     native-heap slope was taken. Nothing is known about the graveyard under load.
+   - **GW-24's mute-selection path is untested** — the web-UI selection, the call, and the
+     migration's idempotency.
+   - **GW-25's false-positive run was cut from 30 calls to 12**, deliberately, to avoid
+     tripping carrier abuse heuristics. The rules are deterministic per tick so the
+     reduction is defensible, but it is a deviation, not a pass.
+   - **B1e passed its native-read cross-check** (12 agreed, 0 mismatched) but **not** with a
+     populated custom mute list, and the "mic verifiably live after the call" half was never
+     checked at all.
+
+If any of these is ever needed as evidence, it must be run — not cited from here.
+
+What **is** settled on hardware: GW-27 against the real 8-message fixture (zero re-forwards
+across two restarts), GW-23a on **both** SoCs (`bulkCopy=true`, two-way audio confirmed by
+the operator, `captureErr=0/playbackErr=0`), GW-26's teardown and user-stop latch, GW-21's
+thread ownership and debounce, and zero `ILLEGAL TRANSITION` / assertion failures /
+tombstones across every run.
+
+Two new findings came out of the validation, both false positives that inflate
+`watchdog_terminations` — **H18** (silent-bridge fires on any SIP leg ringing >12 s) and
+**H19** (D6 fires inside the `DISCONNECTING` window). Neither harms a call today; together
+they corrupt the counter that is supposed to decide whether the watchdog may ever act
+automatically.
 
 **Execution plan: [PHASE-2-PLAN.md](PHASE-2-PLAN.md)** — it overrides the briefs below
 wherever they disagree. Roughly a third of their required-change items are already done,
@@ -121,15 +162,15 @@ implemented as written.
 
 | Issue | Fixes |
 |---|---|
-| [GW-20](issues/GW-20-root-helper.md) | H1 — serialized root shell, safe output capture |
+| [GW-20](issues/GW-20-root-helper.md) | ✅ H1 — serialized root shell, safe output capture |
 | [GW-21](issues/GW-21-sms-off-main.md) | ✅ G1, H12 — SMS pipeline off the main thread, one owner for the suppression state |
-| [GW-22](issues/GW-22-pjsip-object-lifetime.md) | H7 — deletion policy for pjsua2 objects |
-| [GW-23a](issues/GW-23-rt-audio-path.md) | H2, H3 — bulk JNI copy, no per-frame allocation |
-| GW-23b | **E5 (P0)** — dedicated I/O thread + ring buffer. **Gated**, see PHASE-2-PLAN §2.4 |
-| [GW-24](issues/GW-24-config-consistency.md) | H4 — key mismatch, atomic prefs writes |
-| [GW-25](issues/GW-25-watchdog-invariants.md) | H9 — both orphan directions + fail-safe deadlines |
+| [GW-22](issues/GW-22-pjsip-object-lifetime.md) | ✅ H7 — deletion policy for pjsua2 objects |
+| [GW-23a](issues/GW-23-rt-audio-path.md) | ✅ H2, H3 — bulk JNI copy, no per-frame allocation |
+| [GW-23b](issues/GW-23b-e5-io-thread.md) | ⏳ **E5 (P0) — CARRIED FORWARD, still open.** Dedicated I/O thread + ring buffer. **Gated on G1/G2**, see that issue §3. Costs up to 52 s of billed GSM per SIP-side hangup until it lands |
+| [GW-24](issues/GW-24-config-consistency.md) | ✅ H4 — key mismatch, atomic prefs writes |
+| [GW-25](issues/GW-25-watchdog-invariants.md) | ✅ H9 — both orphan directions + fail-safe deadlines |
 | [GW-26](issues/GW-26-service-lifecycle.md) | ✅ G2, H8, H8c, H11, F6c, H15 — cancellable shutdown, guarded teardown, deliberate restart |
-| [GW-27](issues/GW-27-sms-duplicate-suppression.md) | H13 — the whole inbox is re-forwarded on every restart |
+| [GW-27](issues/GW-27-sms-duplicate-suppression.md) | ✅ H13 — the whole inbox is re-forwarded on every restart |
 
 ### Phase 3 — Hardening
 
@@ -139,6 +180,7 @@ implemented as written.
 | [GW-28](issues/GW-28-reload-gives-up-permanently.md) | H14 — a reload with no endpoint stops the gateway for good |
 | [GW-31](issues/GW-31-remove-footguns.md) | E3, H10 — delete dead code that violates project rules |
 | [GW-32](issues/GW-32-concurrency-tests.md) | Regression harness for the state machine and the native layer |
+| *(unfiled)* | **H18, H19** — two watchdog false positives found during Phase 2 validation. Both cosmetic today; both inflate `watchdog_terminations`, so fix them **before** any decision to let a watchdog rule auto-terminate |
 
 ---
 

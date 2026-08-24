@@ -5,7 +5,8 @@ Every wave is tagged (`phase-2-wave-N`) and a debug APK is kept in
 or by flashing its APK — so a regression is attributable to one wave rather than to the
 whole phase.
 
-**Nothing below has been run.** All of it needs a human on the handsets.
+**Wave 3 is partly validated — see Results below.** The idle, SMS and lifecycle paths
+passed on both handsets on 2026-08-24; everything that needs a call placed is still open.
 
 Devices: **merlinx** = Redmi Note 9, MT6768, debug build, assertions armed, `055f14050405`.
 **lavender** = Redmi Note 7, SDM660, release build, `c31adecd`.
@@ -14,10 +15,153 @@ Standing hazards while testing:
 - **Never read `/proc/asound/*/status` during a call on merlinx** — kernel panic. `tinymix`
   and `hw_params` are safe.
 - **Do not clear the SMS fixture on merlinx**: 8 unread messages, `_id` 3/4/5/6/8/10/11/12.
-  They are the GW-27 reproduction. They re-forward on every restart until GW-27 lands —
-  that is expected, not a new bug.
+  They are the GW-27 reproduction, and they are **reusable** — restore them to `read=0`
+  rather than leaving them consumed. Since GW-27 landed they must NOT re-forward on a
+  restart; if they do, that is a regression.
 - Use the SDK's `adb` (`~/Android/Sdk/platform-tools/adb`). Broadcasts need
   `-p org.onetwoone.gateway`, and `-f 0x00000020` after a `force-stop`.
+
+---
+
+## Results — wave 3, 2026-08-24
+
+Validated **top-down from `phase-2-wave-3`**: wave 3 contains waves 1 and 2, so a green
+wave 3 clears all three. The per-wave tags stay useful only for bisecting a *failure*.
+
+Builds under test, both from commit `d94363e`:
+
+| Device | Build | APK |
+|---|---|---|
+| merlinx (MT6768, assertions armed) | debug | `wave-3-d94363e.apk` |
+| lavender (SDM660, Qualcomm) | **release** | `wave-3-d94363e-RELEASE.apk` |
+
+The lavender release APK was built for this run because the debug key does not match what
+lavender already carries, and `adb install -r` across signatures would have wiped its config.
+A release build from the same commit installs over it cleanly.
+
+### Passed on hardware
+
+- **GW-27 / AUDIT H13 — the headline, tested against the real failing state.** First start
+  forwarded all 8 fixture messages exactly once (`sendSipMessage SUCCESS` ×8, `confirmed=8`,
+  `inFlight=[]`). The fixture was then **restored to `read=0`** and the app restarted twice:
+  both times `Loaded 8 persisted SMS ids` → `Found 8 unread SMS` → `SKIP id=N (already
+  forwarded)` ×8 → **zero** `sendSipMessage`. That is the exact shape of the 13:04 field
+  report, and the persisted record carried it alone.
+- **GW-20 / AUDIT B1e — on the Qualcomm device.** `B1e native-vs-tinymix: 12 agreed,
+  0 mismatched, 0 unreadable, of 12 control(s) on card 0`. Trigger it with
+  `GET /api/mixer-controls`; no call required.
+- **GW-20's root contract, incidentally.** merlinx now logs `Marked SMS id=N as read (root
+  content update, verified)`. The old `sqlite3` path (absent, exit 127) used to report
+  success because `execRoot` returned trimmed output rather than null. Both halves fixed.
+- **GW-26 — service lifecycle.** `Service destroyed in 38 ms on main`, `user_stopped=true`
+  latched, **zero** restarts in 15 s, latch cleared to `false` on the next START. No
+  `unregisterReceiver` / `ContentObserver` leak warnings.
+- **GW-21 — the parts hardware can settle without a burst.** Every `SmsHandler` line ran on
+  the `GatewayControl` tid. Teardown split exactly as specified: `Stopping SMS handler` on
+  main, `SMS handler stopped` on `GatewayControl`. No `Skipped … frames`. Debounce visible:
+  the 8 marked-read writes produced 8 observer notifications that coalesced into **one** scan
+  (7 × `coalesced into the pending scan`).
+- **GW-25 — no idle false positives.** `grep -c INVARIANT` = 0 on both devices. The guard
+  line `No InCallService bound - skipping the orphan rules this tick` was observed doing its
+  job (InCallService binds only while a call exists; both devices do hold `ROLE_DIALER`).
+- Both devices register over TLS with SRTP mandatory; zero crashes, zero tombstones, zero
+  app-level `E`/`W` beyond the guard line above.
+
+### Call run — 6 real calls, merlinx, ANSWER_FIRST, 2026-08-24
+
+4 inbound GSM + 2 outbound, all bridged, all torn down cleanly
+(`6 × TERMINATING -> IDLE`). 30 calls was over-specified: the watchdog rules are
+deterministic per 3 s tick, so a wrong dwell fires on call 1, not call 17. Shape coverage,
+not count, is what settles the acceptance question.
+
+- **GW-25 acceptance: PASSED — zero terminations.** The one `INVARIANT` line in the run is
+  the silent-bridge detector, which is detection-only by design (see H18 below).
+- **The 45 s dwell is now proven on hardware, not just argued.** On call 2 the GSM leg was
+  ACTIVE and adopted with no answered SIP leg for **29.7 s**, and the watchdog left it alone.
+  The original brief's guess of ~8 s would have killed that call — a healthy, ordinary
+  inbound call where the PBX extension simply rang for a while.
+- **E5 re-measured (GW-23b baseline).** SIP-initiated hangups: **52.12 s** and **3.19 s**
+  (BYE → `UDP media transport detached`). GSM-initiated: **0.00 s** ×4 — detach and TX BYE
+  within 3 ms. The asymmetry in GW-23b §1 reproduces exactly, and 52.12 s is a **new worst
+  case**, above the previously recorded 50.69 s.
+- `Conference links lost (media stream re-created), rewiring` was observed and handled — the
+  known PJSIP codec-lock UPDATE behaviour, working as designed.
+- Zero crashes, zero tombstones, zero main-thread stalls, `errors=0` on every frame counter.
+
+**GW-23a: CLOSED.** `Profile=MediaTek card=0 capture=5@8000/1ch playback=2@48000/1ch
+frame=320B bulkCopy=true` — the fast path is active, and the operator confirmed audio was
+good on every call in the run, both directions. Frame counters ended `captureErr=0,
+playbackErr=0` throughout.
+
+> Getting that line is fiddlier than it looks: it is logged **once per process**, when
+> `AudioBridgeManager` constructs the port. A STOP/START of the *service* does not re-emit it
+> because the process survives, so `am force-stop` is required. Clearing the logcat buffer
+> after the gateway is already running loses it until the next process death.
+
+**E5 across 8 calls: 52.12 s, 3.19 s, 0.00 s, 0.011 s (SIP-initiated) against 0.00 s ×4
+(GSM-initiated).** The spread is the point. Nothing in the code produces "52 seconds" as a
+value — `conf->mutex` is a plain non-FIFO `pthread_mutex`, so the BYE handler waiting in
+`pjmedia_conf_remove_port` is not queued; it re-contends against a callback that re-enters
+every 20 ms and can lose arbitrarily many times. Sometimes it wins immediately, which is why
+half the SIP-initiated hangups were instant. This is a lock-fairness lottery, not a timeout,
+and it is **expected on wave 3** — GW-23b is the fix and is deliberately not landed.
+
+**New finding: H18** — the silent-bridge detector fires on any inbound call whose SIP leg
+rings longer than 12 s, because `BRIDGED` is reached when the INVITE goes out, not when the
+SIP side answers. Detection-only, so no call is harmed, but it pollutes the very counter
+GW-25 §2 designates as the evidence base for promoting the rule to auto-terminating.
+
+The threshold behaviour is now confirmed across 8 calls, and it tracks the ring gap exactly:
+fired on rings of **29.7 s** and **20.6 s**; stayed silent on **9.6 s, 4.3 s, 2.5 s, 2.2 s**.
+Nothing else correlates.
+
+### NOT covered — still needs a human placing calls
+
+After the 6-call run above, what is still open:
+
+- **GW-22** — the graveyard under a longer soak.
+- **GW-21** — the 20-SMS burst, SMS during a bridged call, PBX-down backoff.
+- **A second SIP-initiated hangup on lavender.** Only one was captured (8 ms), and one
+  sample of a lock-fairness lottery establishes nothing — see the lavender run below.
+- Deliberately not chased: `MAX_CALL_DURATION_MS` and `TERMINATING_DWELL_MAX_MS` need
+  temporarily shortened constants to reach (validation step 8), not longer real calls.
+
+### lavender run — 4 calls, Qualcomm, release build, 2026-08-24
+
+3 inbound + 1 outbound, all bridged, 4 clean teardowns. The SIM was moved over from merlinx
+for this (lavender's own slots read `ABSENT,ABSENT` — worth checking before blaming the app
+when a device will not place calls).
+
+- **Two-way audio confirmed on Qualcomm by the operator**, with `bulkCopy=true` and
+  `captureErr=0, playbackErr=0`. Together with merlinx this closes GW-23a **on both SoCs** —
+  and the two profiles genuinely differ: `playback=0@8000` here against `playback=2@48000/1ch`
+  on MediaTek, so the resampler path and the non-resampler path are both exercised.
+- **E5, release build, n=1: 8 ms.** This is the clean CheckJNI-free number GW-23b §6 asked
+  for, and it is *not* evidence that E5 is absent on Qualcomm. Only one SIP-initiated hangup
+  occurred. merlinx spread 0.00–52.12 s over four samples; a single fast sample is exactly
+  what winning the lock race once looks like. **Do not quote 8 ms as the Qualcomm baseline
+  until there are several samples.**
+- GSM-initiated hangups: 0.002 s, 0.002 s, 0.001 s — the fast path, consistent with merlinx.
+- **New finding H19** — D6 fired 103 ms before the DISCONNECTED it claimed was missed,
+  because the leg was in the `DISCONNECTING` window. Harmless here (the call was already
+  ending and the port stop is idempotent) but it logs at ERROR alleging a Telecom defect that
+  did not happen, and it inflates `watchdog_terminations`. It reproduced on lavender and not
+  merlinx purely because that window is 486 ms there against 46 ms on merlinx.
+
+### Notes for re-running
+
+- **The SMS fixture is reusable, not single-use.** Restore it with
+  `content update --uri content://sms/inbox --bind read:i:0 --where "_id=N"` for
+  `3 4 5 6 8 10 11 12`. It was left restored (`read=0`) after this run. Because the read flag
+  now genuinely works, a plain restart passes *trivially* — the fixture must be restored to
+  unread for the test to mean anything.
+- `sub_id=2` (t2) maps to `sim_id=-1`: that SIM is physically absent, so its historical
+  messages route to SIM1's destination via the documented `default to SIM1` fallback. Not a
+  bug, but it is a silent fallback.
+- A fresh agent worktree has **no `local.properties`**, so a Gradle build there fails with
+  "SDK location not found". Copy it (and `keystore.properties` for a release build) from the
+  main checkout. This is the second worktree trap after the `origin/main` base — the worktree
+  for this run did start at `7cbd7fd`, as GW-23b §8 warned.
 
 ---
 
