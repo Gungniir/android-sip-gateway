@@ -64,7 +64,7 @@ public class GatewayStatusTest {
     @Test
     public void captureReadsTheLiveManagersOnce() {
         GatewayStatus status = GatewayStatus.capture(
-                true, accountManager, callManager, audioBridge, 0L, 0L, 0L);
+                true, accountManager, callManager, audioBridge, 0L, 0L, 0L, null);
 
         assertTrue(status.isRunning());
         assertFalse("no account has been created", status.isSipRegistered());
@@ -77,7 +77,7 @@ public class GatewayStatusTest {
     @Test
     public void statusTextIsTheThreeLineCompositeTheUiAlwaysShowed() {
         GatewayStatus status = GatewayStatus.capture(
-                false, accountManager, callManager, audioBridge, 0L, 0L, 0L);
+                false, accountManager, callManager, audioBridge, 0L, 0L, 0L, null);
 
         assertEquals("SIP: Not configured\nCall: Idle\nAudio: Not initialized",
                 status.getStatusText());
@@ -105,7 +105,7 @@ public class GatewayStatusTest {
     @Test
     public void aTakenSnapshotDoesNotTrackLaterManagerChanges() throws Exception {
         GatewayStatus before = GatewayStatus.capture(
-                true, accountManager, callManager, audioBridge, 0L, 0L, 0L);
+                true, accountManager, callManager, audioBridge, 0L, 0L, 0L, null);
 
         pretendGsmCallPlaced(CallManager.GSM_CALL_GRACE_PERIOD_MS);
 
@@ -113,7 +113,7 @@ public class GatewayStatusTest {
         assertEquals("IDLE", before.getCallState());
         assertEquals("GSM connecting...",
                 GatewayStatus.capture(
-                        true, accountManager, callManager, audioBridge, 0L, 0L, 0L)
+                        true, accountManager, callManager, audioBridge, 0L, 0L, 0L, null)
                         .getCallStatus());
     }
 
@@ -132,7 +132,7 @@ public class GatewayStatusTest {
         pretendGsmCallPlaced(GRACE_REMAINING_MS);
 
         GatewayStatus status = GatewayStatus.capture(
-                true, accountManager, callManager, audioBridge, 0L, 0L, 0L);
+                true, accountManager, callManager, audioBridge, 0L, 0L, 0L, null);
         assertTrue("the grace period has not run out yet", status.isInGracePeriod());
 
         Thread.sleep(GRACE_REMAINING_MS + 100);
@@ -145,7 +145,7 @@ public class GatewayStatusTest {
     @Test
     public void noGsmDialMeansNoGracePeriod() {
         GatewayStatus status = GatewayStatus.capture(
-                true, accountManager, callManager, audioBridge, 0L, 0L, 0L);
+                true, accountManager, callManager, audioBridge, 0L, 0L, 0L, null);
         assertFalse(status.isInGracePeriod());
     }
 
@@ -153,7 +153,7 @@ public class GatewayStatusTest {
     @Test
     public void flattensIntoABundle() {
         GatewayStatus status = GatewayStatus.capture(
-                true, accountManager, callManager, audioBridge, 0L, 0L, 0L);
+                true, accountManager, callManager, audioBridge, 0L, 0L, 0L, null);
         Bundle bundle = status.toBundle();
 
         assertTrue(bundle.getBoolean("running"));
@@ -177,7 +177,7 @@ public class GatewayStatusTest {
     public void configGenerationIsCarriedThroughCaptureAndTheBundle() {
         GatewayStatus status =
                 GatewayStatus.capture(
-                        true, accountManager, callManager, audioBridge, 7L, 0L, 0L);
+                        true, accountManager, callManager, audioBridge, 7L, 0L, 0L, null);
 
         assertEquals(7L, status.getConfigGeneration());
         assertEquals(7L, status.toBundle().getLong("config_generation"));
@@ -198,7 +198,7 @@ public class GatewayStatusTest {
     @Test
     public void callCountersAreCarriedThroughCaptureAndTheBundle() {
         GatewayStatus status = GatewayStatus.capture(
-                true, accountManager, callManager, audioBridge, 0L, 500L, 499L);
+                true, accountManager, callManager, audioBridge, 0L, 500L, 499L, null);
 
         assertEquals(500L, status.getCallsCreated());
         assertEquals(499L, status.getCallsDeleted());
@@ -217,7 +217,7 @@ public class GatewayStatusTest {
     @Test
     public void callCountersReportNothingAliveWhenTheyMatch() {
         GatewayStatus status = GatewayStatus.capture(
-                true, accountManager, callManager, audioBridge, 0L, 500L, 500L);
+                true, accountManager, callManager, audioBridge, 0L, 500L, 500L, null);
 
         assertEquals(0L, status.getCallsAlive());
     }
@@ -230,6 +230,83 @@ public class GatewayStatusTest {
         assertEquals(0L, GatewayStatus.UNAVAILABLE.getCallsAlive());
     }
 
+    // ========== GW-25: the watchdog's findings ==========
+
+    /**
+     * GW-25 §8. The findings are what turns "the watchdog logged something at 3am" into
+     * something {@code GET_STATUS} can answer, so both counters and the last finding have to
+     * survive capture and reach the bundle.
+     */
+    @Test
+    public void watchdogFindingsAreCarriedThroughCaptureAndTheBundle() {
+        GatewayStatus.WatchdogFindings findings = new GatewayStatus.WatchdogFindings(
+                0L, 3L, 5L, "GSM leg 7 has been active with no SIP leg for 45 s", 1234L);
+
+        GatewayStatus status = GatewayStatus.capture(
+                true, accountManager, callManager, audioBridge, 0L, 0L, 0L, findings);
+
+        assertEquals(3L, status.getWatchdog().getTerminations());
+        assertEquals(5L, status.getWatchdog().getSilentBridgeEpisodes());
+        assertEquals("GSM leg 7 has been active with no SIP leg for 45 s",
+                status.getWatchdog().getLastFinding());
+        assertEquals(1234L, status.getWatchdog().getLastFindingAtWallMs());
+
+        Bundle bundle = status.toBundle();
+        assertEquals(3L, bundle.getLong("watchdog_terminations"));
+        assertEquals(5L, bundle.getLong("silent_bridge_episodes"));
+        assertEquals("GSM leg 7 has been active with no SIP leg for 45 s",
+                bundle.getString("last_watchdog_finding"));
+        assertEquals(1234L, bundle.getLong("last_watchdog_finding_at_wall_ms"));
+    }
+
+    /**
+     * Plan §2.7 trap 1 again, for the value GW-25 added. The max-call-duration fail-safe is a
+     * deadline on this number, so freezing the <em>duration</em> instead of the raw instant
+     * would give the UI a stopwatch that never moves and the watchdog a call that never ages.
+     * The same snapshot has to report a bigger number a moment later.
+     */
+    @Test
+    public void callDurationIsDerivedFromTheClockNotFrozen() throws Exception {
+        GatewayStatus.WatchdogFindings findings = new GatewayStatus.WatchdogFindings(
+                System.currentTimeMillis() - 1_000L, 0L, 0L, "", 0L);
+
+        GatewayStatus status = GatewayStatus.capture(
+                true, accountManager, callManager, audioBridge, 0L, 0L, 0L, findings);
+
+        long first = status.getCallDurationMs();
+        assertTrue("about a second of call so far", first >= 1_000L);
+
+        Thread.sleep(250L);
+
+        assertTrue("the SAME snapshot must have aged with the clock",
+                status.getCallDurationMs() >= first + 200L);
+    }
+
+    /** No call means no duration, not a duration measured from the epoch. */
+    @Test
+    public void noCallMeansNoDuration() {
+        GatewayStatus status = GatewayStatus.capture(
+                true, accountManager, callManager, audioBridge, 0L, 0L, 0L, null);
+
+        assertEquals(0L, status.getWatchdog().getCallUpSinceWallMs());
+        assertEquals(0L, status.getCallDurationMs());
+        assertEquals(0L, status.toBundle().getLong("call_duration_ms"));
+    }
+
+    /**
+     * {@code capture} tolerates a null findings object for the same reason it tolerates null
+     * managers: it runs during teardown too, and a snapshot is more useful than an NPE on the
+     * control thread.
+     */
+    @Test
+    public void missingFindingsReadAsNone() {
+        GatewayStatus status = GatewayStatus.capture(
+                true, accountManager, callManager, audioBridge, 0L, 0L, 0L, null);
+
+        assertEquals(0L, status.getWatchdog().getTerminations());
+        assertEquals("", status.getWatchdog().getLastFinding());
+    }
+
     /** Before the service has published anything the UI still needs something to read. */
     @Test
     public void unavailableIsUsableBeforeAnythingIsPublished() {
@@ -237,6 +314,8 @@ public class GatewayStatusTest {
         assertFalse(GatewayStatus.UNAVAILABLE.isSipRegistered());
         assertFalse(GatewayStatus.UNAVAILABLE.isInGracePeriod());
         assertEquals("IDLE", GatewayStatus.UNAVAILABLE.getCallState());
+        assertEquals(0L, GatewayStatus.UNAVAILABLE.getWatchdog().getTerminations());
+        assertEquals(0L, GatewayStatus.UNAVAILABLE.getCallDurationMs());
     }
 
     /**
@@ -245,7 +324,7 @@ public class GatewayStatusTest {
      */
     @Test
     public void captureToleratesMissingManagers() {
-        GatewayStatus status = GatewayStatus.capture(false, null, null, null, 0L, 0L, 0L);
+        GatewayStatus status = GatewayStatus.capture(false, null, null, null, 0L, 0L, 0L, null);
 
         assertFalse(status.isRunning());
         assertFalse(status.isSipRegistered());

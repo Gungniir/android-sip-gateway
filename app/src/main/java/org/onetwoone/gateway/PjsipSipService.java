@@ -25,6 +25,7 @@ import org.onetwoone.gateway.core.LifecycleCancellation;
 import org.onetwoone.gateway.core.ControlThread;
 import org.onetwoone.gateway.core.GatewayControlThread;
 import org.onetwoone.gateway.core.GatewayStatus;
+import org.onetwoone.gateway.diag.SipDiagnostics;
 import org.onetwoone.gateway.diag.SipTestCallManager;
 import org.onetwoone.gateway.diag.SipUriBuilder;
 import org.onetwoone.gateway.power.PowerController;
@@ -1413,6 +1414,100 @@ public class PjsipSipService extends Service implements SipCallService {
     }
 
     // ========== Watchdog ==========
+    //
+    // GW-25. The watchdog's own state is declared here rather than with the rest of the
+    // fields at the top of the class: everything in this section is written and read on the
+    // control thread by checkOrphanedCalls() and nothing else, so keeping it next to the code
+    // that owns it is what makes "control-thread-confined, no synchronisation" checkable by
+    // reading one screen.
+
+    /**
+     * Upper bound on a single call (GW-25 §3). A call still up after this is not a long
+     * conversation, it is a transition that was missed - so reaching it is an error log and a
+     * bug to investigate, not a normal path. Two hours is the brief's suggestion and is well
+     * past any plausible bridged call; the cost of getting it wrong is a hung-up call, the
+     * cost of not having it is a GSM leg billing forever.
+     */
+    static final long MAX_CALL_DURATION_MS = 2L * 60 * 60 * 1000;
+
+    /**
+     * How long a Telecom-ACTIVE GSM leg may exist with no live SIP leg before the watchdog
+     * reaps it (AUDIT H9, the reverse orphan).
+     *
+     * <p><b>This number is the whole safety argument for the inbound direction.</b> On
+     * {@code MODE_ANSWER_FIRST} the GSM leg is answered <em>first</em>, so Telecom reports
+     * {@code STATE_ACTIVE} - and {@link #currentGsmCallId} is adopted - before any SIP leg
+     * exists; {@code GatewayInCallService.makeSipCallWithRetry} then retries for up to
+     * {@code MAX_SIP_RETRIES(40) x 500 ms = 20 s}, and going ACTIVE has already cancelled the
+     * 30 s {@code INCOMING_TIMEOUT_MS}. During that whole window a perfectly healthy inbound
+     * call has a live GSM leg, no SIP leg, {@code CallManager} at {@code IDLE} and - because
+     * {@code gsmCallPlacedTime} is only ever set by {@code placeGsmCall()}, the SIP-&gt;GSM
+     * dial - {@code isInGracePeriod() == false}. A rule without this dwell hangs up every
+     * inbound call.
+     *
+     * <p>45 s is past both of the mechanisms that are supposed to act first (the 20 s retry
+     * chain and the 30 s incoming timeout), so the watchdog only ever fires when both of them
+     * have already failed.
+     */
+    static final long GSM_WITHOUT_SIP_MAX_MS = 45_000L;
+
+    /**
+     * How long {@code BRIDGED} with open ALSA streams and a frame counter that does not move
+     * counts as a dead transmit leg (GW-25 §2). Detection only - see
+     * {@link #checkSilentBridge}.
+     */
+    static final long SILENT_BRIDGE_STALL_MS = 10_000L;
+
+    /** How long {@code TERMINATING} may last before it is logged. See {@link #noteTerminatingDwell}. */
+    static final long TERMINATING_DWELL_MAX_MS = 30_000L;
+
+    /**
+     * Wall-clock instant the watchdog first saw a call, or 0. The anchor for
+     * {@link #MAX_CALL_DURATION_MS}, and the raw value {@code GatewayStatus} carries so the
+     * duration can be derived from the clock rather than frozen (plan §2.7, trap 1).
+     */
+    @ControlThread
+    private long callUpSinceWallMs = 0L;
+
+    /** The GSM leg {@link #gsmWithoutSipSinceWallMs} is timing, or {@code NO_GSM_CALL}. */
+    @ControlThread
+    private long gsmWithoutSipLegId = GatewayInCallService.NO_GSM_CALL;
+
+    /** When that leg was first seen without a live SIP leg. Reset whenever either changes. */
+    @ControlThread
+    private long gsmWithoutSipSinceWallMs = 0L;
+
+    /** Last {@code GsmAudioPort.getFramesRequested()} the watchdog saw; -1 = nothing yet. */
+    @ControlThread
+    private long bridgeFramesRequested = -1L;
+
+    /** When that count last changed. */
+    @ControlThread
+    private long bridgeFramesStalledSinceWallMs = 0L;
+
+    /** Latch: one diagnostic dump per silent-bridge episode, not one per 3 s tick. */
+    @ControlThread
+    private boolean silentBridgeReported = false;
+
+    @ControlThread
+    private long terminatingSinceWallMs = 0L;
+
+    @ControlThread
+    private boolean terminatingDwellReported = false;
+
+    /** Calls the watchdog has torn down. Zero is the acceptance number for the soak. */
+    @ControlThread
+    private long watchdogTerminations = 0L;
+
+    /** Silent-bridge episodes diagnosed. Detection only, so this can climb with no terminations. */
+    @ControlThread
+    private long silentBridgeEpisodes = 0L;
+
+    @ControlThread
+    private String lastWatchdogFinding = "";
+
+    @ControlThread
+    private long lastWatchdogFindingAtWallMs = 0L;
 
     /**
      * The watchdog tick. Since GW-15 the timer fires on the control looper as well, so this is
@@ -1420,44 +1515,332 @@ public class PjsipSipService extends Service implements SipCallService {
      * terminate calls, and is now ordered against every other event that touches them.
      *
      * <p>Doubles as the backstop that keeps {@link #status} from going stale between call
-     * events.
+     * events, which is why {@link #publishStatus()} is the first statement and sits ahead of
+     * every early return: it is the only thing keeping the 1 Hz UI fresh between call events.
+     *
+     * <h3>The rules, in order (GW-25)</h3>
+     * <ol>
+     *   <li><b>Max call duration</b> - a fail-safe, so it runs before anything that can return
+     *       early.
+     *   <li><b>AUDIT D6</b> - the tracked leg is gone from Telecom but its end was never
+     *       processed. Runs regardless of {@code CallManager} state, because the leg in
+     *       question has already left the state machine. Its trigger is deliberately
+     *       <em>Telecom-based</em>: using the {@code PhoneStateListener}'s modem reading would
+     *       re-create the second source of truth GW-13 deleted, so that listener stays
+     *       observational and this asks Telecom, through the single {@code inCallService}
+     *       resolved below.
+     *   <li><b>AUDIT H9, the reverse orphan</b> - a Telecom-ACTIVE GSM leg with no SIP leg,
+     *       sustained for {@link #GSM_WITHOUT_SIP_MAX_MS}. See that constant for why the dwell
+     *       is the entire safety argument.
+     *   <li><b>Brief §2b</b> - {@code IDLE} with a registered, undisposed SIP call. The old
+     *       tick short-circuited on {@code !hasActiveCall()} and could never see this.
+     *   <li><b>H9's original direction</b> - a SIP call with no GSM leg (unchanged).
+     * </ol>
+     *
+     * <h3>Why "ACTIVE" is spelled {@code currentGsmCallId != NO_GSM_CALL}</h3>
+     * {@code hasLiveGsmCall()} is <em>not</em> {@code STATE_ACTIVE} - it is also true for
+     * RINGING, DIALING, CONNECTING and HOLDING. {@link #currentGsmCallId} is set only by
+     * {@link #handleGsmCallConnected(long)}, i.e. only on Telecom {@code STATE_ACTIVE}, and
+     * cleared only when the end is processed; it is control-thread-confined and free to read.
+     * Treating RINGING as "live GSM" in one rule and as "no GSM" in another is how a watchdog
+     * produces contradictory terminations, so both directions read the same two signals.
+     *
+     * <h3>What must not be terminated</h3>
+     * <ul>
+     *   <li>The inbound pre-answer window - covered by the dwell above.
+     *   <li>The diagnostic test call. {@code SipTestCallManager} in {@code BRIDGE} mode sets
+     *       {@code Wiring.active} with {@code CallManager} at {@code IDLE} and <b>no GSM leg
+     *       at all</b>, and its {@code GatewayCall} is demuxed by {@code isDiagnostic()} and
+     *       never reaches {@code CallManager}. So it trips none of these rules: every one of
+     *       them needs either a tracked GSM leg or a call registered with {@code CallManager}.
+     *       It also never calls {@code startAudioStreams()}, which is the extra discriminator
+     *       the silent-bridge detector uses.
+     *   <li>Anything at all while the {@code InCallService} is unbound. {@code getInstance()
+     *       == null} reads as "no GSM leg" by design, so a transient unbind used to look
+     *       exactly like an orphan. The orphan rules are now skipped for that tick and say so
+     *       in the log; the max-duration fail-safe still runs, which is what stops a
+     *       <em>permanently</em> unbound service from parking a call forever.
+     * </ul>
      */
     @ControlThread
-    private void checkOrphanedCalls() {
+    void checkOrphanedCalls() {  // package-private so WatchdogInvariantsTest can tick it
         control.assertOnControlThread("checkOrphanedCalls");
         publishStatus();
 
-        if (!callManager.hasActiveCall()) return;
+        final long now = System.currentTimeMillis();
+        final CallManager.CallState state = callManager.getState();
+        final boolean trackedGsmLeg = currentGsmCallId != GatewayInCallService.NO_GSM_CALL;
+        final boolean anyCallUp = state != CallManager.CallState.IDLE || trackedGsmLeg;
+
+        if (!anyCallUp) {
+            callUpSinceWallMs = 0L;
+        } else if (callUpSinceWallMs == 0L) {
+            callUpSinceWallMs = now;
+        }
+
+        noteTerminatingDwell(state, now);
+        checkSilentBridge(state, now);
+
+        // Rule 1: the hard deadline. Ahead of every early return, because a fail-safe that
+        // only runs in the healthy shapes is not one.
+        if (anyCallUp && now - callUpSinceWallMs >= MAX_CALL_DURATION_MS) {
+            String finding = "call up for " + ((now - callUpSinceWallMs) / 1000)
+                    + " s, past the " + (MAX_CALL_DURATION_MS / 1000) + " s maximum";
+            Log.e(TAG, "INVARIANT: " + finding + " (state=" + state + ", gsmLeg="
+                    + currentGsmCallId + ") - a state transition was missed; terminating");
+            watchdogTerminate(finding);
+            return;
+        }
+
+        // ONE resolution of the instance, held in a local for the whole tick. Asking
+        // GatewayInCallService.getInstance() twice - once for "is it bound", once for "is the
+        // leg live" - would put an unbind between the two reads, and the D6 rule below acts on
+        // exactly the answer that unbind produces. That is the false positive this guard
+        // exists to prevent, so it must not be reintroduced by the guard itself.
+        final GatewayInCallService inCallService = GatewayInCallService.getInstance();
+        if (inCallService == null) {
+            // Not an orphan, an unbound service. See the note above.
+            Log.w(TAG, "No InCallService bound - skipping the orphan rules this tick");
+            return;
+        }
+        final boolean gsmLegLive = inCallService.hasLiveGsmCall();
+
+        // Rule 2: AUDIT D6. Telecom has no leg, but ours was never ended.
+        if (trackedGsmLeg && !gsmLegLive) {
+            String finding = "GSM leg " + currentGsmCallId + " is tracked but Telecom no"
+                    + " longer has it - a DISCONNECTED was missed";
+            Log.e(TAG, "INVARIANT (AUDIT D6): " + finding + " - the audio streams and the"
+                    + " mute lease are still held; repairing");
+            watchdogTerminate(finding);
+            return;
+        }
+
+        // Rule 3: AUDIT H9, the reverse orphan. isInGracePeriod() is kept as the brief asks,
+        // but it is only ever true on the SIP->GSM direction - the dwell is what protects
+        // GSM->SIP. See GSM_WITHOUT_SIP_MAX_MS.
+        if (trackedGsmLeg && gsmLegLive && !callManager.hasLiveSipCall()
+                && !callManager.isInGracePeriod()) {
+            if (noteGsmLegWithoutSip(currentGsmCallId, now)) {
+                String finding = "GSM leg " + currentGsmCallId + " has been active with no"
+                        + " SIP leg for " + ((now - gsmWithoutSipSinceWallMs) / 1000) + " s";
+                Log.e(TAG, "INVARIANT (AUDIT H9): " + finding + " - this burns GSM minutes;"
+                        + " terminating");
+                watchdogTerminate(finding);
+                return;
+            }
+        } else {
+            resetGsmWithoutSipWatch();
+        }
+
+        if (state == CallManager.CallState.IDLE) {
+            // Rule 4: brief §2b. The old tick returned here unconditionally, so a call the
+            // state machine had forgotten was invisible to it forever.
+            if (callManager.hasLiveSipCall()) {
+                String finding = "CallManager is IDLE but still holds a live SIP call";
+                Log.e(TAG, "INVARIANT: " + finding + " - reaping it");
+                recordFinding(finding);
+                watchdogTerminations++;
+                // terminateAllCalls() returns early from IDLE and would do nothing at all.
+                callManager.hangupSipCall();
+                publishStatus();
+            }
+            return;
+        }
+
         if (callManager.isInGracePeriod()) return;
 
-        // Check if GSM call exists. Since GW-13 this asks Telecom about the leg it is
-        // tracking rather than reading the PhoneStateListener's process-wide lastPhoneState:
-        // that field said "some call is up somewhere", never "*this* call is up", and it is
-        // now observational only.
-        if (!isGsmLegLive()) {
-            GatewayCall sipCall = callManager.getCurrentSipCall();
-            if (sipCall != null) {
-                Log.w(TAG, "Orphaned SIP call detected, terminating");
-                callManager.terminateAllCalls();
-            }
+        // Rule 5: H9's original direction - a SIP call with no GSM leg. Since GW-13 this asks
+        // Telecom about the leg it is tracking rather than reading the PhoneStateListener's
+        // process-wide lastPhoneState: that field said "some call is up somewhere", never
+        // "*this* call is up", and it is now observational only.
+        if (!gsmLegLive && callManager.getCurrentSipCall() != null) {
+            Log.w(TAG, "Orphaned SIP call detected, terminating");
+            watchdogTerminate("SIP call with no GSM leg");
         }
     }
 
     /**
-     * Whether Telecom still has a GSM leg that has not begun going away.
-     *
-     * <p>No {@code InCallService} bound means no GSM leg - the gateway only ever sees GSM
-     * calls through it, so this matches the old {@code lastPhoneState == IDLE} default while
-     * being about the tracked call rather than about the modem.
+     * The watchdog's remedy. Which teardown to use is not a free choice (plan §3d):
+     * {@code terminateAllCalls()} returns early from {@code IDLE} and will <b>not</b> stop the
+     * audio streams for a leg that never left it - which is exactly the shape most of these
+     * rules fire on. {@link #handleGsmCallEnded(long, String)} stops the streams
+     * unconditionally, releases the {@code DeviceMuteManager} lease, and drives
+     * {@code CallManager}, which hangs both legs up when the machine <em>is</em> past
+     * {@code IDLE}. So the tracked leg goes through that, and the direct Telecom disconnect
+     * afterwards covers the one case neither reaches: a live Telecom leg while the machine
+     * never left {@code IDLE}. Every step is idempotent, so the overlap is harmless.
      */
     @ControlThread
-    private boolean isGsmLegLive() {
+    private void watchdogTerminate(String finding) {
+        control.assertOnControlThread("watchdogTerminate");
+        recordFinding(finding);
+        watchdogTerminations++;
+
+        long leg = currentGsmCallId;
+        if (leg != GatewayInCallService.NO_GSM_CALL) {
+            handleGsmCallEnded(leg, "watchdog: " + finding);
+        } else if (callManager.hasActiveCall()) {
+            callManager.terminateAllCalls();
+        }
+
         GatewayInCallService inCallService = GatewayInCallService.getInstance();
-        if (inCallService == null) {
-            Log.d(TAG, "No InCallService bound - treating the GSM leg as gone");
+        if (inCallService != null && inCallService.hasLiveGsmCall()) {
+            inCallService.disconnectCall();
+        }
+
+        resetWatchdogCallClocks();
+        publishStatus();
+    }
+
+    /**
+     * Bridged, streaming, and pjmedia has stopped asking for frames - the transmit leg is
+     * dead even though nothing threw (GW-25 §2, AUDIT D6's audio half).
+     *
+     * <p><b>Detection only.</b> The brief is explicit that this must not auto-terminate until
+     * it has been shown not to false-positive over a week of real calls, and
+     * {@code GatewayStatus.WatchdogFindings.getSilentBridgeEpisodes()} is where that evidence
+     * accumulates.
+     *
+     * <p>The counter comes from {@code GsmAudioPort.getFramesRequested()}, which GW-23a added
+     * as an {@code AtomicLong} read - safely published, no lock, and nothing that could park
+     * the pjmedia RT thread behind {@code close()}'s drain (PHASE-1-PLAN §3b). This file does
+     * not touch {@code GsmAudioPort}.
+     *
+     * <p>Two independent guards keep the diagnostic test call out of here: it leaves
+     * {@code CallManager} at {@code IDLE}, and it never calls {@code startAudioStreams()}, so
+     * {@code isAudioStreaming()} is false.
+     *
+     * <p>The dump is latched to once per episode. It emits ~20 logcat lines and creates ~8
+     * owned pjsua2 objects (released since GW-22); at a 3 s tick, running it every time would
+     * be ~1200 invocations an hour.
+     */
+    @ControlThread
+    private void checkSilentBridge(CallManager.CallState state, long nowWallMs) {
+        if (state != CallManager.CallState.BRIDGED || !audioBridge.isAudioStreaming()) {
+            resetSilentBridgeWatch();
+            return;
+        }
+        GsmAudioPort port = audioBridge.getGsmAudioPort();
+        if (port == null) {
+            resetSilentBridgeWatch();
+            return;
+        }
+        if (!noteBridgeFrames(port.getFramesRequested(), nowWallMs)) {
+            return;
+        }
+
+        silentBridgeEpisodes++;
+        String finding = "bridged and streaming, but pjmedia has requested no frame for "
+                + ((nowWallMs - bridgeFramesStalledSinceWallMs) / 1000) + " s"
+                + " (framesRequested=" + bridgeFramesRequested + ")";
+        recordFinding(finding);
+        Log.e(TAG, "INVARIANT: " + finding + " - the transmit leg is dead. Detection only,"
+                + " the call is left up (GW-25 section 2).");
+
+        GatewayCall sipCall = callManager.getCurrentSipCall();
+        if (sipCall != null && !sipCall.isDisposed()) {
+            // The conference-wiring half of this dump is the part nothing else logs, and is
+            // what says whether local->call(TX to SIP) is false.
+            SipDiagnostics.dumpAndLog(sipCall, port, "watchdog: silent bridge");
+        }
+    }
+
+    /**
+     * Frame-counter bookkeeping for {@link #checkSilentBridge}, split out because it is pure
+     * and therefore the only part of the detector a JVM test can drive - everything around it
+     * ends in pjsua2.
+     *
+     * @return true exactly once per stall episode, on the first tick past the dwell
+     */
+    @ControlThread
+    boolean noteBridgeFrames(long framesRequested, long nowWallMs) {
+        if (framesRequested != bridgeFramesRequested) {
+            bridgeFramesRequested = framesRequested;
+            bridgeFramesStalledSinceWallMs = nowWallMs;
+            silentBridgeReported = false;
             return false;
         }
-        return inCallService.hasLiveGsmCall();
+        if (silentBridgeReported) return false;
+        if (nowWallMs - bridgeFramesStalledSinceWallMs < SILENT_BRIDGE_STALL_MS) return false;
+        silentBridgeReported = true;
+        return true;
+    }
+
+    /**
+     * Dwell bookkeeping for the reverse orphan. Split out for the same reason as
+     * {@link #noteBridgeFrames}, and keyed on the leg id so a new call starts a new clock.
+     *
+     * @return true once the leg has been ACTIVE with no SIP leg for
+     *         {@link #GSM_WITHOUT_SIP_MAX_MS}
+     */
+    @ControlThread
+    boolean noteGsmLegWithoutSip(long gsmCallId, long nowWallMs) {
+        if (gsmCallId != gsmWithoutSipLegId) {
+            gsmWithoutSipLegId = gsmCallId;
+            gsmWithoutSipSinceWallMs = nowWallMs;
+            return false;
+        }
+        return nowWallMs - gsmWithoutSipSinceWallMs >= GSM_WITHOUT_SIP_MAX_MS;
+    }
+
+    /**
+     * The fourth hard deadline the brief asks for, shipped as a log and nothing more.
+     *
+     * <p>Said plainly: <b>this is near-unreachable and there is no remedy to build.</b>
+     * {@code terminateAllCalls()} walks {@code TERMINATING -> IDLE} synchronously with no
+     * suspension point in between, {@code CallManager.transition()} is private, and there is
+     * no API to force the machine out of {@code TERMINATING}. So a tick can only observe that
+     * state if something is wedged inside {@code terminateAllCalls()} itself - in which case
+     * the control thread is stuck and this method is not running either. It exists so that if
+     * the state ever does stick, the log says so rather than the symptom being silent.
+     */
+    @ControlThread
+    private void noteTerminatingDwell(CallManager.CallState state, long nowWallMs) {
+        if (state != CallManager.CallState.TERMINATING) {
+            terminatingSinceWallMs = 0L;
+            terminatingDwellReported = false;
+            return;
+        }
+        if (terminatingSinceWallMs == 0L) {
+            terminatingSinceWallMs = nowWallMs;
+            return;
+        }
+        if (terminatingDwellReported) return;
+        if (nowWallMs - terminatingSinceWallMs < TERMINATING_DWELL_MAX_MS) return;
+
+        terminatingDwellReported = true;
+        String finding = "CallManager has been TERMINATING for "
+                + ((nowWallMs - terminatingSinceWallMs) / 1000) + " s";
+        recordFinding(finding);
+        Log.e(TAG, "INVARIANT: " + finding + " - detection only; there is no API to force"
+                + " TERMINATING -> IDLE and terminateAllCalls() has no suspension point"
+                + " inside that state, so reaching this means the control thread is wedged.");
+    }
+
+    @ControlThread
+    private void recordFinding(String finding) {
+        lastWatchdogFinding = finding;
+        lastWatchdogFindingAtWallMs = System.currentTimeMillis();
+    }
+
+    @ControlThread
+    private void resetSilentBridgeWatch() {
+        bridgeFramesRequested = -1L;
+        bridgeFramesStalledSinceWallMs = 0L;
+        silentBridgeReported = false;
+    }
+
+    @ControlThread
+    private void resetGsmWithoutSipWatch() {
+        gsmWithoutSipLegId = GatewayInCallService.NO_GSM_CALL;
+        gsmWithoutSipSinceWallMs = 0L;
+    }
+
+    @ControlThread
+    private void resetWatchdogCallClocks() {
+        callUpSinceWallMs = 0L;
+        resetGsmWithoutSipWatch();
+        resetSilentBridgeWatch();
     }
 
     // ========== Public API ==========
@@ -1943,7 +2326,9 @@ public class PjsipSipService extends Service implements SipCallService {
     private void publishStatus() {
         control.assertOnControlThread("publishStatus");
         status = GatewayStatus.capture(isRunning, accountManager, callManager, audioBridge,
-                configGeneration, GatewayCall.getCallsCreated(), GatewayCall.getCallsDeleted());
+                configGeneration, GatewayCall.getCallsCreated(), GatewayCall.getCallsDeleted(),
+                new GatewayStatus.WatchdogFindings(callUpSinceWallMs, watchdogTerminations,
+                        silentBridgeEpisodes, lastWatchdogFinding, lastWatchdogFindingAtWallMs));
     }
 
     /** The composite the UI shows. Reads the snapshot, never the live managers. */
