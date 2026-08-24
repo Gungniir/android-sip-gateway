@@ -171,4 +171,77 @@
     -->
     <string name="toast_audio_settings_saved">Audio settings saved. Route, devices and mute controls apply on the next call; sound card and SoC profile need a restart.</string>
 
+    <!-- ==================================================================================
+         GW-41 - the status-first main screen.
+
+         Everything below is new in wave 2. The status block renders GatewayStatus, which
+         GW-45 published whole and nothing consumed; the SoC profile is the control that
+         existed only on the web page (PHASE-4-PLAN section C8); the rest is the vocabulary
+         a collapsible, grouped screen needs and a flat one did not.
+         ================================================================================== -->
+
+    <!-- Section title for the group that holds the battery limit and the web interface. The
+         other three sections reuse the section_ strings that already name them. -->
+    <string name="section_system">System:</string>
+
+    <!-- Status chips. Deliberately short: they sit in a row with the call state and a
+         duration, on a phone, and a chip that wraps is a chip that has failed. -->
+    <string name="chip_registered">Registered</string>
+    <string name="chip_not_registered">No SIP</string>
+    <string name="chip_stopped">Stopped</string>
+    <string name="chip_no_service">No service</string>
+    <string name="chip_grace">Grace</string>
+
+    <!-- The three status lines, separately - which is the whole point of GW-45. -->
+    <string name="label_status_sip">SIP</string>
+    <string name="label_status_call">Call</string>
+    <string name="label_status_audio">Audio</string>
+
+    <!-- Call-object counters (GW-22). "alive" is callsCreated - callsDeleted and is the
+         number that must settle at 0 or 1; a climbing value means CallGraveyard is leaking
+         pjsua2 Call objects to the finalizer. -->
+    <string name="status_call_objects">pjsua2 calls: %1$d alive · %2$d created · %3$d deleted</string>
+
+    <!--
+      The watchdog block (GW-25).
+
+      This is the highest-value thing on the screen and the reason a status header exists at
+      all: silent-bridge detection and orphan termination were built because those failures
+      are invisible from outside the process, and until now the only place a human looks
+      showed none of it. A silent bridge is detection-only - the watchdog never terminates on
+      that signal - so a non-zero episode count beside zero terminations is exactly the
+      evidence GW-25 asked to collect.
+    -->
+    <string name="label_status_watchdog">Watchdog</string>
+    <string name="status_watchdog_clean">No findings</string>
+    <string name="status_watchdog_counts">%1$d terminated · %2$d silent bridge</string>
+    <string name="status_watchdog_last">Last: %1$s (%2$s)</string>
+
+    <!-- Relative ages, for the last watchdog finding. Kept as three resources rather than
+         one with a unit argument so a translation can put the unit where it belongs. -->
+    <string name="status_age_now">just now</string>
+    <string name="status_age_seconds">%1$ds ago</string>
+    <string name="status_age_minutes">%1$dm ago</string>
+    <string name="status_age_hours">%1$dh ago</string>
+
+    <!--
+      SoC audio profile (PHASE-4-PLAN section C8, GW-41 step 4d).
+
+      audio_profile was settable only from the web page, on a device whose entire purpose is
+      a SoC-specific audio tap. GatewayConfig already owned the key and both surfaces already
+      read it, so this is the control and nothing else.
+    -->
+    <string name="label_soc_profile">SoC Profile:</string>
+    <string name="select_soc_profile">Select SoC Profile</string>
+    <string name="help_soc_profile">Which chipset audio tap to use. Auto detects it; a change needs a restart.</string>
+    <string name="option_soc_profile_auto">Auto-detect</string>
+    <string name="option_soc_profile_qualcomm">Qualcomm</string>
+    <string name="option_soc_profile_mediatek">MediaTek</string>
+
+    <!-- Collapsible section affordance. Text rather than a drawable because res/drawable is
+         GW-44's this wave. -->
+    <string name="label_section_expanded">▾</string>
+    <string name="label_section_collapsed">▸</string>
+    <string name="cd_section_toggle">Show or hide this section</string>
+
 </resources>

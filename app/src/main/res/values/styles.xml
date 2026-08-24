@@ -373,4 +373,87 @@
         <item name="android:minHeight">@dimen/gw_touch_target</item>
     </style>
 
+    <!-- ==================================================================================
+         GW-41 - what a grouped, collapsible screen needs on top of GW-40's vocabulary.
+
+         Additions only. Nothing here redefines a GW-40 token, palette entry or type step;
+         these are compositions of them for structures that did not exist in wave 1, when
+         the screen was still one flat column of stock widgets.
+         ================================================================================== -->
+
+    <!-- A section's tappable title row: title on the left, chevron on the right. The whole
+         row is the touch target, which is why the minHeight is here and not on the chevron. -->
+    <style name="Widget.Gateway.SectionTitleRow" parent="">
+        <item name="android:orientation">horizontal</item>
+        <item name="android:gravity">center_vertical</item>
+        <item name="android:baselineAligned">false</item>
+        <item name="android:minHeight">@dimen/gw_touch_target</item>
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:background">?attr/selectableItemBackground</item>
+        <item name="android:focusable">true</item>
+        <item name="android:clickable">true</item>
+    </style>
+
+    <style name="Widget.Gateway.SectionTitle" parent="Widget.MaterialComponents.TextView">
+        <item name="android:textAppearance">@style/TextAppearance.Gateway.StatusValue</item>
+        <item name="android:textColor">@color/gw_on_surface</item>
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:layout_weight">1</item>
+    </style>
+
+    <style name="Widget.Gateway.SectionChevron" parent="Widget.MaterialComponents.TextView">
+        <item name="android:textAppearance">@style/TextAppearance.Gateway.StatusValue</item>
+        <item name="android:textColor">@color/gw_on_surface_variant</item>
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:paddingLeft">@dimen/gw_space_sm</item>
+        <item name="android:paddingStart">@dimen/gw_space_sm</item>
+    </style>
+
+    <!-- One line of the status header: a fixed-width role label and the value beside it, so
+         the three values line up as a column rather than as three sentences. -->
+    <style name="Widget.Gateway.StatusRow" parent="">
+        <item name="android:orientation">horizontal</item>
+        <item name="android:baselineAligned">true</item>
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:paddingTop">@dimen/gw_space_xxs</item>
+        <item name="android:paddingBottom">@dimen/gw_space_xxs</item>
+    </style>
+
+    <style name="Widget.Gateway.StatusRowLabel" parent="Widget.MaterialComponents.TextView">
+        <item name="android:textAppearance">@style/TextAppearance.Gateway.SectionHeader</item>
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">wrap_content</item>
+        <!-- In ems rather than dp so the column tracks the text size instead of clipping at
+             a large font scale, and so this needs no new entry in GW-40's dimens.xml. -->
+        <item name="android:minEms">5</item>
+    </style>
+
+    <!-- The label that sits directly above a control. -->
+    <style name="Widget.Gateway.FieldLabel" parent="Widget.MaterialComponents.TextView">
+        <item name="android:textAppearance">@style/TextAppearance.Gateway.Label</item>
+        <item name="android:textColor">@color/gw_on_surface_variant</item>
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:paddingTop">@dimen/gw_space_sm</item>
+        <item name="android:paddingBottom">@dimen/gw_label_gap</item>
+    </style>
+
+    <!-- A section panel: the same surface as Widget.Gateway.Panel, with the gap between
+         panels folded in so a layout does not have to repeat a margin on every include. -->
+    <style name="Widget.Gateway.Panel.Section">
+        <item name="android:layout_marginBottom">@dimen/gw_panel_gap</item>
+    </style>
+
+    <!-- The body of a collapsible section. Visibility is owned by the ViewModel. -->
+    <style name="Widget.Gateway.SectionBody" parent="">
+        <item name="android:orientation">vertical</item>
+        <item name="android:layout_width">match_parent</item>
+        <item name="android:layout_height">wrap_content</item>
+        <item name="android:paddingTop">@dimen/gw_space_xs</item>
+    </style>
+
 </resources>

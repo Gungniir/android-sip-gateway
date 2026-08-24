@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GW-41 - the persistent status header.
+
+  This is the part of the screen that justifies the wave. GW-45 published the whole
+  GatewayStatus snapshot and nothing consumed it: the three status lines were glued into one
+  String, the call state, the duration, the pjsua2 call counters and the entire
+  WatchdogFindings block had no view at all. GW-25 built silent-bridge detection and orphan
+  termination precisely because those failures are invisible from outside the process - and
+  then the only place a human looks showed none of it.
+
+  Everything here is bound by ui/StatusHeaderBinder at draw time. Two of the values -
+  getCallDurationMs() and isInGracePeriod() - re-read the clock on every call by design, so
+  nothing derived from them may be cached in a field; see that class.
+
+  It sits OUTSIDE the ScrollView in activity_main.xml. On an appliance you are holding at a
+  bench, "is it registered, is a call up, has the watchdog found anything" must not be
+  something you scroll back to.
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/statusHeader"
+    style="@style/Widget.Gateway.Panel">
+
+    <!-- Chip row: SIP state, call state, grace marker, and the running call duration. -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:baselineAligned="false"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:id="@+id/sipChip"
+            style="@style/Widget.Gateway.StatusChip.Idle"
+            android:text="@string/chip_no_service"/>
+
+        <TextView
+            android:id="@+id/callChip"
+            style="@style/Widget.Gateway.StatusChip.Idle"
+            android:layout_marginStart="@dimen/gw_space_xs"
+            android:layout_marginLeft="@dimen/gw_space_xs"
+            android:text="@string/label_status_call"/>
+
+        <TextView
+            android:id="@+id/graceChip"
+            style="@style/Widget.Gateway.StatusChip.Warn"
+            android:layout_marginStart="@dimen/gw_space_xs"
+            android:layout_marginLeft="@dimen/gw_space_xs"
+            android:text="@string/chip_grace"
+            android:visibility="gone"/>
+
+        <Space
+            android:layout_width="0dp"
+            android:layout_height="1dp"
+            android:layout_weight="1"/>
+
+        <TextView
+            android:id="@+id/callDurationText"
+            style="@style/Widget.Gateway.StatusValue"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:fontFamily="monospace"
+            android:visibility="gone"/>
+    </LinearLayout>
+
+    <View style="@style/Widget.Gateway.Divider"/>
+
+    <!-- The three status lines, separately. statusText is the SIP one: it keeps the id the
+         pre-GW-41 screen used for its three-line composite, because that id is the contract
+         GatewayStringResourcesTest spot-checks across the rewrite. -->
+    <LinearLayout style="@style/Widget.Gateway.StatusRow">
+
+        <TextView
+            style="@style/Widget.Gateway.StatusRowLabel"
+            android:text="@string/label_status_sip"/>
+
+        <TextView
+            android:id="@+id/statusText"
+            style="@style/Widget.Gateway.Body"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/status_not_started"/>
+    </LinearLayout>
+
+    <LinearLayout style="@style/Widget.Gateway.StatusRow">
+
+        <TextView
+            style="@style/Widget.Gateway.StatusRowLabel"
+            android:text="@string/label_status_call"/>
+
+        <TextView
+            android:id="@+id/callStatusText"
+            style="@style/Widget.Gateway.Body"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/status_not_started"/>
+    </LinearLayout>
+
+    <LinearLayout style="@style/Widget.Gateway.StatusRow">
+
+        <TextView
+            style="@style/Widget.Gateway.StatusRowLabel"
+            android:text="@string/label_status_audio"/>
+
+        <TextView
+            android:id="@+id/audioStatusText"
+            style="@style/Widget.Gateway.Body"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/status_not_started"/>
+    </LinearLayout>
+
+    <!-- GW-22's acceptance number: alive must settle at 0 or 1. A value that climbs across a
+         soak means CallGraveyard is abandoning pjsua2 Call objects to the finalizer. -->
+    <TextView
+        android:id="@+id/callCountersText"
+        style="@style/Widget.Gateway.Footnote"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:paddingTop="@dimen/gw_space_xs"
+        android:fontFamily="monospace"/>
+
+    <View style="@style/Widget.Gateway.Divider"/>
+
+    <LinearLayout style="@style/Widget.Gateway.StatusRow">
+
+        <TextView
+            style="@style/Widget.Gateway.StatusRowLabel"
+            android:text="@string/label_status_watchdog"/>
+
+        <TextView
+            android:id="@+id/watchdogSummaryText"
+            style="@style/Widget.Gateway.Caption"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/status_watchdog_clean"/>
+    </LinearLayout>
+
+    <!-- Gone until the watchdog has actually found something. An empty "last finding: -"
+         row every day of the year is how a real one stops being read. -->
+    <TextView
+        android:id="@+id/watchdogFindingText"
+        style="@style/Widget.Gateway.Footnote"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:visibility="gone"/>
+
+</LinearLayout>
