@@ -95,7 +95,104 @@ State these as unverified rather than passing them:
 
 ## Wave 1 — `phase-4-wave-1` (GW-40, GW-45)
 
-*To be completed when the wave lands.*
+385 tests, 0 failures, lint clean (`HardcodedText` 54 → 0, baseline not regenerated),
+`assembleDebug` green including the native build. Nothing on hardware.
+
+### Read this first: wave 1 is *supposed* to look half-finished
+
+Two things will look broken and are not. If you report either as a regression, the fix will
+be to explain the wave split again — so they are written down here instead.
+
+1. **In dark mode, several blocks render light-grey on a dark surface.** `activity_main.xml`
+   still hardcodes `#f0f0f0`, `#666666`, `#999999` and 9/10sp text. GW-40 deliberately did not
+   restyle individual widgets, because GW-41 rewrites that file from scratch in wave 2 and
+   per-widget styling now would be thrown away. `Widget.Gateway.Console` already exists as the
+   landing spot. **Expected in wave 1; a regression only if still present after wave 2.**
+2. **All seven buttons render as filled primary**, with no visual hierarchy between Save,
+   Connect, Disconnect and Restart. The layout assigns no styles yet.
+   `Widget.Gateway.Button.Secondary` / `.Destructive` / `.Text` exist for GW-41 to assign.
+
+**GW-45 is invisible in this wave.** `MainActivity` still observes the deprecated
+`getStatusText()` composite, so the status area looks identical to Phase 2. That is correct:
+GW-45 built the surface, GW-41 renders it. The only thing to check here is that status still
+works *at all* — see below.
+
+### 1. Does it launch? (the theme-incompatibility gate)
+
+This is the one wave-1 failure that would be loud, and it must be cleared on both devices
+before anything else is worth doing.
+
+```
+adb -s <dev> install -r app-debug.apk
+adb -s <dev> shell am start -n org.onetwoone.gateway/.MainActivity
+adb -s <dev> logcat -d | grep -iE 'AndroidRuntime|FATAL|MaterialComponents|AppCompat'
+```
+
+A Material theme applied to a stock-widget layout fails at **inflation**, immediately and
+with a clear message — `The style on this component requires your app theme to be
+Theme.MaterialComponents (or a descendant)`. If it launches, this class of failure is
+excluded entirely.
+
+### 2. The string extraction — the silent one
+
+68+ literals moved into `strings.xml`. A wrong mapping puts a correct-looking label on the
+wrong control, and nothing about that is detectable at runtime.
+
+**Compare side by side against the pre-Phase-4 build**:
+`release-output/phase-2-waves/wave-3-*.apk` is the last UI before any of this. Screenshot
+both, top to bottom, and diff by eye. Pay particular attention to the hint text inside the
+eleven `EditText` fields — hints are the easiest to transpose and the least likely to be
+noticed, because you only see them while a field is empty.
+
+Three strings need explicit checking, because the plan wrongly called them dead and they turn
+out to be spinner prompts — they appear **only when the spinner dialog is open**:
+tap the Capture Device, Playback Device and Mixer Route spinners and confirm each dialog has
+a sensible title.
+
+### 3. Both themes, both devices
+
+```
+adb -s <dev> shell cmd uimode night yes
+adb -s <dev> shell cmd uimode night no
+```
+
+There is **no `setDefaultNightMode()` call** — GW-40 chose to follow the system rather than
+force a mode, so the day palette stays reachable and a per-app override can be a real setting
+in GW-41/GW-42 rather than a hardcoded constant.
+
+Consequence to check rather than assume: **Android has no system dark theme before API 29,
+and `minSdk` is 23.** Confirm each device's level with
+`adb -s <dev> shell getprop ro.build.version.sdk`. If a device is below 29 it will *always*
+render the day palette and the night half is untestable there — record that rather than
+reporting the toggle as broken.
+
+In each theme, on each device, check: status text legible; section headers distinguishable
+from body text; spinner dialogs not white-on-white when opened; the app bar and status bar
+not the same colour as each other.
+
+### 4. GW-45 — confirm nothing regressed
+
+The surface is not rendered yet, so this is a no-regression check only.
+
+1. Start the gateway. The status block must still show three lines — `SIP:` / `Call:` /
+   `Audio:` — exactly as before.
+2. Stop the gateway, or kill the service. The status must read **`Service not connected`** —
+   *not* `SIP: Not configured / Call: Idle / Audio: Not initialized`. Those are two different
+   strings and preserving the distinction is the one thing in GW-45 that could have regressed
+   silently. A unit test covers it; this confirms it on the device.
+3. Place one real call and watch the status change. Registration and call handling must behave
+   exactly as in Phase 2 — **if either changed, that is a Phase 4 bug**, since nothing in this
+   wave is supposed to be able to affect them.
+
+### 5. Not verifiable here
+
+- **Material widgets on API 23–25.** The unit tests run at SDK 28 and both bench devices are
+  API 26+. The Material upgrade on Android 6/7 is unverified.
+- **Whether the palette actually reads well** on the merlinx and lavender panels, at arm's
+  length, in a drawer or over a bench. No amount of unit testing reaches this; it is a
+  judgement call that needs the physical device in the intended setting.
+- **H18** (the locale-sensitive SoC detection found during this wave) cannot be reproduced on
+  merlinx, which prints `mt6768` — a marker that survives the bug. Do not attempt it.
 
 ## Wave 2 — `phase-4-wave-2` (GW-41, GW-44)
 
