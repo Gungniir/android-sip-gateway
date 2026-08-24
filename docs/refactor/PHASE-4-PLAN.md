@@ -171,6 +171,11 @@ about "the config UI" as one thing:
 profile from the phone in your hand — on a device whose whole purpose is a SoC-specific
 audio tap.
 
+→ **GW-41 closes this half**: the SoC profile selector joins the audio section of the new
+main screen. It is one spinner over a `GatewayConfig` key that already exists and is already
+read on both surfaces, so it costs nothing beyond the control itself. The other direction
+(status, call mode, battery limit, test call on the web page) waits for GW-43.
+
 ### C9 — Nothing in either UI mentions SMS
 
 SMS is half the gateway's job, `SmsHandler` is the second-largest class in the app at 1262

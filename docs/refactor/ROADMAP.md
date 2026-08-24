@@ -144,16 +144,37 @@ implemented as written.
 
 ### Phase 4 — UI: from debug harness to appliance console
 
-Presentation only. Shares no files with Phases 1–3, so it can run in parallel or after.
-Full plan and constraints: [PHASE-4-UI-PLAN.md](PHASE-4-UI-PLAN.md).
+**Execution plan: [PHASE-4-PLAN.md](PHASE-4-PLAN.md)** — it overrides
+[PHASE-4-UI-PLAN.md](PHASE-4-UI-PLAN.md) below wherever they disagree. That plan was measured
+at `c0255dd`, before Phase 2 landed; its diagnosis holds but nine of its facts do not, and one
+of them changes the sequencing.
+
+Almost presentation-only. GW-45 is the exception and it is not optional.
 
 | Issue | Fixes |
 |---|---|
-| GW-40 | Design system foundation — Material Components, palette, `values-night`, typography, extract 43 hardcoded strings |
-| GW-41 | Status-first main screen; decompose `MainActivity` (580 lines) and `MainViewModel` (616 lines) |
+| GW-40 | Design system foundation — Material Components, palette, `values-night`, typography, extract **68** hardcoded strings (not 43) |
+| [GW-45](issues/GW-45-status-surface.md) | **The UI cannot reach the status it shows.** `MainViewModel` publishes `LiveData<GatewayStatus>` instead of flattening the snapshot to a three-line String |
+| GW-41 | Status-first main screen; decompose `MainActivity` (580 lines) and `MainViewModel` (**666** lines) |
+| GW-44 | Adaptive icon, density buckets, notification icons (**three** stock ones, not one), app label |
 | GW-42 | First-run commissioning wizard: root → permissions → dialer role → SIP account → verification call |
-| GW-43 | Web interface redesign — **coordinate with GW-30**, it is still unauthenticated |
-| GW-44 | Adaptive icon, density buckets, notification icon, app label |
+| GW-43 | Web interface redesign — **GATED on GW-30**, see below |
+
+**Wave graph** (base `b3b2c0e`): wave 1 = GW-40 + GW-45 · wave 2 = GW-41 + GW-44 ·
+wave 3 = GW-42 · GW-43 gated.
+
+**Why GW-45 exists.** The old plan justified Phase 4 being presentation-only on the claim that
+`MainViewModel` "already exposes everything through LiveData". It does not: it reads the
+immutable snapshot and keeps three fields, one of them `getStatusText()` — a pre-formatted
+composite its own javadoc describes as *"the three-line composite the UI has always shown"*.
+Call state, duration, grace period, the GW-22 call counters and the whole GW-25
+`WatchdogFindings` block are unreachable. A status-first screen had no data source.
+
+**Why GW-43 is gated.** `/api/config` still returns `sip_password` in cleartext from an
+unauthenticated `0.0.0.0:8080` server — AUDIT **S2**, live at `b3b2c0e`. Phase 2 removed the
+*fiction* from that response (it used to publish hardcoded fake credentials) but not the
+exposure. A better-looking unauthenticated config endpoint invites more use of it. Same
+pattern as GW-23b in Phase 2: specified, not landed.
 
 **The theme is not merely unstyled — it is empty.** `Theme.AppCompat.Light.DarkActionBar`
 with no body, a `colors.xml` holding only launcher-icon colours, one 565-line layout, and
@@ -195,6 +216,15 @@ Phase 2:  GW-20, GW-21, GW-22, GW-23, GW-24 — independent, parallel
 
 Phase 3:  GW-30, GW-31 — anytime
           GW-32 — after Phase 1
+
+Phase 4:  wave 1  GW-40 (design system)  +  GW-45 (status surface)   — disjoint
+          wave 2  GW-41 (main screen)    +  GW-44 (icon/branding)    — disjoint
+          wave 3  GW-42 (commissioning wizard)                       — alone
+          GATED   GW-43 (web redesign)   — blocked on GW-30 / S2
+
+  GW-40 and GW-44 are split across waves only because both would edit adjacent
+  attributes of the manifest's <application> tag (android:theme vs android:icon).
+  GW-45 is a prerequisite for GW-41, not a nicety — see PHASE-4-PLAN.md §2 C1.
 ```
 
 **Conflict hot-spots** — do not assign two agents to these simultaneously:
