@@ -100,7 +100,9 @@ necessary but not sufficient, and the real test lands in wave 2.
 
 ---
 
-## Wave 2 — `phase-2-wave-2` (GW-24, GW-27, GW-22) — *pending*
+## Wave 2 — `phase-2-wave-2` (GW-24, GW-27, GW-22)
+
+329 tests, 0 failures, both variants; lint clean; native build green. Nothing on hardware.
 
 Will be filled in when the wave lands. Expected headline checks:
 - **GW-27's fixture test** — restart with the 8 unread SMS present; **zero** re-forwards at
@@ -136,6 +138,55 @@ Will be filled in when the wave lands. Expected headline checks:
 - **GW-22** — 500-cycle soak, `callsCreated - callsDeleted` equal to active calls at the end,
   zero tombstones. A premature `Call` delete presents as a native crash, so the soak is also
   the safety test.
+
+### GW-27 — the SMS fixture. Run this before anything that restarts the app a lot.
+
+The fixture on merlinx is 8 unread SMS, `_id` 3/4/5/6/8/10/11/12. Confirm it is intact
+first — if it is not, this test cannot be run again without recreating it:
+```
+adb -s 055f14050405 shell su -c 'content query --uri content://sms/inbox --projection _id:read'
+```
+Expect 8 rows `read=0`, plus `_id=1` `read=1` (spent during triage).
+
+1. **The reported bug.** With the fixture present, restart the app and watch the PBX /
+   receiving extension. **Zero re-forwards.** Before this wave, all 8 were re-sent.
+2. **Confirm the flag now actually gets written** — this is the half that never worked:
+   ```
+   adb shell su -c 'content query --uri content://sms/inbox --projection _id:read'
+   ```
+   Forwarded ids must show `read=1`. Any `could not be marked read` error naming an id
+   means `content update` is refused under the app's own uid/SELinux context, which was
+   only ever verified from a root shell, not from inside the app. **That is the single
+   most likely thing to differ on hardware.**
+3. **The test that proves the design.** If step 2 fails, step 1 must *still* pass — the
+   persisted record, not the flag, is what carries correctness. If both fail together, the
+   persistence is not surviving `force-stop`; check with
+   `adb shell su -c 'cat /data/data/org.onetwoone.gateway/shared_prefs/*.xml | grep processed_sms'`.
+4. Flapping registration: force ~5 re-registrations with unread SMS present. Each must
+   forward nothing new (`processInbox` runs on every successful REGISTER).
+
+### GW-22 — the soak, which is the safety test as much as the leak test
+
+**A premature `Call` delete presents as a native crash, not an exception.** So:
+
+1. **Zero tombstones** — `adb shell ls /data/tombstones` before and after. This is the
+   pass/fail criterion, not the heap graph.
+2. 500 call cycles. Then `callsAlive` (in the status / `GET_STATUS` bundle) must equal the
+   number of genuinely active calls, i.e. 0 or 1.
+3. `adb shell dumpsys meminfo org.onetwoone.gateway | grep -E 'Native Heap|TOTAL'` before
+   and after. **Expect it flat-ish — that is the predicted result, not a failure.** These
+   were finalizer-deferred releases, never unbounded leaks. The finding is about
+   determinism.
+4. **Watch for `Call deleted on FinalizerDaemon`** in logcat. Every occurrence means the
+   deterministic path lost the race and the old, dangerous behaviour happened instead. A
+   few are tolerable; a widening `callsCreated - callsDeleted` gap is not.
+5. Also expect occasional `Call still holds pjsua slot N after 60000 ms - abandoning it to
+   the finalizer`. That is the graveyard **refusing** to delete, which is the safe
+   direction. Frequent occurrences mean `getId()` is not clearing as assumed and the Call
+   half is not buying anything — worth reporting.
+
+**If a tombstone appears:** revert only the `bury(...)` call sites, keep `CallGraveyard`
+and the counters. The recipe is in the class javadoc and the commit body.
 
 ## Wave 3 — `phase-2-wave-3` (GW-21, GW-25) — *pending*
 
