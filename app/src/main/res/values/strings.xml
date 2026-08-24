@@ -244,4 +244,122 @@
     <string name="label_section_collapsed">▸</string>
     <string name="cd_section_toggle">Show or hide this section</string>
 
+    <!-- ==================================================================================
+         GW-42 - the commissioning wizard.
+
+         Five steps: root, permissions, the dialer role, the SIP account, and what can
+         honestly be verified from the handset. Everything below is new in wave 3. The wizard
+         reuses the hint_ and action_ strings the main screen already defines wherever it asks
+         for the same thing, so a label cannot drift between the two surfaces.
+         ================================================================================== -->
+
+    <string name="setup_title">Set up gateway</string>
+    <string name="setup_step_indicator">Step %1$d of %2$d</string>
+
+    <!-- Navigation. Skip is a first-class action here, not an escape hatch: this wizard runs
+         on an appliance that may be being recovered in the field, and every step has to be
+         passable without completing it. -->
+    <string name="setup_action_next">Next</string>
+    <string name="setup_action_finish">Finish</string>
+    <string name="setup_action_skip">Skip</string>
+    <string name="setup_action_back">Back</string>
+    <string name="setup_action_close">Close</string>
+    <!-- Always on screen, under the footer. It is the recovery instruction: the whole point of
+         this wizard is that it can be walked away from, and someone holding a half-provisioned
+         phone should not have to guess that. -->
+    <string name="setup_close_hint">Close at any time — the main screen stays usable, and this wizard can be re-run from System.</string>
+
+    <!-- Step headers. The summary says why the step is on the list at all. -->
+    <string name="setup_step_root_title">Root access</string>
+    <string name="setup_step_root_summary">The gateway grants its own permissions, opens the ALSA devices and drives the mixer. Without root none of that works, and none of the steps after this one can be done from the phone.</string>
+
+    <string name="setup_step_permissions_title">Permissions</string>
+    <string name="setup_step_permissions_summary">Six runtime permissions, granted through root rather than through dialogs. Without them the service cannot read the modem or record call audio.</string>
+
+    <string name="setup_step_dialer_title">Default dialer</string>
+    <string name="setup_step_dialer_summary">Android binds an InCallService only for the default dialer. Without the role this app never sees a GSM call at all — the usual cause of a gateway that registers and then does nothing.</string>
+
+    <string name="setup_step_sip_title">SIP account</string>
+    <string name="setup_step_sip_summary">The PBX account this gateway registers with, and where each SIM sends its incoming calls.</string>
+
+    <string name="setup_step_verify_title">Verify</string>
+    <string name="setup_step_verify_summary">What can be checked from the handset, and what cannot. Read both — they are not the same claim.</string>
+
+    <!-- Chips. Short: they sit beside a line of detail on a phone. -->
+    <string name="setup_chip_unknown">Not checked</string>
+    <string name="setup_chip_skipped">Skipped</string>
+    <string name="setup_chip_root_ok">Root OK</string>
+    <string name="setup_chip_root_missing">No root</string>
+    <string name="setup_chip_permissions_ok">All granted</string>
+    <string name="setup_chip_permissions_missing">Missing</string>
+    <string name="setup_chip_dialer_ok">Default dialer</string>
+    <string name="setup_chip_dialer_missing">Not dialer</string>
+    <string name="setup_chip_registered">Registered</string>
+    <string name="setup_chip_not_registered">Not registered</string>
+    <string name="setup_chip_call_dialing">Dialling</string>
+    <string name="setup_chip_call_answered">Answered</string>
+    <string name="setup_chip_call_unanswered">No answer</string>
+    <string name="setup_chip_call_failed">Failed</string>
+
+    <!-- Step 1 - root -->
+    <string name="setup_root_help">Runs \'id\' through su and shows exactly what came back. If it fails, grant the app root in Magisk and check again — the answer is not cached.</string>
+    <string name="setup_root_not_checked">Not checked yet.</string>
+    <string name="setup_root_failed_detail">su exited %1$d: %2$s</string>
+    <string name="setup_no_output">no output</string>
+    <string name="setup_action_check_root">Check root</string>
+
+    <!-- Step 2 - permissions -->
+    <string name="setup_permissions_help">Granting also claims the dialer role, which is the next step. Refresh re-reads what actually stuck, rather than what the grant said.</string>
+    <string name="setup_action_grant">Grant via root</string>
+    <string name="setup_action_refresh_permissions">Refresh</string>
+    <string name="setup_action_battery_opt">Exempt from battery optimisation</string>
+    <string name="setup_battery_opt_help">Adds the app to the doze whitelist. A separate button because on some devices this has been seen to freeze the handset — it is your choice, not something the wizard does on the way past.</string>
+
+    <!-- Step 3 - the dialer role -->
+    <string name="setup_dialer_help">Claimed through root, then read back from the system rather than inferred from the command\'s exit code — on some builds the claim reports success and does nothing.</string>
+    <string name="setup_dialer_held">This app holds the dialer role. GSM calls will reach the gateway.</string>
+    <string name="setup_dialer_not_held">This app does not hold the dialer role. GSM calls will not reach the gateway.</string>
+    <string name="setup_action_claim_dialer">Set as default dialer</string>
+
+    <!-- Step 4 - the SIP account -->
+    <string name="setup_sip_existing_account">Already configured: %1$s@%2$s. Saving replaces it; Skip leaves it exactly as it is.</string>
+    <string name="setup_sip_blank_help">Every box is pre-filled from the current configuration, and a box left blank keeps what is stored. This wizard never clears a value, so re-running it cannot wipe a working gateway; clear a setting from the main screen instead.</string>
+    <string name="setup_sip_routing_help" tools:ignore="Typos">Where incoming GSM calls are sent. SIM2 can be left as it is on a single-SIM phone.</string>
+    <string name="setup_action_save_account">Save account</string>
+
+    <!-- Step 5 - verification.
+
+         The two headings below are deliberately not one heading. Registration is a fact the
+         PBX decided and the control thread published; the test call is evidence about
+         routing; neither is a statement about audio. Collapsing them into one green tick is
+         the failure this step was written to avoid. -->
+    <string name="setup_verify_registration_heading">1. Registration — checkable</string>
+    <string name="setup_verify_registration_help">A real check: the PBX accepted these credentials. It proves the account, the network path and the transport. It does not prove that call audio works.</string>
+    <string name="setup_action_start_gateway">Start gateway</string>
+    <string name="setup_action_reregister">Re-register</string>
+    <string name="setup_registration_not_running">The gateway is not running, so there is nothing registered to check.</string>
+
+    <string name="setup_verify_testcall_heading">2. Test call — evidence</string>
+    <string name="setup_verify_testcall_help">Places a SIP call with no GSM leg and transmits a tone into it. What it can show is whether the PBX routes this destination and answers. The whole transcript is below: read it rather than the chip.</string>
+    <string name="setup_test_destination_help">Use a real extension. The default is taken from this gateway\'s own SIM routing, because those are extensions the PBX already routes for it.</string>
+    <string name="setup_test_destination_warning">That is a feature code, and this gateway\'s trunk cannot dial one: the PBX\'s inbound context for the trunk routes extensions, not feature codes, so *43 and friends are rejected even on a correctly configured gateway. Dialling it anyway is allowed — the failure will just not mean anything.</string>
+    <string name="setup_test_call_not_run">No test call placed yet.</string>
+    <string name="setup_test_call_dialing">INVITE sent, waiting for the PBX.</string>
+    <string name="setup_test_call_answered">The PBX routed this destination and answered. SIP signalling and media negotiation work.</string>
+    <string name="setup_test_call_unanswered">The call ended without being answered — rejected, busy, or nobody there. Try another extension; this is not necessarily the gateway.</string>
+    <string name="setup_test_call_failed">The call could not be placed, or something failed while it was up. The transcript below says what.</string>
+
+    <string name="setup_audio_caveat">What this wizard cannot check is the GSM to SIP audio bridge. Whether call audio actually crosses between the modem and the PBX depends on the ALSA tap, the mixer route and the SoC profile, and no test on this handset can confirm it. Place a real call and listen, in both directions.</string>
+
+    <!-- Transient messages -->
+    <string name="setup_toast_account_saved">SIP account saved</string>
+    <string name="setup_toast_reregistering">Re-registering…</string>
+    <string name="setup_toast_test_call">Test call to %1$s</string>
+    <string name="setup_toast_need_destination">Enter a destination first</string>
+    <string name="setup_toast_battery_opt_requested">Requesting battery optimisation exemption…</string>
+
+    <!-- The re-run entry point, in the System section of the main screen. -->
+    <string name="setup_action_run_wizard">Run setup wizard</string>
+    <string name="setup_run_wizard_help">Root, permissions, dialer role, SIP account and verification, one step at a time. Safe to re-run: every step can be skipped and nothing is cleared.</string>
+
 </resources>

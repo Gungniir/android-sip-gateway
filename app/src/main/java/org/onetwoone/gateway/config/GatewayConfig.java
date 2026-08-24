@@ -107,6 +107,23 @@ public class GatewayConfig {
     private static final String KEY_MANUAL_MUTE_CONTROLS = "manual_mute_controls";
 
     /**
+     * Whether the commissioning wizard has been dismissed at least once (GW-42).
+     *
+     * <p>The key lives here because this class is the only one allowed to name a preference
+     * key at all, not because the flag is gateway configuration - it is first-run state for
+     * {@code ui/setup}. It is deliberately in {@code gateway_prefs} rather than a fourth
+     * preference file: a new file would be a fourth thing to migrate and a fourth thing for
+     * a future audit to find.
+     *
+     * <p><b>Skipping counts as done.</b> The wizard writes it on any dismissal the operator
+     * chose - finishing, skipping through, or closing it - because a wizard that reappears
+     * on every launch until it is *completed* is the same trap as one that blocks: on a
+     * half-provisioned phone you can never get past it. Re-running is an explicit action
+     * from the System section, not something the app decides for you.
+     */
+    private static final String KEY_SETUP_COMPLETED = "setup_completed";
+
+    /**
      * The canonical mic-mute control list: a comma-separated {@code String} in
      * {@code gsm_audio_config}. Package-private so the migration test can assert on the
      * stored representation rather than only on what the getters return.
@@ -702,6 +719,27 @@ public class GatewayConfig {
         gatewayPrefs.edit().putString(KEY_PROCESSED_SMS, record == null ? "" : record).commit();
     }
 
+    // ========== Commissioning wizard (GW-42) ==========
+
+    /**
+     * Whether the first-run commissioning wizard has already been dismissed.
+     *
+     * <p>False means "this handset has never been through the wizard", which is the only
+     * thing that makes {@code ui/setup/SetupLauncher} open it unasked. It says nothing about
+     * whether the gateway is actually configured - {@link #isSipConfigured()} answers that,
+     * and the two are deliberately independent: a phone can be fully provisioned over the
+     * web interface and never see the wizard, and a phone can skip every step of the wizard
+     * and be configured by nothing.
+     */
+    public boolean isSetupCompleted() {
+        return gatewayPrefs.getBoolean(KEY_SETUP_COMPLETED, false);
+    }
+
+    /** Record that the wizard has been dismissed (or, with false, ask for it again). */
+    public void setSetupCompleted(boolean completed) {
+        edit().setSetupCompleted(completed).apply();
+    }
+
     // ========== Bulk Operations ==========
 
     /**
@@ -882,6 +920,12 @@ public class GatewayConfig {
 
         public Editor setDtmfRelayEnabled(boolean enabled) {
             gateway().putBoolean(KEY_DTMF_RELAY, enabled);
+            return this;
+        }
+
+        /** GW-42: the wizard has been dismissed. See {@link GatewayConfig#isSetupCompleted()}. */
+        public Editor setSetupCompleted(boolean completed) {
+            gateway().putBoolean(KEY_SETUP_COMPLETED, completed);
             return this;
         }
 

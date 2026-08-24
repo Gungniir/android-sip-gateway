@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  GW-42 - the panel shape GW-40's gw_corner_panel was defined for.
+
+  gw_corner_panel (4dp) was one of the tokens wave 1 left deliberately unconsumed: it needs a
+  drawable to live in, and res/drawable belonged to GW-44 that wave. Widget.Gateway.Panel uses
+  a flat @color background, so nothing until now had a radius at all.
+
+  Every value is a token. Nothing here names a colour or a dimension directly, so
+  values-night moves it without this file changing.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+
+    <solid android:color="@color/gw_surface_variant" />
+
+    <corners android:radius="@dimen/gw_corner_panel" />
+
+    <stroke
+        android:width="@dimen/gw_stroke"
+        android:color="@color/gw_outline_variant" />
+</shape>

@@ -2,6 +2,7 @@ package org.onetwoone.gateway.ui;
 
 import android.content.Context;
 import android.content.pm.PackageManager;
+import android.telecom.TelecomManager;
 import android.util.Log;
 
 import androidx.lifecycle.LiveData;
@@ -48,6 +49,22 @@ public class PermissionManager {
      */
     public static class PermissionState {
         public Map<String, Boolean> permissions = new HashMap<>();
+
+        /**
+         * Whether this package currently holds the dialer role.
+         *
+         * <p>Until GW-42 this field was declared, defaulted to false and <b>never
+         * written</b>: {@link PermissionManager#refreshPermissionStatus()} built a fresh
+         * {@code PermissionState} and filled in only the runtime permissions. Nothing read
+         * it either, so the dead value was invisible. The commissioning wizard's dialer step
+         * is the first consumer, and a step that reports "not default dialer" on a phone
+         * that is one would be worse than no step at all - so the refresh now answers it
+         * from {@code TelecomManager}.
+         *
+         * <p>It is not a permission and is deliberately outside {@link #allGranted()}: the
+         * role is granted by the framework's role manager, not by {@code pm grant}, and a
+         * caller that needs both has to ask for both.
+         */
         public boolean isDefaultDialer = false;
 
         public boolean allGranted() {
@@ -104,6 +121,8 @@ public class PermissionManager {
                 }
             }
 
+            state.isDefaultDialer = isDefaultDialer();
+
             permissionState.postValue(state);
         });
     }
@@ -135,6 +154,45 @@ public class PermissionManager {
                         + result.stderr());
             }
         }
+    }
+
+    /**
+     * Whether this package holds the dialer role right now (GW-42).
+     *
+     * <p>Read from {@code TelecomManager}, not inferred from the exit code of the
+     * {@code cmd role} call that tried to claim it: on a device where the claim silently
+     * does nothing - the failure mode this whole step exists for, since without the role
+     * {@code GatewayInCallService} never binds and no GSM call is ever handled - the claim
+     * still exits 0. Every failure is caught: this runs on the permission executor and its
+     * caller must not die because a framework service was unavailable.
+     */
+    private boolean isDefaultDialer() {
+        try {
+            TelecomManager telecom =
+                    (TelecomManager) context.getSystemService(Context.TELECOM_SERVICE);
+            if (telecom == null) {
+                return false;
+            }
+            return packageName.equals(telecom.getDefaultDialerPackage());
+        } catch (Exception e) {
+            Log.w(TAG, "Could not read the default dialer package: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * Claim the dialer role via root, then re-read what actually happened (GW-42).
+     *
+     * <p>The same command {@link #grantAllPermissionsAsync()} runs, exposed on its own so the
+     * commissioning wizard's dialer step can retry it without re-granting six permissions.
+     * Runs on the same single-thread executor as everything else here, so it is never a root
+     * call on the main thread.
+     */
+    public void setDefaultDialerAsync() {
+        executor.execute(() -> {
+            setDefaultDialerViaRoot();
+            refreshPermissionStatus();
+        });
     }
 
     private void setDefaultDialerViaRoot() {
