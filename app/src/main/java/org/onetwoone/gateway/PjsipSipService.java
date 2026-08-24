@@ -208,6 +208,9 @@ public class PjsipSipService extends Service implements SipCallService {
         // note for why the thread cannot simply register at construction.
         endpointManager = new SipEndpointManager(config);
         control = new GatewayControlThread(endpointManager::registerThread);
+        // ...and handed back, so the manager can assert its own thread ownership (GW-15).
+        // The two-step wiring is what the circular dependency costs.
+        endpointManager.setControlThread(control);
 
         accountManager = new SipAccountManager(config, endpointManager);
 
@@ -228,12 +231,15 @@ public class PjsipSipService extends Service implements SipCallService {
         testCall = new SipTestCallManager(this, config, accountManager, audioBridge,
                 this, mainHandler);
 
-        // Reconnection strategy. Its timer still fires on main; the action hops to the
-        // control thread, because attemptReconnect() runs initializeSip().
-        reconnection = new ReconnectionStrategy(() -> control.post(this::attemptReconnect));
+        // Reconnection strategy. GW-15 moved its timer onto the control looper, so the action
+        // runs there directly - attemptReconnect() needs that thread anyway, and the hop that
+        // used to provide it is now redundant. Its pending/enabled flags are confined to that
+        // thread too, which is what closes the duplicate-reconnect race (AUDIT F6).
+        reconnection = new ReconnectionStrategy(control, this::attemptReconnect);
 
-        // Watchdog. Same shape: main-looper timer, control-thread check.
-        watchdog = new ServiceWatchdog(() -> control.post(this::checkOrphanedCalls));
+        // Watchdog. Same shape: control-looper timer, control-thread check - so the tick is
+        // ordered against the call and registration events it inspects.
+        watchdog = new ServiceWatchdog(control, this::checkOrphanedCalls);
 
         // Account listener
         accountManager.setListener(accountListener);
@@ -247,8 +253,14 @@ public class PjsipSipService extends Service implements SipCallService {
 
         if (!isRunning) {
             isRunning = true;
-            reconnection.setEnabled(true);
-            watchdog.start();
+
+            // Both own state confined to the control thread since GW-15, so arming them is a
+            // post like everything else. Queued ahead of initializeSip, which is the order
+            // they ran in before.
+            control.post(() -> {
+                reconnection.setEnabled(true);
+                watchdog.start();
+            });
 
             // Was the "SipInit" bare thread. Same body, same blocking, one owner.
             control.post(this::initializeSip);
@@ -285,10 +297,18 @@ public class PjsipSipService extends Service implements SipCallService {
             mute.release(lease);
         }
 
-        // Stop components
-        watchdog.stop();
-        reconnection.setEnabled(false);
-        reconnection.cancel();
+        // Stop components. Both timers now live on the control looper (GW-15), so disarming
+        // them is a post, drained by the quitSafely() below. Nothing here has to have happened
+        // before onDestroy returns: both timers are *delayed* messages on the very looper that
+        // quitSafely() is about to terminate, and quitSafely drops messages whose due time is
+        // still in the future. This post is belt to that braces - and it is what keeps
+        // `running` and `pending` honest if the service is ever destroyed without quitting the
+        // looper.
+        control.post(() -> {
+            watchdog.stop();
+            reconnection.setEnabled(false);
+            reconnection.cancel();
+        });
 
         if (smsHandler != null) {
             smsHandler.stop();
@@ -423,8 +443,13 @@ public class PjsipSipService extends Service implements SipCallService {
      * Retry SIP bring-up after a failure.
      *
      * <p>Moved off main by GW-10, and not optional: it calls {@link #initializeSip()}, which
-     * is now a control-thread task. {@code ReconnectionStrategy} still counts its backoff on
-     * the main looper and hops here.
+     * is now a control-thread task. Since GW-15 {@code ReconnectionStrategy} counts its
+     * backoff on the control looper too, so this runs directly as its timer action - no hop,
+     * and the backoff state is ordered against the registration events that drive it.
+     *
+     * <p>{@code hasTransport()} below is the reason the thread matters: it talks to pjsua, and
+     * pjsua aborts the process when an unregistered thread calls in. The control thread is the
+     * one thread this process registers.
      */
     @ControlThread
     private void attemptReconnect() {
@@ -928,8 +953,10 @@ public class PjsipSipService extends Service implements SipCallService {
     // ========== Watchdog ==========
 
     /**
-     * The watchdog tick. Its timer still fires on the main looper; the check itself runs
-     * here, because it reads {@link #lastPhoneState} and can terminate calls.
+     * The watchdog tick. Since GW-15 the timer fires on the control looper as well, so this is
+     * the timer action itself rather than a hop off main - which matters because it reads
+     * {@link #lastPhoneState} and can terminate calls, and is now ordered against every other
+     * event that touches them.
      *
      * <p>Doubles as the backstop that keeps {@link #status} from going stale between call
      * events.
@@ -1093,7 +1120,10 @@ public class PjsipSipService extends Service implements SipCallService {
         }
         stopRequested = true;
         Log.d(TAG, "Stop requested");
-        reconnection.setEnabled(false);
+        // Called from main (the broadcast receiver, MainViewModel, the reload path). The
+        // reconnect flags belong to the control thread since GW-15, so this is a post; it is
+        // ordered ahead of onDestroy's own disarm on the same queue.
+        control.post(() -> reconnection.setEnabled(false));
         stopSelf();
     }
 
