@@ -250,9 +250,7 @@ public class RootHelper {
                 // Kill first, THEN give up. The old code joined both readers (1 s each)
                 // before it even looked at `finished`, so a hung `su` cost the caller
                 // timeoutMs + 2000 ms.
-                process.destroyForcibly();
-                stdoutTask.cancel(true);
-                stderrTask.cancel(true);
+                abandon(process, stdoutTask, stderrTask);
                 Log.e(TAG, "Timed out after " + timeoutMs + " ms: " + display);
                 return new RootResult(display, EXIT_TIMED_OUT, "", "");
             }
@@ -261,8 +259,7 @@ public class RootHelper {
             if (stdout == null) {
                 // A reader that did not finish means the output on hand is incomplete.
                 // Report a failure; never hand back a partial read.
-                process.destroyForcibly();
-                stderrTask.cancel(true);
+                abandon(process, stdoutTask, stderrTask);
                 Log.e(TAG, "stdout reader did not complete within " + OUTPUT_HANDOFF_MS
                         + " ms: " + display);
                 return new RootResult(display, EXIT_NO_OUTPUT, "", "");
@@ -287,12 +284,27 @@ public class RootHelper {
 
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            process.destroyForcibly();
-            stdoutTask.cancel(true);
-            stderrTask.cancel(true);
+            abandon(process, stdoutTask, stderrTask);
             Log.w(TAG, "Interrupted waiting for: " + display);
             return new RootResult(display, EXIT_INTERRUPTED, "", "");
         }
+    }
+
+    /**
+     * Give up on a process: kill it and stop caring about its readers.
+     *
+     * <p>{@code destroy()} rather than {@code destroyForcibly()} on purpose — the latter is
+     * API 26 and {@code minSdkVersion} is 23, while on Android {@code Process.destroy()}
+     * already sends SIGKILL. Killing the process closes both pipes, which is what actually
+     * unblocks the reader threads; {@code cancel(true)} only interrupts them, and a thread
+     * blocked in a native {@code read()} does not notice an interrupt. They are daemons, so
+     * a reader that somehow survives cannot hold anything open.
+     */
+    private static void abandon(Process process, FutureTask<String> stdoutTask,
+                                FutureTask<String> stderrTask) {
+        process.destroy();
+        stdoutTask.cancel(true);
+        stderrTask.cancel(true);
     }
 
     /**

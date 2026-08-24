@@ -8,8 +8,7 @@ import org.onetwoone.gateway.GsmAudioNative;
  * This exists as a test seam, nothing more: the profiles' saved-state handling is
  * what has to be provably correct under concurrency (AUDIT B2), and that can only
  * be exercised on the JVM, where there is no sound card, no JNI library and no
- * root shell. Production code uses {@link #NATIVE} (or, on Qualcomm, a
- * tinymix-backed reader the profile builds for itself).
+ * root shell. Production code — both profiles — uses {@link #NATIVE}.
  *
  * Deliberately not a general-purpose mixer abstraction — do not grow it. Anything
  * that is not needed by both call sites belongs in the profile that needs it.
@@ -46,11 +45,16 @@ public interface MixerControls {
     String getEnum(int card, String control);
 
     /**
-     * Production backend: the tinyalsa JNI bridge.
+     * Production backend: every read and every write goes through the tinyalsa
+     * JNI bridge. Both profiles use it.
      *
-     * {@link #getEnum} always returns "" — the native bridge exposes no ENUM
-     * getter. The only profile that reads ENUM controls (Qualcomm) supplies its
-     * own tinymix-based reader.
+     * <p>{@link #getEnum} used to return "" unconditionally, on the stated grounds
+     * that "the native bridge exposes no ENUM getter" and that Qualcomm supplied
+     * its own tinymix-based reader. Both were false by the time it mattered:
+     * {@link GsmAudioNative#getMixerControlEnum} was added for
+     * {@code DeviceMuteManager} (AUDIT B1c) and has been in production use since,
+     * and Qualcomm's "own reader" exec'd a {@code tinymix} binary that does not
+     * exist on the device — see AUDIT <b>B1e</b>, which this closes.
      */
     MixerControls NATIVE = new MixerControls() {
         @Override
@@ -71,7 +75,11 @@ public interface MixerControls {
 
         @Override
         public String getEnum(int card, String control) {
-            return "";
+            // Native returns null for missing / non-ENUM / unreadable; this interface's
+            // contract is "" for the same, so callers keep using isEmpty() as the
+            // readable test. Same mapping as DeviceMuteManager.NATIVE.
+            String value = GsmAudioNative.getMixerControlEnum(card, control);
+            return value == null ? "" : value;
         }
     };
 }
