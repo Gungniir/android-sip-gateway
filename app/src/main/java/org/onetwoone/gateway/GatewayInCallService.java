@@ -114,14 +114,27 @@ public class GatewayInCallService extends InCallService {
         instance = this;
         Log.d(TAG, "InCallService created");
 
-        // Ensure SIP service is running
+        // Ensure SIP service is running.
+        //
+        // GW-26 §5: a null instance is not on its own a reason to start it. This service binds
+        // whenever the app is the default dialler, and PjsipSipService.onDestroy nulls its
+        // instance *first* - so a bind landing during teardown, or any bind after an explicit
+        // STOP, used to resurrect the gateway the operator had just stopped. The persisted latch
+        // is written before stopSelf(), so it is already set by the time we can see the null.
+        //
+        // Only an explicit user stop suppresses this. After a crash, an OOM kill or a reboot the
+        // latch is clear and the gateway comes back, which is the direction that matters.
         if (PjsipSipService.getInstance() == null) {
-            Log.w(TAG, "SIP service not running, starting it...");
-            Intent intent = new Intent(this, PjsipSipService.class);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(intent);
+            if (PjsipSipService.isUserStopped(this)) {
+                Log.i(TAG, "SIP service stopped by the user - not restarting it");
             } else {
-                startService(intent);
+                Log.w(TAG, "SIP service not running, starting it...");
+                Intent intent = new Intent(this, PjsipSipService.class);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(intent);
+                } else {
+                    startService(intent);
+                }
             }
         }
     }
