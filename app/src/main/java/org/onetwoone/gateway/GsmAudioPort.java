@@ -278,16 +278,10 @@ public class GsmAudioPort extends AudioMediaPort {
                     if (bytesRead != 0) {
                         captureErrors.incrementAndGet();
                     }
-                    // Send silence on error
-                    for (int i = 0; i < frameSize; i++) buf.add((short) 0);
-                    frame.setSize(frameSize);
-                    frame.setType(pjmedia_frame_type.PJMEDIA_FRAME_TYPE_NONE);
+                    noData(frame);
                 }
             } else {
-                // Not capturing - send silence
-                for (int i = 0; i < frameSize; i++) buf.add((short) 0);
-                frame.setSize(frameSize);
-                frame.setType(pjmedia_frame_type.PJMEDIA_FRAME_TYPE_NONE);
+                noData(frame);
             }
 
             // Log every 500 frames (~10 seconds)
@@ -297,6 +291,36 @@ public class GsmAudioPort extends AudioMediaPort {
         } catch (Exception e) {
             Log.e(TAG, "Error in onFrameRequested: " + e.getMessage());
         }
+    }
+
+    /**
+     * Hand pjmedia an empty {@code PJMEDIA_FRAME_TYPE_NONE} frame: we have no audio this
+     * tick, either because capture is not running or because the ALSA read failed.
+     *
+     * <p>It used to write {@code frameSize} zero bytes into the frame buffer one boxed
+     * {@code Short} at a time and then declare {@code size = frameSize}. Every byte of
+     * that was dead work, and the claim was internally inconsistent. Confirmed against
+     * the sources this build actually links, pjproject <b>2.14.1</b>:
+     * <ul>
+     *   <li>{@code pjsua2/media.cpp:get_frame} sets
+     *       {@code frame->size = PJ_MIN(frame_.buf.size(), frame_.size)} and only then
+     *       memcpy's — so an empty vector yields a 0-byte copy no matter what
+     *       {@code setSize} said. Declaring 320 over a 0-length vector was never a read
+     *       of unset memory, but it was a lie the clamp happened to absorb.</li>
+     *   <li>{@code pjmedia/conference.c:get_frame} does
+     *       {@code if (frame_type != PJMEDIA_FRAME_TYPE_AUDIO) { rx_level = 0; continue; }}
+     *       on the direct path — the buffer is never read — and on the resampling path
+     *       {@code read_port} calls {@code pjmedia_zero_samples()} itself. Either way our
+     *       silence was overwritten or ignored.</li>
+     * </ul>
+     * So {@code size = 0} is both cheaper and the honest description. Do not re-add a
+     * {@code setSize(frameSize)} here without re-reading both of those functions: with a
+     * zero-length vector it would be a size that does not match its buffer, and only the
+     * {@code PJ_MIN} clamp stands between that and a bad copy.
+     */
+    private static void noData(MediaFrame frame) {
+        frame.setSize(0);
+        frame.setType(pjmedia_frame_type.PJMEDIA_FRAME_TYPE_NONE);
     }
 
     /**
