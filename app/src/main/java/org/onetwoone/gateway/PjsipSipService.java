@@ -88,7 +88,14 @@ public class PjsipSipService extends Service implements SipCallService {
     private PowerController powerController;
     private ReconnectionStrategy reconnection;
     private ServiceWatchdog watchdog;
-    private SmsHandler smsHandler;
+
+    /**
+     * Constructed on main by {@link #initSmsHandler()} and used almost entirely from the
+     * control thread (GW-21). {@code volatile} so the control thread cannot see a half-built
+     * handler — {@code handleRegistrationState} reads this field, and the {@code initializeSip}
+     * task it follows is queued <em>before</em> {@code initSmsHandler()} runs.
+     */
+    private volatile SmsHandler smsHandler;
 
     /**
      * Written on main ({@link #startWebServer()} / {@link #stopWebServer()}, both reachable from
@@ -462,12 +469,17 @@ public class PjsipSipService extends Service implements SipCallService {
         }
 
         // 4. Silence the two things that feed work INTO the control thread from outside it,
-        //    before it is retired. Both are main-thread calls today and both stay ahead of the
+        //    before it is retired. Both are called from main here and both stay ahead of the
         //    quit deliberately: an SMS ContentObserver firing, or a NanoHTTPD worker calling
-        //    reloadConfig(), after the looper is gone is a post to a dead thread. It is
-        //    harmless today (the post just fails) but GW-21 moves the observer ONTO the control
-        //    looper, at which point unregistering it after the quit becomes a real race. Keep
-        //    this order.
+        //    reloadConfig(), after the looper is gone is a post to a dead thread.
+        //
+        //    GW-21 moved the observer ONTO the control looper, so the unregister could not
+        //    stay on main: it would race an onChange already running there. smsHandler.stop()
+        //    now latches a flag synchronously (an in-flight scan sees it and stops handing
+        //    messages over) and POSTS the unregister to the control thread. quitSafely()
+        //    below drains what is already queued, so it still runs - and it runs on the one
+        //    thread that dispatches onChange, which is what makes it safe. Keep this order:
+        //    posting the unregister after quitSafely() would leak the observer.
         if (smsHandler != null) {
             teardownStep("smsHandler.stop", smsHandler::stop);
         }
@@ -1252,15 +1264,21 @@ public class PjsipSipService extends Service implements SipCallService {
 
     // ========== SMS Handling ==========
 
+    /**
+     * Build the SMS handler and start it. Called on main from {@code onStartCommand}; the
+     * handler's own {@code start()} hands the work to the control thread, so nothing here
+     * blocks (GW-21, AUDIT G1).
+     */
     private void initSmsHandler() {
-        smsHandler = new SmsHandler(this, new SmsHandler.SmsCallback() {
+        smsHandler = new SmsHandler(this, control, new SmsHandler.SmsCallback() {
             /**
-             * Reaches us on two different threads today: main, from {@code SmsHandler}'s
-             * {@code ContentObserver} (constructed with the main handler), and the control
-             * thread, from the {@code processInbox()} retry that {@code handleRegistrationState}
-             * fires after a successful REGISTER. {@code runOrPost} collapses both onto the
-             * control thread - inline for the retry, so {@code processInbox}'s
-             * add-to-processed-then-call-back loop keeps its current synchronous shape.
+             * Always the control thread since GW-21 gave the {@code ContentObserver} the
+             * control looper, so {@code runOrPost} always dispatches <b>inline</b> here. That
+             * is deliberate and load-bearing: {@code processInbox}'s
+             * mark-in-flight-then-forward ordering depends on the send being synchronous with
+             * respect to the scan. It is kept as {@code runOrPost} rather than a direct call
+             * because that is also what hands this thread to pjlib before
+             * {@link #sendSipMessage} touches pjsua2.
              */
             @Override
             public void onIncomingSms(String from, String body, long smsId, int simSlot) {

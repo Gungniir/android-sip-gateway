@@ -12,7 +12,6 @@ import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
-import android.os.Looper;
 import android.os.SystemClock;
 import android.telephony.SmsManager;
 import android.telephony.SubscriptionInfo;
@@ -20,11 +19,16 @@ import android.telephony.SubscriptionManager;
 import android.util.Log;
 
 import org.onetwoone.gateway.config.GatewayConfig;
+import org.onetwoone.gateway.core.ControlThread;
+import org.onetwoone.gateway.core.GatewayControlThread;
 
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.Set;
 
 /**
  * Handles SMS operations for the GSM-SIP Gateway.
@@ -69,20 +73,52 @@ import java.util.concurrent.ConcurrentHashMap;
  * direction that matters here is under-suppression (duplicates); over-suppression would
  * silently lose a real SMS.
  *
- * <h2>Threading (AUDIT H12)</h2>
+ * <h2>Threading (AUDIT G1, H12 — GW-21)</h2>
  *
- * <p>The suppression state is reached from <b>two</b> threads today: {@link #processInbox()}
- * runs on <b>main</b> (the {@link ContentObserver} is built with {@link #mainHandler}) and on
- * the <b>control thread</b> (the post-registration retry), and {@link #markAsRead} /
- * {@link #unprocessSms} run on the control thread. The maps are therefore
- * {@link ConcurrentHashMap}s and the persisted record's read-modify-write is behind
- * {@link #persistLock} — a lock that is never held across a callback, so main cannot end up
- * blocked behind the control thread's blocking SIP send.
+ * <p><b>The inbound pipeline has exactly one owner: the {@link GatewayControlThread}.</b> The
+ * {@link ContentObserver} is built with {@code new Handler(control.getLooper())}, so
+ * {@code onChange} → {@link #processInbox()} → the callback's SIP send → {@link #markAsRead}
+ * (including its {@code su} fallback) all run there. Nothing on this path touches main any
+ * more, which is <b>G1</b>: a burst of SMS used to block the UI thread — the same thread that
+ * services Telecom callbacks — for seconds.
  *
- * <p>This is a stopgap. <b>GW-21</b> moves the observer onto the control looper, which gives
- * the state a single owner; when it does, the concurrent maps and {@link #persistLock} can
- * go back to plain {@code HashMap}s with an {@code assertOnControlThread}. Nothing here
- * depends on the concurrency, only on the state being reachable from one place.
+ * <p>One owner is also what closes <b>H12</b>. GW-27 had made this state
+ * {@code ConcurrentHashMap}-backed because {@code processInbox} ran on two threads, but that
+ * only removed the {@code ConcurrentModificationException}: the check-then-act between "is
+ * this id suppressed?" and "mark it in flight" spans several map operations and was never
+ * atomic, so two concurrent scans could still both forward one message. Confinement makes
+ * that sequence atomic by construction. The collections are therefore plain
+ * {@link HashMap}s / {@link HashSet}s again and the persist lock is gone, guarded by
+ * {@code control.assertOnControlThread(...)} — the mechanism, not a second one alongside it.
+ *
+ * <p>Two fields are deliberately {@code volatile}: {@link #started} and {@link #stopped}.
+ * {@link #start()} and {@link #stop()} are called from the service lifecycle on <b>main</b>
+ * and only latch a flag before handing the real work to the control thread; main never waits
+ * for it (the one-directional blocking rule). {@link #stopped} is what makes a scan already
+ * in flight on the control thread stop handing messages out while main is tearing the service
+ * down.
+ *
+ * <p>The constructor runs on main, before the object is published: {@link #loadProcessedIds()}
+ * fills the maps and the {@code post} inside {@link #start()} is the happens-before edge that
+ * hands them to the control thread.
+ *
+ * <h2>Why the cursor is closed before anything is forwarded</h2>
+ *
+ * <p>{@code onIncomingSms} reaches {@code PjsipSipService} through
+ * {@code control.runOrPost(...)}, which dispatches <b>inline</b> when the caller is already
+ * the control thread. Before GW-21 that was true only on the post-registration retry; now it
+ * is true on every path, so a naive "forward from inside the cursor loop" would hold a
+ * cross-process cursor open across one blocking SIP round-trip <i>per row</i>.
+ *
+ * <p>{@link #collectForwardable(int)} therefore reads the whole batch, closes the cursor, and
+ * {@link #forward(int, List)} does the sending afterwards. <b>The add-then-send invariant is
+ * preserved by moving the add earlier, never later:</b> a row is put into
+ * {@link #inFlightIds} at the moment it passes the suppression checks, while the cursor is
+ * still open — so every id is marked strictly <i>before</i> any message of the batch is sent,
+ * which is stronger than the old per-row ordering and can only over-suppress within a batch,
+ * never under-suppress. The tail of a batch that is never handed over (the handler stopped
+ * mid-scan) is released again in {@code forward}'s {@code finally}, because an id marked in
+ * flight and then dropped would otherwise be suppressed forever.
  */
 public class SmsHandler {
     private static final String TAG = "SmsHandler";
@@ -137,14 +173,42 @@ public class SmsHandler {
 
     private static final long RETRY_MAX_DELAY_MS = 10 * 60_000L;
 
+    /**
+     * How long an inbox change waits for company before it turns into a scan.
+     *
+     * <p>Every {@link #markAsRead} mutates the provider and so re-triggers {@code onChange},
+     * which means each forwarded message used to cost a redundant full inbox scan — a
+     * cross-process query per message, on top of the one that found it.
+     *
+     * <p>The window is anchored on the <b>first</b> change of a burst rather than restarted by
+     * each one ({@link #requestInboxScan()} does not re-post while a scan is already queued),
+     * so a stream of provider writes cannot push the scan out indefinitely. Worst-case added
+     * latency is this constant.
+     *
+     * <p><b>On the "no debounce, race with MessagingApp" comment this replaces.</b> The race
+     * is real in kind: {@link #processInbox()} selects on {@code read = 0}, so a message the
+     * system messaging app marks read before the gateway's scan reaches it is never forwarded.
+     * It is not real in scale. Nothing marks a message read but a human opening the
+     * conversation, which is seconds away, and the path already had unbounded scheduling
+     * latency in it — the observer's own dispatch, and the post-REGISTER retry scan that runs
+     * whole seconds late. Widening a multi-second window by 250 ms does not change its
+     * outcome, and the suppression record — not scan promptness — is what keeps correctness.
+     */
+    private static final long OBSERVER_DEBOUNCE_MS = 250L;
+
     private final Context context;
     private final SmsCallback callback;
-    private final Handler mainHandler;
+    private final GatewayControlThread control;
     private final GatewayConfig config;
 
-    private ContentObserver smsObserver;
-    private BroadcastReceiver smsSentReceiver;
-    private BroadcastReceiver smsDeliveredReceiver;
+    /**
+     * Written on the control thread, and read there — except by {@link #stop()}'s
+     * dead-looper fallback, which by definition runs when no control-thread message is
+     * executing. {@code volatile} for that one hand-off.
+     */
+    private volatile ContentObserver smsObserver;
+    private volatile BroadcastReceiver smsSentReceiver;
+    private volatile BroadcastReceiver smsDeliveredReceiver;
 
     /**
      * Ids whose forward the PBX has accepted, mirroring the persisted record. id -> the
@@ -153,32 +217,33 @@ public class SmsHandler {
      * {@link #unprocessSms} must not, or a confirmed message would become eligible for
      * re-forwarding.
      */
-    private final Map<Long, Long> confirmedIds = new ConcurrentHashMap<>();
+    @ControlThread
+    private final Map<Long, Long> confirmedIds = new HashMap<>();
 
     /**
-     * Ids handed to the callback but not yet confirmed. Added <b>before</b> the callback so
-     * a re-entrant {@code processInbox} cannot double-forward, and removed by
+     * Ids collected for forwarding but not yet confirmed. Added <b>while the cursor is still
+     * open</b>, so every id of a batch is marked before any of them is sent, and removed by
      * {@link #unprocessSms} so a failed send is retried. Deliberately not persisted: a
      * process that dies here has not delivered the message.
      */
-    private final java.util.Set<Long> inFlightIds =
-            java.util.Collections.newSetFromMap(new ConcurrentHashMap<Long, Boolean>());
+    @ControlThread
+    private final Set<Long> inFlightIds = new HashSet<>();
 
     /** id -> how many times the forward has failed. */
-    private final Map<Long, Integer> forwardAttempts = new ConcurrentHashMap<>();
+    @ControlThread
+    private final Map<Long, Integer> forwardAttempts = new HashMap<>();
 
     /** id -> {@code SystemClock.elapsedRealtime()} before which it will not be re-offered. */
-    private final Map<Long, Long> retryNotBefore = new ConcurrentHashMap<>();
-
-    /** Guards the read-modify-write of the persisted record. Never held across a callback. */
-    private final Object persistLock = new Object();
+    @ControlThread
+    private final Map<Long, Long> retryNotBefore = new HashMap<>();
 
     /** Consecutive read-flag write failures; reset by any success. */
-    private final java.util.concurrent.atomic.AtomicInteger rootFlagFailures =
-            new java.util.concurrent.atomic.AtomicInteger();
+    @ControlThread
+    private int rootFlagFailures = 0;
 
     /** Latched once {@link #MAX_ROOT_FLAG_FAILURES} is hit, for the life of the process. */
-    private volatile boolean rootFlagWriteGivenUp = false;
+    @ControlThread
+    private boolean rootFlagWriteGivenUp = false;
 
     /**
      * Test seam for the acceptance test that matters (GW-27 / AUDIT H13): with the read-flag
@@ -186,9 +251,41 @@ public class SmsHandler {
      * {@link #markAsRead} skips both the resolver and the root write, exactly as if the
      * device refused them, leaving the persisted record as the only defence.
      */
-    private volatile boolean readFlagWriteEnabled = true;
+    @ControlThread
+    private boolean readFlagWriteEnabled = true;
 
-    private boolean isRunning = false;
+    /**
+     * Latched by {@link #start()} / {@link #stop()} on the service-lifecycle thread (main) and
+     * read on the control thread — the only two fields that legitimately cross. {@code stopped}
+     * is what a scan already running on the control thread checks so it stops handing messages
+     * to a service that is being destroyed.
+     *
+     * <p>One-shot: a stopped handler is not restarted. {@code PjsipSipService} builds a fresh
+     * one per service start.
+     */
+    private volatile boolean started = false;
+
+    /** @see #started */
+    private volatile boolean stopped = false;
+
+    /** True while {@link #inboxScanTask} is sitting in the control thread's queue. */
+    @ControlThread
+    private boolean scanQueued = false;
+
+    /**
+     * The debounced inbox scan. A field so {@link #requestInboxScan()} and {@link #stop()} can
+     * use it as the cancellation token {@code GatewayControlThread.removeCallbacks} needs.
+     */
+    private final Runnable inboxScanTask = new Runnable() {
+        @Override
+        public void run() {
+            scanQueued = false;
+            if (stopped) {
+                return;
+            }
+            processInbox();
+        }
+    };
 
     public interface SmsCallback {
         /**
@@ -209,34 +306,57 @@ public class SmsHandler {
         void onSmsSendStatus(String destination, String status, String errorMessage);
     }
 
-    public SmsHandler(Context context, SmsCallback callback) {
+    /**
+     * @param control the one thread the whole inbound pipeline runs on. The
+     *                {@link ContentObserver} is built over its looper, so nothing here needs
+     *                a main-thread handler any more.
+     */
+    public SmsHandler(Context context, GatewayControlThread control, SmsCallback callback) {
         this.context = context;
+        this.control = control;
         this.callback = callback;
-        this.mainHandler = new Handler(Looper.getMainLooper());
         // PjsipSipService.onCreate() runs GatewayConfig.init() long before it builds us.
         this.config = GatewayConfig.getInstance();
+        // Runs on the constructing thread (main, in production) before this object is
+        // reachable from anywhere else; start()'s post is the happens-before edge that hands
+        // the loaded state to the control thread.
         loadProcessedIds();
     }
 
     /**
-     * Start monitoring SMS inbox for new messages.
+     * Start monitoring the SMS inbox.
+     *
+     * <p>Callable from any thread — in production, main, from {@code onStartCommand}. It only
+     * latches a flag and posts; main never waits for the control thread.
      */
     public void start() {
-        if (isRunning) {
+        if (started) {
             Log.w(TAG, "SmsHandler already running");
             return;
         }
+        started = true;
+        control.runOrPost(this::startOnControlThread);
+    }
 
-        Log.d(TAG, "Starting SMS handler");
+    @ControlThread
+    private void startOnControlThread() {
+        control.assertOnControlThread("SmsHandler.start");
+        if (stopped) {
+            // stop() overtook the post. Register nothing; there is nobody to unregister it.
+            Log.w(TAG, "SmsHandler was stopped before it started");
+            return;
+        }
 
-        // Register ContentObserver for inbox changes
-        smsObserver = new ContentObserver(mainHandler) {
+        Log.d(TAG, "Starting SMS handler on " + Thread.currentThread().getName());
+
+        // The observer's handler is what decides which thread onChange runs on. Giving it the
+        // control looper is the whole of GW-21: onChange -> processInbox -> SIP send ->
+        // markAsRead now share one owner (AUDIT G1, H12).
+        smsObserver = new ContentObserver(new Handler(control.getLooper())) {
             @Override
             public void onChange(boolean selfChange) {
                 super.onChange(selfChange);
-                Log.d(TAG, "SMS inbox changed");
-                // Process immediately - no debounce, race with MessagingApp
-                processInbox();
+                requestInboxScan();
             }
         };
 
@@ -247,45 +367,129 @@ public class SmsHandler {
         // Register broadcast receivers for send status
         registerSendReceivers();
 
-        // Process any existing unprocessed SMS
+        // Process any existing unprocessed SMS. Direct, not debounced: there is nothing to
+        // coalesce with at start-up and the persisted record makes a duplicate scan harmless.
         processInbox();
 
-        isRunning = true;
         Log.d(TAG, "SMS handler started");
     }
 
     /**
-     * Stop monitoring SMS inbox.
+     * Stop monitoring the SMS inbox.
+     *
+     * <p><b>Ordering against teardown.</b> {@code PjsipSipService.onDestroy} calls this on main
+     * <i>before</i> {@code control.quitSafely(...)}, deliberately (GW-26). Now that
+     * {@code onChange} runs on the control thread, unregistering the observer from main would
+     * be a new race against an in-flight scan — so the unregister is <b>posted to the control
+     * thread</b> instead, where it cannot overlap one. {@code quitSafely} drains what is
+     * already queued, so it still runs. Main does not wait for it.
      */
     public void stop() {
-        if (!isRunning) {
+        if (!started || stopped) {
+            return;
+        }
+        // Latched first, on the caller's thread: a scan already running on the control thread
+        // sees this and stops handing messages to a service that is going away.
+        stopped = true;
+        Log.d(TAG, "Stopping SMS handler");
+
+        // Safe from any thread, and worth doing here rather than only in the posted task: it
+        // drops a debounced scan that has not come due yet.
+        control.removeCallbacks(inboxScanTask);
+
+        if (!control.isAlive()) {
+            // No looper left to post to - and therefore no message executing on it, so
+            // nothing can be scanning. Undo inline rather than leak the observer onto a
+            // queue that will never drain.
+            Log.w(TAG, "Control thread already gone - unregistering the SMS observer inline");
+            unregisterAll();
             return;
         }
 
-        Log.d(TAG, "Stopping SMS handler");
+        control.runOrPost(this::stopOnControlThread);
+    }
 
-        if (smsObserver != null) {
-            context.getContentResolver().unregisterContentObserver(smsObserver);
-            smsObserver = null;
-        }
-
-        unregisterSendReceivers();
-
-        isRunning = false;
+    @ControlThread
+    private void stopOnControlThread() {
+        control.assertOnControlThread("SmsHandler.stop");
+        unregisterAll();
         Log.d(TAG, "SMS handler stopped");
     }
 
-    // Counter for tracing
-    private static int processInboxCounter = 0;
+    private void unregisterAll() {
+        ContentObserver observer = smsObserver;
+        if (observer != null) {
+            try {
+                context.getContentResolver().unregisterContentObserver(observer);
+            } catch (Exception e) {
+                Log.w(TAG, "Error unregistering SMS observer: " + e.getMessage());
+            }
+            smsObserver = null;
+        }
+        unregisterSendReceivers();
+    }
 
     /**
-     * Process all unread SMS in inbox.
-     * Public so it can be called when SIP registration is restored.
+     * Coalesce this inbox change into the pending scan, or start a window if there is none.
+     *
+     * <p>Anchored on the first change of a burst rather than restarted by each one, so a
+     * stream of provider writes — which is exactly what {@link #markAsRead} produces — cannot
+     * starve the scan. See {@link #OBSERVER_DEBOUNCE_MS}.
      */
+    @ControlThread
+    private void requestInboxScan() {
+        control.assertOnControlThread("SMS inbox change");
+        if (stopped) {
+            return;
+        }
+        if (scanQueued) {
+            Log.d(TAG, "SMS inbox changed (coalesced into the pending scan)");
+            return;
+        }
+        Log.d(TAG, "SMS inbox changed, scanning in " + OBSERVER_DEBOUNCE_MS + " ms");
+        scanQueued = true;
+        control.postDelayed(inboxScanTask, OBSERVER_DEBOUNCE_MS);
+    }
+
+    // Counter for tracing
+    @ControlThread
+    private int processInboxCounter = 0;
+
+    /**
+     * Process all unread SMS in the inbox.
+     *
+     * <p>Public so it can be called when SIP registration is restored — from
+     * {@code PjsipSipService.handleRegistrationState}, on this same thread.
+     *
+     * <p>Two phases on purpose: read the batch with the cursor open and nothing else, then
+     * close it and forward. See the class javadoc for why, and for how the add-then-send
+     * invariant survives the split.
+     */
+    @ControlThread
     public void processInbox() {
+        control.assertOnControlThread("processInbox");
+
         int traceId = ++processInboxCounter;
         Log.d(TAG, "[" + traceId + "] processInbox START, confirmed=" + confirmedIds.size()
                 + " inFlight=" + inFlightIds);
+
+        forward(traceId, collectForwardable(traceId));
+
+        Log.d(TAG, "[" + traceId + "] processInbox END, confirmed=" + confirmedIds.size()
+                + " inFlight=" + inFlightIds);
+    }
+
+    /**
+     * Phase 1: everything that needs the cursor, and nothing that does not.
+     *
+     * <p>Each accepted row is put into {@link #inFlightIds} here, before the cursor closes, so
+     * the batch is fully marked before {@link #forward} sends any of it.
+     *
+     * @return the rows to forward, in {@code date ASC} order
+     */
+    @ControlThread
+    private List<PendingSms> collectForwardable(int traceId) {
+        List<PendingSms> batch = new ArrayList<>();
 
         ContentResolver resolver = context.getContentResolver();
 
@@ -298,7 +502,7 @@ public class SmsHandler {
 
             if (cursor == null) {
                 Log.w(TAG, "[" + traceId + "] SMS cursor is null");
-                return;
+                return batch;
             }
 
             Log.d(TAG, "[" + traceId + "] Found " + cursor.getCount() + " unread SMS");
@@ -309,11 +513,10 @@ public class SmsHandler {
                 String body = cursor.getString(cursor.getColumnIndexOrThrow("body"));
                 int subId = cursor.getInt(cursor.getColumnIndexOrThrow("sub_id"));
 
-                // Convert subscription ID to SIM slot (1 or 2)
-                int simSlot = getSimSlotFromSubId(subId);
-
                 // Already forwarded, in a previous life of this process or in this one. This
-                // is the check that makes the read flag non-load-bearing (AUDIT H13).
+                // is the check that makes the read flag non-load-bearing (AUDIT H13). The
+                // check and the add below are one indivisible step now that this method has a
+                // single owner - which is what closes AUDIT H12.
                 if (confirmedIds.containsKey(id)) {
                     Log.d(TAG, "[" + traceId + "] SKIP id=" + id + " (already forwarded)");
                     continue;
@@ -334,27 +537,91 @@ public class SmsHandler {
                     continue;
                 }
 
-                Log.d(TAG, "[" + traceId + "] Processing SMS id=" + id + " from=" + address + " body=\"" + body + "\" SIM" + simSlot);
+                Log.d(TAG, "[" + traceId + "] Collected SMS id=" + id + " from=" + address
+                        + " body=\"" + body + "\" subId=" + subId);
 
-                // Mark as being processed BEFORE callback. On the re-registration path the
-                // callback dispatches inline on the control thread, so the blocking SIP send
-                // happens inside this loop - that ordering is what this add protects.
+                // Marked in flight BEFORE the cursor closes and therefore before anything in
+                // this batch is sent. See the class javadoc: moving the add earlier keeps the
+                // add-then-send invariant, moving it later would break it.
                 inFlightIds.add(id);
-                Log.d(TAG, "[" + traceId + "] id=" + id + " in flight, inFlight=" + inFlightIds);
-
-                // Notify callback
-                if (callback != null) {
-                    Log.d(TAG, "[" + traceId + "] Calling callback for id=" + id);
-                    callback.onIncomingSms(address, body, id, simSlot);
-                    Log.d(TAG, "[" + traceId + "] Callback returned for id=" + id);
-                }
+                batch.add(new PendingSms(id, address, body, subId));
             }
         } catch (Exception e) {
-            Log.e(TAG, "[" + traceId + "] Error processing inbox: " + e.getMessage(), e);
+            Log.e(TAG, "[" + traceId + "] Error reading inbox: " + e.getMessage(), e);
         }
 
-        Log.d(TAG, "[" + traceId + "] processInbox END, confirmed=" + confirmedIds.size()
-                + " inFlight=" + inFlightIds);
+        Log.d(TAG, "[" + traceId + "] cursor closed, " + batch.size()
+                + " message(s) to forward, inFlight=" + inFlightIds);
+        return batch;
+    }
+
+    /**
+     * Phase 2: hand the batch over, with no cursor open.
+     *
+     * <p>The callback dispatches inline on this thread and blocks on a SIP round-trip, which
+     * is precisely why phase 1 had to finish first.
+     */
+    @ControlThread
+    private void forward(int traceId, List<PendingSms> batch) {
+        if (batch.isEmpty()) {
+            return;
+        }
+        if (callback == null) {
+            for (PendingSms sms : batch) {
+                inFlightIds.remove(sms.id);
+            }
+            return;
+        }
+
+        int handed = 0;
+        try {
+            while (handed < batch.size()) {
+                if (stopped) {
+                    Log.w(TAG, "[" + traceId + "] handler stopped mid-scan, leaving "
+                            + (batch.size() - handed) + " message(s) for the next start");
+                    break;
+                }
+
+                PendingSms sms = batch.get(handed);
+                int simSlot = getSimSlotFromSubId(sms.subId);
+
+                Log.d(TAG, "[" + traceId + "] Calling callback for id=" + sms.id
+                        + " SIM" + simSlot);
+                try {
+                    callback.onIncomingSms(sms.address, sms.body, sms.id, simSlot);
+                } catch (RuntimeException e) {
+                    // One poisoned message must not abandon the rest of the batch in flight.
+                    // unprocessSms rather than a bare remove, so it goes through the same
+                    // attempt bound as any other failed forward.
+                    Log.e(TAG, "[" + traceId + "] Forward threw for id=" + sms.id + ": "
+                            + e.getMessage(), e);
+                    unprocessSms(sms.id);
+                }
+                handed++;
+                Log.d(TAG, "[" + traceId + "] Callback returned for id=" + sms.id);
+            }
+        } finally {
+            // The tail we never handed over: release it, or an id marked in flight and then
+            // dropped would be suppressed for the life of the process.
+            for (int i = handed; i < batch.size(); i++) {
+                inFlightIds.remove(batch.get(i).id);
+            }
+        }
+    }
+
+    /** One inbox row, read out so the cursor can be closed before anything is sent. */
+    private static final class PendingSms {
+        final long id;
+        final String address;
+        final String body;
+        final int subId;
+
+        PendingSms(long id, String address, String body, int subId) {
+            this.id = id;
+            this.address = address;
+            this.body = body;
+            this.subId = subId;
+        }
     }
 
     /**
@@ -423,7 +690,9 @@ public class SmsHandler {
      * @return true if the row is confirmed at {@code read = 1}; false if the flag could not
      *         be written or could not be verified. Suppression does not depend on this.
      */
+    @ControlThread
     public boolean markAsRead(long smsId) {
+        control.assertOnControlThread("markAsRead");
         confirmProcessed(smsId);
 
         if (!readFlagWriteEnabled) {
@@ -435,7 +704,7 @@ public class SmsHandler {
         }
 
         if (markAsReadWithResolver(smsId)) {
-            rootFlagFailures.set(0);
+            rootFlagFailures = 0;
             return true;
         }
 
@@ -446,11 +715,11 @@ public class SmsHandler {
         }
 
         if (markAsReadWithRoot(smsId)) {
-            rootFlagFailures.set(0);
+            rootFlagFailures = 0;
             return true;
         }
 
-        if (rootFlagFailures.incrementAndGet() >= MAX_ROOT_FLAG_FAILURES) {
+        if (++rootFlagFailures >= MAX_ROOT_FLAG_FAILURES) {
             rootFlagWriteGivenUp = true;
             Log.e(TAG, "Could not mark SMS id=" + smsId + " as read, and that is "
                     + MAX_ROOT_FLAG_FAILURES + " in a row - this device cannot write the inbox"
@@ -558,10 +827,12 @@ public class SmsHandler {
     /**
      * Report that the forward failed, so the message is retried.
      *
-     * <p>Three call sites, all in {@code PjsipSipService}: not registered yet, the account
-     * was replaced mid-send, and the send threw. None of them mutates the provider, so none
-     * of them re-triggers the {@code ContentObserver} — re-delivery is <b>event-driven</b>
-     * (another message's {@code markAsRead}, or a successful REGISTER), not a tight spin.
+     * <p>Three call sites in {@code PjsipSipService} — not registered yet, the account was
+     * replaced mid-send, and the send threw — plus {@link #forward} when the callback itself
+     * throws, so a poisoned message goes through the same bound as any other failed forward.
+     * None of them mutates the provider, so none of them re-triggers the
+     * {@code ContentObserver} — re-delivery is <b>event-driven</b> (another message's
+     * {@code markAsRead}, or a successful REGISTER), not a tight spin.
      * It is still bounded, because "retried forever, silently" is its own bug: each failure
      * pushes the next attempt out exponentially, and after
      * {@link #MAX_FORWARD_ATTEMPTS} the message is given up on with an error and marked
@@ -579,7 +850,9 @@ public class SmsHandler {
      *
      * @param smsId SMS ID to unprocess
      */
+    @ControlThread
     public void unprocessSms(long smsId) {
+        control.assertOnControlThread("unprocessSms");
         if (!inFlightIds.remove(smsId)) {
             // Already confirmed, or never in flight. Either way there is nothing to retry -
             // and a confirmed id must never be walked back into the retry queue.
@@ -658,9 +931,7 @@ public class SmsHandler {
 
         int loaded = confirmedIds.size();
         if (pruneProcessedIds()) {
-            synchronized (persistLock) {
-                config.setProcessedSmsRecord(serializeProcessedIds());
-            }
+            config.setProcessedSmsRecord(serializeProcessedIds());
         }
         Log.d(TAG, "Loaded " + loaded + " persisted SMS ids (" + confirmedIds.size()
                 + " after prune" + (malformed > 0 ? ", " + malformed + " malformed" : "") + ")");
@@ -673,6 +944,7 @@ public class SmsHandler {
      * Persisting any earlier would turn a crash mid-send into a lost SMS; the failure
      * direction is deliberately duplicates-over-drops.
      */
+    @ControlThread
     private void confirmProcessed(long smsId) {
         inFlightIds.remove(smsId);
         forwardAttempts.remove(smsId);
@@ -684,28 +956,24 @@ public class SmsHandler {
         confirmedIds.put(smsId, confirmedAt == null ? System.currentTimeMillis() : confirmedAt);
         pruneProcessedIds();
 
-        // The lock covers only the serialize + write, never a callback, so main can never
-        // end up waiting on the control thread's SIP send (AUDIT H12, one-directional
-        // blocking rule).
-        synchronized (persistLock) {
-            try {
-                config.setProcessedSmsRecord(serializeProcessedIds());
-            } catch (Exception e) {
-                Log.e(TAG, "Could not persist the SMS record for id=" + smsId + " - a restart"
-                        + " may re-forward it: " + e.getMessage(), e);
-            }
+        // No lock: GW-21 gave this state one owner, so the read-modify-write is already
+        // atomic by confinement (AUDIT H12).
+        try {
+            config.setProcessedSmsRecord(serializeProcessedIds());
+        } catch (Exception e) {
+            Log.e(TAG, "Could not persist the SMS record for id=" + smsId + " - a restart"
+                    + " may re-forward it: " + e.getMessage(), e);
         }
     }
 
     /** Drop an id from every piece of local state. Only {@link #deleteSms} needs this. */
+    @ControlThread
     private void forget(long smsId) {
         inFlightIds.remove(smsId);
         forwardAttempts.remove(smsId);
         retryNotBefore.remove(smsId);
         if (confirmedIds.remove(smsId) != null) {
-            synchronized (persistLock) {
-                config.setProcessedSmsRecord(serializeProcessedIds());
-            }
+            config.setProcessedSmsRecord(serializeProcessedIds());
         }
     }
 
@@ -715,15 +983,20 @@ public class SmsHandler {
      *
      * @return true if anything was dropped
      */
+    @ControlThread
     private boolean pruneProcessedIds() {
         long cutoff = System.currentTimeMillis() - PROCESSED_ID_TTL_MS;
         int before = confirmedIds.size();
 
-        for (Map.Entry<Long, Long> entry : confirmedIds.entrySet()) {
-            Long confirmedAt = entry.getValue();
+        // Iterator.remove(), not map.remove() inside a for-each: this used to be a
+        // ConcurrentHashMap, which tolerates that; a plain HashMap answers it with a
+        // ConcurrentModificationException.
+        Iterator<Map.Entry<Long, Long>> ids = confirmedIds.entrySet().iterator();
+        while (ids.hasNext()) {
+            Long confirmedAt = ids.next().getValue();
             // A stamp in the future is a clock that moved, not an old entry - keep it.
             if (confirmedAt != null && confirmedAt < cutoff) {
-                confirmedIds.remove(entry.getKey());
+                ids.remove();
             }
         }
 
@@ -771,8 +1044,18 @@ public class SmsHandler {
     }
 
     /** Test-only: the ids currently suppressed by the persisted record. */
-    java.util.Set<Long> getConfirmedIdsForTest() {
-        return new java.util.HashSet<>(confirmedIds.keySet());
+    Set<Long> getConfirmedIdsForTest() {
+        return new HashSet<>(confirmedIds.keySet());
+    }
+
+    /** Test-only: the ids collected for forwarding but not yet confirmed. */
+    Set<Long> getInFlightIdsForTest() {
+        return new HashSet<>(inFlightIds);
+    }
+
+    /** Test-only: true once {@link #stop()} has run and the observer is gone. */
+    boolean isObserverRegisteredForTest() {
+        return smsObserver != null;
     }
 
     /** Test-only: how many times this id's forward has failed. */

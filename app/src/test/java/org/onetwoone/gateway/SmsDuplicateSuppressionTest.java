@@ -6,12 +6,14 @@ import android.content.ContentValues;
 import android.database.Cursor;
 import android.database.MatrixCursor;
 import android.net.Uri;
+import android.os.Looper;
 import android.os.SystemClock;
 
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.onetwoone.gateway.config.GatewayConfig;
+import org.onetwoone.gateway.core.GatewayControlThread;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
@@ -66,10 +68,20 @@ public class SmsDuplicateSuppressionTest {
     private Application app;
     private FakeSmsProvider inbox;
 
+    /**
+     * GW-21 gave the inbound pipeline one owner, so {@code processInbox} now asserts it is on
+     * the control thread. These tests drive it directly, so the control thread <em>is</em>
+     * Robolectric's main looper — {@code isCurrent()} is then true on the test thread and
+     * {@code runOrPost} dispatches inline, which is exactly the production shape.
+     * {@code SmsPipelineThreadingTest} is where the real, foreign control thread is used.
+     */
+    private GatewayControlThread control;
+
     @Before
     public void setUp() {
         ShadowLog.clear();
         app = RuntimeEnvironment.getApplication();
+        control = new GatewayControlThread(Looper.getMainLooper(), null);
 
         inbox = new FakeSmsProvider();
         ShadowContentResolver.registerProviderInternal("sms", inbox);
@@ -92,7 +104,7 @@ public class SmsDuplicateSuppressionTest {
     /** A fresh handler over the same persisted state — i.e. the process restarted. */
     private SmsHandler restart(Collector collector) {
         resetConfig();
-        return new SmsHandler(app, collector);
+        return new SmsHandler(app, control, collector);
     }
 
     // ------------------------------------------------------------------
@@ -111,7 +123,7 @@ public class SmsDuplicateSuppressionTest {
         inbox.addUnread(5, "+79990000005", "three", OLD_SMS_DATE + 2000);
 
         Collector first = new Collector();
-        SmsHandler handler = new SmsHandler(app, first);
+        SmsHandler handler = new SmsHandler(app, control, first);
         handler.setReadFlagWriteEnabledForTest(false);
 
         handler.processInbox();
@@ -140,7 +152,7 @@ public class SmsDuplicateSuppressionTest {
         inbox.addUnread(8, "+79990000008", "flap", OLD_SMS_DATE);
 
         Collector collector = new Collector();
-        SmsHandler handler = new SmsHandler(app, collector);
+        SmsHandler handler = new SmsHandler(app, control, collector);
         handler.setReadFlagWriteEnabledForTest(false);
 
         handler.processInbox();
@@ -160,7 +172,7 @@ public class SmsDuplicateSuppressionTest {
         inbox.addUnread(10, "+79990000010", "hello", OLD_SMS_DATE);
 
         Collector first = new Collector();
-        SmsHandler handler = new SmsHandler(app, first);
+        SmsHandler handler = new SmsHandler(app, control, first);
         handler.processInbox();
         assertEquals(1, first.ids.size());
 
@@ -184,7 +196,7 @@ public class SmsDuplicateSuppressionTest {
         inbox.addUnread(11, "+79990000011", "liar", OLD_SMS_DATE);
 
         Collector collector = new Collector();
-        SmsHandler handler = new SmsHandler(app, collector);
+        SmsHandler handler = new SmsHandler(app, control, collector);
         handler.processInbox();
 
         // Root is unavailable here too (no `su`, no `content`), so every route fails.
@@ -209,7 +221,7 @@ public class SmsDuplicateSuppressionTest {
         }
 
         Collector collector = new Collector();
-        SmsHandler handler = new SmsHandler(app, collector);
+        SmsHandler handler = new SmsHandler(app, control, collector);
         handler.processInbox();
         assertEquals(5, collector.ids.size());
 
@@ -235,7 +247,7 @@ public class SmsDuplicateSuppressionTest {
         inbox.addUnread(12, "+79990000012", "in flight", OLD_SMS_DATE);
 
         Collector collector = new Collector();
-        SmsHandler handler = new SmsHandler(app, collector);
+        SmsHandler handler = new SmsHandler(app, control, collector);
         handler.setReadFlagWriteEnabledForTest(false);
         handler.processInbox();
 
@@ -255,7 +267,7 @@ public class SmsDuplicateSuppressionTest {
         inbox.addUnread(6, "+79990000006", "done", OLD_SMS_DATE);
 
         Collector collector = new Collector();
-        SmsHandler handler = new SmsHandler(app, collector);
+        SmsHandler handler = new SmsHandler(app, control, collector);
         handler.setReadFlagWriteEnabledForTest(false);
         handler.processInbox();
         handler.markAsRead(6);
@@ -291,7 +303,7 @@ public class SmsDuplicateSuppressionTest {
         }
         GatewayConfig.getInstance().setProcessedSmsRecord(seed.toString());
 
-        SmsHandler handler = new SmsHandler(app, new Collector());
+        SmsHandler handler = new SmsHandler(app, control, new Collector());
         int kept = handler.getConfirmedIdsForTest().size();
         assertTrue("10k ids must be pruned down, kept " + kept, kept <= 1000);
 
@@ -311,7 +323,7 @@ public class SmsDuplicateSuppressionTest {
         long recent = System.currentTimeMillis() - TimeUnit.DAYS.toMillis(1);
         GatewayConfig.getInstance().setProcessedSmsRecord("70:" + ancient + ",71:" + recent);
 
-        SmsHandler handler = new SmsHandler(app, new Collector());
+        SmsHandler handler = new SmsHandler(app, control, new Collector());
         assertFalse("a 31-day-old id is dropped", handler.getConfirmedIdsForTest().contains(70L));
         assertTrue("a 1-day-old id is kept", handler.getConfirmedIdsForTest().contains(71L));
     }
@@ -321,7 +333,7 @@ public class SmsDuplicateSuppressionTest {
         long stamp = System.currentTimeMillis();
         GatewayConfig.getInstance().setProcessedSmsRecord(",,42:" + stamp + ",garbage,7:,:9,88");
 
-        SmsHandler handler = new SmsHandler(app, new Collector());
+        SmsHandler handler = new SmsHandler(app, control, new Collector());
         assertTrue("the well-formed id survives", handler.getConfirmedIdsForTest().contains(42L));
         assertTrue("a bare id is kept as a suppression", handler.getConfirmedIdsForTest().contains(88L));
     }
@@ -340,7 +352,7 @@ public class SmsDuplicateSuppressionTest {
         inbox.addUnread(20, "+79990000020", "not registered yet", OLD_SMS_DATE);
 
         Collector collector = new Collector();
-        SmsHandler handler = new SmsHandler(app, collector);
+        SmsHandler handler = new SmsHandler(app, control, collector);
         handler.setReadFlagWriteEnabledForTest(false);
 
         handler.processInbox();
@@ -358,7 +370,7 @@ public class SmsDuplicateSuppressionTest {
         inbox.addUnread(21, "+79990000021", "flaky", OLD_SMS_DATE);
 
         Collector collector = new Collector();
-        SmsHandler handler = new SmsHandler(app, collector);
+        SmsHandler handler = new SmsHandler(app, control, collector);
         handler.setReadFlagWriteEnabledForTest(false);
 
         handler.processInbox();
@@ -381,7 +393,7 @@ public class SmsDuplicateSuppressionTest {
         inbox.addUnread(22, "+79990000022", "hopeless", OLD_SMS_DATE);
 
         Collector collector = new Collector();
-        SmsHandler handler = new SmsHandler(app, collector);
+        SmsHandler handler = new SmsHandler(app, control, collector);
         handler.setReadFlagWriteEnabledForTest(false);
 
         for (int i = 0; i < 5; i++) {
@@ -404,7 +416,7 @@ public class SmsDuplicateSuppressionTest {
         inbox.addUnread(23, "+79990000023", "done", OLD_SMS_DATE);
 
         Collector collector = new Collector();
-        SmsHandler handler = new SmsHandler(app, collector);
+        SmsHandler handler = new SmsHandler(app, control, collector);
         handler.setReadFlagWriteEnabledForTest(false);
 
         handler.processInbox();
