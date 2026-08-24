@@ -84,3 +84,30 @@ Secondary issues:
 Low-medium. The duplicate-send guard is the delicate part — `processedSmsIds` is the only
 thing preventing double delivery, and the retry changes touch it directly. Test the
 "PBX down, then up" path explicitly.
+
+---
+
+## Known residual after merge — the send-status receivers still land on main
+
+Found by the Phase 4 UI session and confirmed here at `d94363e`. **GW-21 moved the inbound
+pipeline onto the control thread but not the outbound verdict.**
+
+`SmsHandler.registerSendReceivers()` registers both receivers with the two-argument
+`registerReceiver(receiver, filter)` (and the three-argument `RECEIVER_NOT_EXPORTED` form on
+API 33+), neither of which takes a `Handler` — so `onReceive` runs on **main**, and
+`callback.onSmsSendStatus(...)` is invoked from there.
+
+**Severity, stated precisely:** this is *not* a live race today. The only implementation of
+`onSmsSendStatus` (`PjsipSipService.initSmsHandler`) is a single `Log.d` and touches no
+shared state, so nothing is currently read or written off-thread. It is a **latent**
+constraint: it becomes a real threading problem the moment anything publishes the send
+outcome — a status field, a snapshot, a UI update — which is precisely what the Phase 4
+status-surface work wants to do.
+
+Same family as **F4b** (a residual main-thread touch in a path the refactor otherwise owns).
+
+Filed by the UI session as AUDIT **H17**, with issue **GW-46** (deferred). Not renumbered
+here and not duplicated: when `refactor/phase-4-ui` merges, H17 arrives with it. The fix is
+to pass a control-thread `Handler` to both `registerReceiver` calls, at which point the
+existing `assertOnControlThread` discipline covers the callback too.
+
