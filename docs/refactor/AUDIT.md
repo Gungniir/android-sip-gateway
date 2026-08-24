@@ -1792,12 +1792,26 @@ which way the send fails:
 - `SmsHandler:1127` — the synchronous `catch` in the send path, on the **control thread**.
 - `SmsHandler:1210`, `:1224`, `:1229` — the sent/delivered receivers, on **main**.
 
-So an implementer has no single thread to reason about, and the obvious defensive move —
-`assertOnControlThread` in the callback — would fire on the *working* path. That is worse
-than a callback that is simply always on main, because it cannot be discovered by testing one
-route. Passing a control-thread `Handler` to both `registerReceiver` calls collapses both
-sites onto one thread and makes the existing `@ControlThread` discipline cover the callback;
-until then, no implementation of this interface may touch shared state.
+So an implementer has no single thread to reason about, and which one they get depends on
+whether the failure was synchronous. That is worse than a callback that is simply always on
+main, because testing the failure route you can most easily trigger — the synchronous
+`catch` — tells you the callback is control-thread-confined, and it is not.
+
+**`assertOnControlThread` is the right detector for this**, and an earlier revision of this
+finding claimed the opposite. `GatewayControlThread:192` returns silently when `isCurrent()`
+and only then; off the control thread it throws in debug and `Log.e`s in release. So it
+passes at `:1127` (already on the control thread) and fires at the three receiver sites — a
+true positive on the broken path, not a false green on the working one.
+
+**Order the fix Handler → assertion → counters**, but for the opposite reason to the one
+first recorded here: installing the assertion first would not hide anything, it would
+*crash debug builds on every SMS send verdict*, turning a latent constraint into an immediate
+hard failure on merlinx. Passing a control-thread `Handler` to both `registerReceiver` calls
+collapses all four sites onto one thread; the assertion then documents and enforces that.
+
+Until the `Handler` lands, no implementation of this interface may touch shared state — the
+current `Log.d` is conformant by accident, not by design. The constraint is unenforced by
+choice, not for want of a mechanism.
 
 ### P2 — security posture
 

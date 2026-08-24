@@ -16,11 +16,24 @@
 > **And the callback is invoked from two different threads**, which neither of us had noticed
 > at first: `SmsHandler:1127` (the synchronous `catch` in the send path) runs on the **control
 > thread**, while `:1210`, `:1224` and `:1229` (the sent/delivered receivers) run on **main**.
-> An implementer therefore has no single thread to reason about, and adding
-> `assertOnControlThread` to the callback would fire on the *working* path. That is worse than
-> "always main", because testing one route cannot reveal it. Until the `Handler` lands, **no
-> implementation of this interface may touch shared state** — the current `Log.d` is
-> conformant by accident, not by design.
+> An implementer therefore has no single thread to reason about, and which one they get
+> depends on whether the failure was synchronous. That is worse than "always main": testing
+> the route you can most easily trigger — the synchronous `catch` — tells you the callback is
+> control-thread-confined, and it is not.
+>
+> **`assertOnControlThread` is the correct detector.** An earlier revision of this note said
+> it would fire on the working path; that was inverted. `GatewayControlThread:192` returns
+> silently only when `isCurrent()`, and otherwise throws in debug / `Log.e`s in release — so
+> it passes at `:1127` and fires at the three receiver sites, which is a true positive on the
+> broken path.
+>
+> **Fix in the order Handler → assertion → counters.** Not because the assertion would hide
+> anything, but because installing it first would crash debug builds on *every* SMS send
+> verdict, converting a latent constraint into an immediate hard failure on merlinx.
+>
+> Until the `Handler` lands, **no implementation of this interface may touch shared state** —
+> the current `Log.d` is conformant by accident, not by design. That constraint is unenforced
+> by choice; the detector is available whenever it is wanted.
 
 ## Problem
 
