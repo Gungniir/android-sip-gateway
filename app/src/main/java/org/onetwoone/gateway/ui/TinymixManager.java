@@ -3,11 +3,12 @@ package org.onetwoone.gateway.ui;
 import android.content.Context;
 import android.util.Log;
 
-import java.io.BufferedReader;
+import org.onetwoone.gateway.GsmAudioNative;
+import org.onetwoone.gateway.RootHelper;
+
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
-import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Matcher;
@@ -23,6 +24,13 @@ import java.util.regex.Pattern;
  */
 public class TinymixManager {
     private static final String TAG = "TinymixManager";
+
+    /**
+     * A full {@code tinymix -D N} dump is a couple of thousand controls over {@code su},
+     * so it gets a longer budget than {@link RootHelper#DEFAULT_TIMEOUT_MS}. Bounded all
+     * the same — the old code did a bare {@code waitFor()} (GW-20 §4).
+     */
+    private static final int TINYMIX_TIMEOUT_MS = 15000;
 
     /**
      * Represents a mixer control detected from tinymix output.
@@ -113,33 +121,26 @@ public class TinymixManager {
             return "";
         }
 
-        try {
-            Process p;
-            // Android 11+ requires root for mixer control access due to SELinux
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-                // Android 11+ (API 30+): use su
-                p = Runtime.getRuntime().exec(new String[]{
-                    "su", "-c", tinymixFile.getAbsolutePath() + " -D " + soundCard
-                });
-            } else {
-                // Android 8.1-10: direct access works
-                p = Runtime.getRuntime().exec(new String[]{
-                    tinymixFile.getAbsolutePath(), "-D", String.valueOf(soundCard)
-                });
-            }
+        // Both branches go through RootHelper so the process is bounded, both pipes are
+        // drained, and a non-zero exit is reported as a failure instead of an empty dump
+        // that the parser would silently read as "no controls" (GW-20 / AUDIT H1).
+        RootHelper.RootResult result;
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            // Android 11+ (API 30+): mixer control access needs root because of SELinux
+            result = RootHelper.run(tinymixFile.getAbsolutePath() + " -D " + soundCard,
+                    TINYMIX_TIMEOUT_MS);
+        } else {
+            // Android 8.1-10: direct access works
+            result = RootHelper.exec(new String[]{
+                tinymixFile.getAbsolutePath(), "-D", String.valueOf(soundCard)
+            }, TINYMIX_TIMEOUT_MS);
+        }
 
-            BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream()));
-            StringBuilder output = new StringBuilder();
-            String line;
-            while ((line = reader.readLine()) != null) {
-                output.append(line).append("\n");
-            }
-            p.waitFor();
-            return output.toString();
-        } catch (Exception e) {
-            Log.e(TAG, "Failed to run tinymix: " + e.getMessage());
+        if (!result.success()) {
+            Log.e(TAG, "tinymix failed (exit " + result.exitCode() + "): " + result.stderr());
             return "";
         }
+        return result.stdout();
     }
 
     /**
@@ -210,6 +211,89 @@ public class TinymixManager {
         }
 
         Log.i(TAG, "Detected " + controls.size() + " mixer controls for card " + soundCard);
+
+        // Every detect run doubles as GW-20's B1e cross-check. See verifyNativeReads().
+        Log.i(TAG, verifyNativeReads(soundCard, controls));
+
         return controls;
+    }
+
+    /**
+     * Cross-check the native mixer getters against {@code tinymix}, control by control.
+     *
+     * <p>This is GW-20's answer to its own Risk section: <em>"a native getter that returns a
+     * different representation than tinymix parsing would silently corrupt the saved
+     * originals and break restore. Verify value-by-value against tinymix before switching
+     * the write path over."</em> {@link org.onetwoone.gateway.audio.QualcommAudioProfile}
+     * now saves its originals through {@link GsmAudioNative#getMixerControl} and
+     * {@link GsmAudioNative#getMixerControlEnum}; this compares each of those against what
+     * {@code tinymix} reports for the same control at the same moment.
+     *
+     * <p>It runs automatically at the end of {@link #detectControls(int)}, so the on-device
+     * procedure is just: tap "Detect mixer controls" (or GET {@code /api/mixer-controls})
+     * and read logcat for {@code B1e native-vs-tinymix}. Doing it here rather than on the
+     * call path is deliberate — this is the UI component that already has a {@code tinymix}
+     * binary to compare against, and it costs nothing during a call.
+     *
+     * <p>The two should agree by construction: {@code tinymix} prints INT controls from
+     * {@code mixer_ctl_get_value(ctl, i)} and ENUM controls from
+     * {@code mixer_ctl_get_enum_string(...)}, which are the same tinyalsa primitives the JNI
+     * getters call, and both read value index 0. "By construction" is not "verified on
+     * hardware", which is what this exists to produce.
+     *
+     * @return a one-line human-readable summary; the per-control detail goes to logcat
+     */
+    public String verifyNativeReads(int soundCard, List<MixerControl> controls) {
+        if (controls.isEmpty()) {
+            return "B1e native-vs-tinymix: nothing to compare";
+        }
+
+        // The native getters need the ALSA nodes to be readable; tinymix obtains that for
+        // itself via su. Without this the check reports a false mismatch on every control.
+        RootHelper.setupAlsaPermissions();
+
+        int agreed = 0;
+        int mismatched = 0;
+        int unreadable = 0;
+
+        for (MixerControl control : controls) {
+            String nativeValue;
+            try {
+                if (control.type == ControlType.VOLUME) {
+                    int value = GsmAudioNative.getMixerControl(soundCard, control.name);
+                    nativeValue = value < 0 ? null : String.valueOf(value);
+                } else {
+                    nativeValue = GsmAudioNative.getMixerControlEnum(soundCard, control.name);
+                }
+            } catch (Throwable t) {
+                // libgsm_audio.so failed to load: GsmAudioNative's static block swallows
+                // that, so the failure only surfaces here, as an Error.
+                Log.e(TAG, "B1e native-vs-tinymix: native bridge unavailable: " + t);
+                return "B1e native-vs-tinymix: native bridge unavailable (" + t + ")";
+            }
+
+            if (nativeValue == null) {
+                unreadable++;
+                Log.e(TAG, "B1e native-vs-tinymix  UNREADABLE  " + control.name
+                        + "  tinymix=" + control.currentValue + "  native=<failed>");
+            } else if (nativeValue.equals(control.currentValue)) {
+                agreed++;
+                Log.i(TAG, "B1e native-vs-tinymix  OK          " + control.name
+                        + " = " + nativeValue);
+            } else {
+                mismatched++;
+                Log.e(TAG, "B1e native-vs-tinymix  MISMATCH    " + control.name
+                        + "  tinymix=" + control.currentValue + "  native=" + nativeValue);
+            }
+        }
+
+        String summary = "B1e native-vs-tinymix: " + agreed + " agreed, " + mismatched
+                + " mismatched, " + unreadable + " unreadable, of " + controls.size()
+                + " control(s) on card " + soundCard;
+        if (mismatched > 0 || unreadable > 0) {
+            Log.e(TAG, summary + " - DO NOT trust the saved originals until this reads "
+                    + "0 mismatched, 0 unreadable");
+        }
+        return summary;
     }
 }

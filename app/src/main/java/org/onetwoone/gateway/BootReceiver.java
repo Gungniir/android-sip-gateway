@@ -57,21 +57,32 @@ public class BootReceiver extends BroadcastReceiver {
         new Thread(() -> {
             try {
                 Thread.sleep(2000); // Wait for system to settle
-                Process p = Runtime.getRuntime().exec(new String[]{
-                    "su", "-c", "am start -n org.onetwoone.gateway/.MainActivity"
-                });
-                p.waitFor();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+
+            // Bounded and drained, and the exit code is checked (GW-20 §4 / AUDIT H1):
+            // the old code did a bare waitFor() with no timeout - a `su` that never
+            // returned at boot would have parked this thread forever - and only fell back
+            // on an exception, so an `am start` that failed outright was reported as a
+            // success and MainActivity never came up.
+            RootHelper.RootResult result =
+                    RootHelper.run("am start -n org.onetwoone.gateway/.MainActivity");
+            if (result.success()) {
                 Log.i(TAG, "MainActivity started via root");
-            } catch (Exception e) {
-                Log.e(TAG, "Failed to start MainActivity: " + e.getMessage());
-                // Fallback: try normal start
-                try {
-                    Intent activityIntent = new Intent(context, MainActivity.class);
-                    activityIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                    context.startActivity(activityIntent);
-                } catch (Exception e2) {
-                    Log.e(TAG, "Fallback also failed: " + e2.getMessage());
-                }
+                return;
+            }
+
+            Log.e(TAG, "Failed to start MainActivity via root (exit " + result.exitCode()
+                    + "): " + result.stderr());
+            // Fallback: try normal start
+            try {
+                Intent activityIntent = new Intent(context, MainActivity.class);
+                activityIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                context.startActivity(activityIntent);
+            } catch (Exception e2) {
+                Log.e(TAG, "Fallback also failed: " + e2.getMessage());
             }
         }).start();
     }
