@@ -106,8 +106,24 @@ status-surface work wants to do.
 
 Same family as **F4b** (a residual main-thread touch in a path the refactor otherwise owns).
 
+**It is not simply "the verdict arrives on main" — the callback has no single thread.**
+Verified: `onSmsSendStatus` has four invocation sites, on two different threads depending on
+whether the failure was synchronous or asynchronous.
+
+| Site | Path | Thread |
+|---|---|---|
+| `SmsHandler:1127` | the `catch` in `sendSms`, reached from `handleIncomingSipMessage` | **control** |
+| `SmsHandler:1210`, `:1224`, `:1229` | the sent / delivered receivers | **main** |
+
+**Ordering of the fix: `Handler` first, assertion second.** Passing a control-thread
+`Handler` to both `registerReceiver` calls collapses all four sites onto one thread, which is
+what makes an assertion meaningful. Adding `assertOnControlThread` *before* the `Handler`
+would not give a false green — `assertOnControlThread` returns silently only when already on
+the control thread, so it would pass at `:1127` and **throw in debug / `Log.e` in release** at
+the three receiver sites. That is a true positive, and a loud one: it would crash debug builds
+on every SMS send verdict. So the assertion is the right detector, but installing it first
+converts a latent constraint into an immediate debug crash rather than exposing a hidden bug.
+
 Filed by the UI session as AUDIT **H17**, with issue **GW-46** (deferred). Not renumbered
-here and not duplicated: when `refactor/phase-4-ui` merges, H17 arrives with it. The fix is
-to pass a control-thread `Handler` to both `registerReceiver` calls, at which point the
-existing `assertOnControlThread` discipline covers the callback too.
+here and not duplicated: when `refactor/phase-4-ui` merges, H17 arrives with it.
 
