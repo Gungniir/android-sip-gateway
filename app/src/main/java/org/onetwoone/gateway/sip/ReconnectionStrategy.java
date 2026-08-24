@@ -103,12 +103,18 @@ public class ReconnectionStrategy {
     /**
      * Called when connection succeeds.
      * Resets the delay back to initial value.
+     *
+     * <p>AUDIT F6c: this used to clear {@code pending} without disarming the timer, so an
+     * already-scheduled runnable still fired and sent a redundant re-REGISTER - and
+     * {@link #isPending()} disagreed with what was actually armed. Clearing the queue is what
+     * makes the flag mean what it says.
      */
     @ControlThread
     public void onSuccess() {
         control.assertOnControlThread("onSuccess");
         Log.d(TAG, "Connection successful, resetting delay");
         currentDelay = GatewayConfig.RECONNECT_INITIAL_DELAY_MS;
+        handler.removeCallbacksAndMessages(null);
         pending = false;
     }
 

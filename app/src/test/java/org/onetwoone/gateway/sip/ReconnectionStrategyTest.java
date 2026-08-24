@@ -123,6 +123,26 @@ public class ReconnectionStrategyTest {
         assertFalse("Should clear pending flag", strategy.isPending());
     }
 
+    /**
+     * AUDIT F6c. {@code onSuccess()} cleared {@code pending} but left the armed runnable on the
+     * queue, so it still fired and sent a redundant re-REGISTER — and {@code isPending()}
+     * disagreed with what was actually armed. The reload path reaches this every time:
+     * {@code deleteAccount()}'s un-REGISTER produces {@code onRegState(false)} → a scheduled
+     * reconnect, and the subsequent {@code onRegState(true)} only cleared the flag.
+     */
+    @Test
+    public void successDisarmsTheTimerItClearsTheFlagFor() {
+        strategy.scheduleReconnect();
+        assertTrue("Should be pending", strategy.isPending());
+
+        strategy.onSuccess();
+
+        ShadowLooper.runUiThreadTasksIncludingDelayedTasks();
+        assertEquals("a reconnect must not fire after the connection already came up",
+                0, reconnectCount.get());
+        assertFalse(strategy.isPending());
+    }
+
     @Test
     public void testCancel() {
         strategy.scheduleReconnect();
