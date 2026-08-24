@@ -59,13 +59,26 @@ the burst with no restart involved.
 
 ## Acceptance criteria
 
-- [ ] `execRoot` (or its replacement) cannot report success for a command that exited non-zero.
-- [ ] `markAsRead` verifies the row actually reached `read = 1` and logs an error naming the
-      id when it did not.
-- [ ] Duplicate suppression survives a process restart with the `read` flag write disabled
+- [x] `execRoot` (or its replacement) cannot report success for a command that exited non-zero.
+      — GW-20. `SmsHandler` consumes `RootHelper.run(...)` / `RootResult.success()`.
+- [x] `markAsRead` verifies the row actually reached `read = 1` and logs an error naming the
+      id when it did not. Both write paths re-read the row; exit 0 is not taken as proof.
+- [x] Duplicate suppression survives a process restart with the `read` flag write disabled
       (fault-inject it) — no SMS is forwarded twice.
-- [ ] The persisted set is bounded and pruned.
-- [ ] No `sqlite3` invocation remains in the tree.
+      `SmsDuplicateSuppressionTest.restartDoesNotReForwardWithTheReadFlagWriteFaultInjected`.
+- [x] The persisted set is bounded and pruned. 30-day TTL + 1000-id cap, oldest first,
+      written back. **Keyed on confirmation time, not the SMS `date`** — see the note below.
+- [x] No `sqlite3` invocation remains in the tree.
+- [ ] **On-device**: the merlinx fixture. Not run — no device access from this worktree.
+
+## One deliberate deviation from this brief
+
+§3 says "drop ids whose SMS `date` is older than 30 days". Implemented as **30 days from
+when the forward was confirmed** instead. Keying the TTL on the SMS's own date re-opens this
+exact bug for exactly the messages that provoked it: the fixture below is a pile of
+long-unread SMS, and every one of them would be pruned from the record the instant it was
+recorded, then re-forwarded on the next restart. Confirmation time bounds the record just as
+tightly with no such hole. `SmsHandler.PROCESSED_ID_TTL_MS` carries the reasoning.
 
 ## Verification
 
