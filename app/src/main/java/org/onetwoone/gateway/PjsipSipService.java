@@ -1507,6 +1507,19 @@ public class PjsipSipService extends Service implements SipCallService {
     @ControlThread
     private boolean silentBridgeReported = false;
 
+    /**
+     * When the receive leg was first seen carrying nothing but digital silence; 0 = not
+     * armed. The transmit-leg detector above cannot see this failure: pjmedia keeps
+     * requesting frames at 50 fps whether or not the SIP stream delivers any audio, so
+     * {@code framesRequested} climbs normally through a call the far end never hears.
+     */
+    @ControlThread
+    private long bridgeSilentSinceWallMs = 0L;
+
+    /** Latch: one dump per deaf-receive-leg episode. */
+    @ControlThread
+    private boolean bridgeDeafReported = false;
+
     @ControlThread
     private long terminatingSinceWallMs = 0L;
 
@@ -1517,7 +1530,11 @@ public class PjsipSipService extends Service implements SipCallService {
     @ControlThread
     private long watchdogTerminations = 0L;
 
-    /** Silent-bridge episodes diagnosed. Detection only, so this can climb with no terminations. */
+    /**
+     * Silent-bridge episodes diagnosed, on <em>either</em> leg - a transmit leg pjmedia has
+     * stopped pulling from, or a receive leg that has delivered nothing but digital silence.
+     * Detection only, so this can climb with no terminations.
+     */
     @ControlThread
     private long silentBridgeEpisodes = 0L;
 
@@ -1743,23 +1760,40 @@ public class PjsipSipService extends Service implements SipCallService {
             resetSilentBridgeWatch();
             return;
         }
-        if (!noteBridgeFrames(port.getFramesRequested(), nowWallMs)) {
-            return;
-        }
-
-        silentBridgeEpisodes++;
-        String finding = "bridged and streaming, but pjmedia has requested no frame for "
-                + ((nowWallMs - bridgeFramesStalledSinceWallMs) / 1000) + " s"
-                + " (framesRequested=" + bridgeFramesRequested + ")";
-        recordFinding(finding);
-        Log.e(TAG, "INVARIANT: " + finding + " - the transmit leg is dead. Detection only,"
-                + " the call is left up (GW-25 section 2).");
-
-        GatewayCall sipCall = callManager.getCurrentSipCall();
-        if (sipCall != null && !sipCall.isDisposed()) {
+        if (noteBridgeFrames(port.getFramesRequested(), nowWallMs)) {
+            silentBridgeEpisodes++;
+            String finding = "bridged and streaming, but pjmedia has requested no frame for "
+                    + ((nowWallMs - bridgeFramesStalledSinceWallMs) / 1000) + " s"
+                    + " (framesRequested=" + bridgeFramesRequested + ")";
+            recordFinding(finding);
+            Log.e(TAG, "INVARIANT: " + finding + " - the transmit leg is dead. Detection only,"
+                    + " the call is left up (GW-25 section 2).");
             // The conference-wiring half of this dump is the part nothing else logs, and is
             // what says whether local->call(TX to SIP) is false.
-            SipDiagnostics.dumpAndLog(sipCall, port, "watchdog: silent bridge");
+            dumpBridge(port, "watchdog: silent bridge");
+        }
+
+        if (noteBridgeSilence(port.getSipToGsmPeak(), nowWallMs)) {
+            silentBridgeEpisodes++;
+            String finding = "bridged and streaming, but every frame from the SIP leg has been"
+                    + " digital silence for "
+                    + ((nowWallMs - bridgeSilentSinceWallMs) / 1000) + " s (sipToGsmPeak=0)";
+            recordFinding(finding);
+            Log.e(TAG, "INVARIANT: " + finding + " - the receive leg is deaf. Detection only,"
+                    + " the call is left up (GW-25 section 2).");
+            // Here the RTP counters are the point: they separate "no packets arrived" from
+            // "packets arrived and decoded to zeros", and they can only be read while the
+            // call is still live - by teardown the call media is destroyed.
+            dumpBridge(port, "watchdog: deaf receive leg");
+        }
+    }
+
+    /** The shared half of both silent-leg findings. */
+    @ControlThread
+    private void dumpBridge(GsmAudioPort port, String label) {
+        GatewayCall sipCall = callManager.getCurrentSipCall();
+        if (sipCall != null && !sipCall.isDisposed()) {
+            SipDiagnostics.dumpAndLog(sipCall, port, label);
         }
     }
 
@@ -1781,6 +1815,37 @@ public class PjsipSipService extends Service implements SipCallService {
         if (silentBridgeReported) return false;
         if (nowWallMs - bridgeFramesStalledSinceWallMs < SILENT_BRIDGE_STALL_MS) return false;
         silentBridgeReported = true;
+        return true;
+    }
+
+    /**
+     * Silence bookkeeping for the receive leg, split out for the same reason as
+     * {@link #noteBridgeFrames}.
+     *
+     * <p>{@code sipToGsmPeak} is a <em>session</em> high-water mark, and that choice is what
+     * makes this safe to run unattended: once the call has carried one audible frame the peak
+     * stays non-zero for the rest of the session, so a talker pausing - or a codec with DTX
+     * emitting nothing between words - can never trip it. The price is that it detects "this
+     * call has never received any audio", not "audio stopped mid-call". That is the failure
+     * worth an automatic dump; the mid-call variant is visible in the per-window {@code peak=}
+     * on the periodic {@code onFrameReceived} line.
+     *
+     * @return true exactly once per episode, on the first tick past the dwell
+     */
+    @ControlThread
+    boolean noteBridgeSilence(int sipToGsmPeak, long nowWallMs) {
+        if (sipToGsmPeak > 0) {
+            bridgeSilentSinceWallMs = 0L;
+            bridgeDeafReported = false;
+            return false;
+        }
+        if (bridgeDeafReported) return false;
+        if (bridgeSilentSinceWallMs == 0L) {
+            bridgeSilentSinceWallMs = nowWallMs;      // arm the clock on first observation
+            return false;
+        }
+        if (nowWallMs - bridgeSilentSinceWallMs < SILENT_BRIDGE_STALL_MS) return false;
+        bridgeDeafReported = true;
         return true;
     }
 
@@ -1846,6 +1911,8 @@ public class PjsipSipService extends Service implements SipCallService {
         bridgeFramesRequested = -1L;
         bridgeFramesStalledSinceWallMs = 0L;
         silentBridgeReported = false;
+        bridgeSilentSinceWallMs = 0L;
+        bridgeDeafReported = false;
     }
 
     @ControlThread

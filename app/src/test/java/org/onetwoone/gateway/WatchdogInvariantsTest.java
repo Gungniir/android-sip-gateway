@@ -497,6 +497,48 @@ public class WatchdogInvariantsTest {
                 0L, t0 + PjsipSipService.SILENT_BRIDGE_STALL_MS * 10));
     }
 
+    /**
+     * The receive-leg half. It exists because the frame counters cannot see this failure:
+     * pjmedia keeps requesting frames at 50 fps whether or not the SIP stream carries any
+     * audio, so a call the far end never hears looks perfectly healthy to
+     * {@code noteBridgeFrames}. Observed on lavender 2026-08-25: every SIP&rarr;GSM call had
+     * {@code gsmToSipPeak} in the thousands and {@code sipToGsmPeak} at exactly 0.
+     */
+    @Test
+    public void theDeafReceiveLegDumpIsLatchedToOncePerEpisode() {
+        long t0 = 1_000_000L;
+
+        assertFalse("first observation only arms the clock", service.noteBridgeSilence(0, t0));
+        assertFalse("still inside the dwell", service.noteBridgeSilence(
+                0, t0 + PjsipSipService.SILENT_BRIDGE_STALL_MS - 1));
+
+        assertTrue("the silence has lasted long enough", service.noteBridgeSilence(
+                0, t0 + PjsipSipService.SILENT_BRIDGE_STALL_MS));
+
+        assertFalse("but only once per episode", service.noteBridgeSilence(
+                0, t0 + PjsipSipService.SILENT_BRIDGE_STALL_MS * 10));
+    }
+
+    /**
+     * The false-positive guard, and the reason the detector reads a <em>session</em> peak
+     * rather than a per-window one: a talker who pauses - or a codec emitting nothing between
+     * words - must never look like a dead leg. One audible frame immunises the call.
+     */
+    @Test
+    public void oneAudibleFrameImmunisesTheCallAgainstTheDeafDetector() {
+        long t = 1_000_000L;
+
+        assertFalse(service.noteBridgeSilence(0, t));
+        assertFalse("audio arrived - the clock is disarmed",
+                service.noteBridgeSilence(4321, t + 1_000L));
+
+        // A long quiet stretch afterwards: the session peak stays non-zero, so nothing fires.
+        for (int tick = 1; tick <= 20; tick++) {
+            assertFalse("a pause in speech is not a deaf leg",
+                    service.noteBridgeSilence(4321, t + 1_000L + tick * 3_000L));
+        }
+    }
+
     /** A counter that is moving is a bridge that is working, however slowly. */
     @Test
     public void aMovingFrameCounterNeverTripsTheSilentBridgeDetector() {
