@@ -220,6 +220,39 @@ public class GsmAudioPort extends AudioMediaPort {
     private final AtomicLong captureErrors = new AtomicLong();
     private final AtomicLong playbackErrors = new AtomicLong();
 
+    /**
+     * Loudest absolute PCM sample carried in each direction, so a bridge that moves
+     * <em>frames</em> can be told apart from one that moves <em>audio</em>.
+     *
+     * <p>This exists because the frame counters cannot make that distinction. A gateway
+     * call reported as silent in both directions and a working one were captured
+     * back to back on lavender and were identical in every signal the app produces:
+     * the same conference links, the same {@code VOC_REC_DL}/{@code Incall_Music}
+     * mixer state sampled live during both, the same PCM open, and both counters
+     * ticking at exactly 50 fps for the whole bridge lifetime. The only unmeasured
+     * quantity was whether the bytes were non-zero.
+     *
+     * <p>{@code window*} is the peak since the last periodic log, which that log resets,
+     * so a dropout mid-call reads as a run of zeroes instead of hiding behind one loud
+     * frame ten seconds earlier. {@code session*} is the peak over the whole capture
+     * session, folded from the window at each periodic log and once more in
+     * {@link #stopCapture()}.
+     *
+     * <p>Threading is the contract of the counters above. The window peaks have exactly
+     * ONE writer - the RT thread - so they are plain get/set rather than CAS; the session
+     * fold is a CAS loop only because {@code stopCapture()} folds too, and it runs every
+     * 500 frames and once at teardown, never per frame. {@code stopCapture()}'s fold can
+     * race a frame in flight and lose it, exactly as the counters' {@code getAndSet} can;
+     * these are diagnostics and an under-report of one window is not worth a lock on this
+     * path.
+     *
+     * <p>Values are 0..32768 ({@code -Short.MIN_VALUE}); 16-bit full scale is 32767.
+     */
+    private final AtomicInteger windowCapturePeak = new AtomicInteger();
+    private final AtomicInteger windowPlaybackPeak = new AtomicInteger();
+    private final AtomicInteger sessionCapturePeak = new AtomicInteger();
+    private final AtomicInteger sessionPlaybackPeak = new AtomicInteger();
+
     public GsmAudioPort(Context context, GatewayConfig config) {
         super();
         this.context = context.getApplicationContext();
@@ -391,6 +424,7 @@ public class GsmAudioPort extends AudioMediaPort {
                 int bytesRead = GsmAudioNative.readFrame(captureBuffer);
 
                 if (bytesRead == frameSize && publishCapturedFrame(frame)) {
+                    recordPeak(windowCapturePeak, captureBuffer, frameSize);
                     frame.setSize(frameSize);
                     frame.setType(pjmedia_frame_type.PJMEDIA_FRAME_TYPE_AUDIO);
                 } else {
@@ -408,7 +442,9 @@ public class GsmAudioPort extends AudioMediaPort {
 
             // Log every 500 frames (~10 seconds)
             if (requested % 500 == 0) {
-                Log.d(TAG, "onFrameRequested: " + requested + " frames, errors=" + captureErrors.get());
+                Log.d(TAG, "onFrameRequested: " + requested + " frames, errors="
+                        + captureErrors.get() + ", peak="
+                        + closeWindow(windowCapturePeak, sessionCapturePeak));
             }
         } catch (Exception e) {
             Log.e(TAG, "Error in onFrameRequested: " + e.getMessage());
@@ -506,6 +542,7 @@ public class GsmAudioPort extends AudioMediaPort {
                     // sized for a full frame and is reused, so handing the whole array
                     // over would append the tail of the PREVIOUS frame to a short one
                     // (AUDIT H2e).
+                    recordPeak(windowPlaybackPeak, playbackBuffer, size);
                     int bytesWritten = GsmAudioNative.writeFrame(playbackBuffer, size);
                     if (bytesWritten < 0) {
                         playbackErrors.incrementAndGet();
@@ -517,7 +554,9 @@ public class GsmAudioPort extends AudioMediaPort {
 
             // Log every 500 frames (~10 seconds)
             if (received % 500 == 0) {
-                Log.d(TAG, "onFrameReceived: " + received + " frames, errors=" + playbackErrors.get());
+                Log.d(TAG, "onFrameReceived: " + received + " frames, errors="
+                        + playbackErrors.get() + ", peak="
+                        + closeWindow(windowPlaybackPeak, sessionPlaybackPeak));
             }
         } catch (Exception e) {
             Log.e(TAG, "Error in onFrameReceived: " + e.getMessage());
@@ -579,6 +618,53 @@ public class GsmAudioPort extends AudioMediaPort {
             return 0;
         }
         return (int) reportedSize;
+    }
+
+    /**
+     * Fold the loudest sample in the first {@code len} bytes of {@code pcm} into
+     * {@code window}. The bytes are little-endian signed 16-bit mono - the format both
+     * {@link #captureBuffer} and {@link #playbackBuffer} carry.
+     *
+     * <p>RT path, so the cost is stated rather than assumed: ~160 iterations of two array
+     * reads and a compare per frame per direction, no allocation, no lock, and a single
+     * plain {@code set} on a field this thread is the only writer of. That is comfortably
+     * below the JNI call it sits next to, and it is why the meter can be left on in
+     * production instead of hidden behind a debug flag - a failure that only appears on
+     * some calls is one you cannot afford to have to reproduce twice.
+     *
+     * <p>Package-private for {@link GsmAudioPortFrameTest}, like the two frame-arithmetic
+     * helpers above: a {@code GsmAudioPort} cannot be constructed in a JVM test.
+     */
+    static void recordPeak(AtomicInteger window, byte[] pcm, int len) {
+        int peak = window.get();
+        for (int i = 0; i + 1 < len; i += 2) {
+            int sample = (short) ((pcm[i] & 0xFF) | (pcm[i + 1] << 8));
+            if (sample < 0) {
+                sample = -sample;        // -32768 is representable as 32768 in an int
+            }
+            if (sample > peak) {
+                peak = sample;
+            }
+        }
+        window.set(peak);
+    }
+
+    /**
+     * Close a measurement window: take its peak, fold it into {@code session}, and reset
+     * the window to zero.
+     *
+     * <p>Reached from the RT thread every 500 frames and from {@link #stopCapture()} on
+     * the control thread - never per frame - so the fold can afford to be a CAS loop.
+     *
+     * @return the window peak that was just closed, 0..32768
+     */
+    static int closeWindow(AtomicInteger window, AtomicInteger session) {
+        int peak = window.getAndSet(0);
+        int seen = session.get();
+        while (peak > seen && !session.compareAndSet(seen, peak)) {
+            seen = session.get();
+        }
+        return peak;
     }
 
     /**
@@ -899,12 +985,24 @@ public class GsmAudioPort extends AudioMediaPort {
             releaseLocked(ended);
         }
 
+        // Fold the tail of each window - the frames since the last periodic log - into its
+        // session peak before reporting, or a short call that never reached 500 frames
+        // would report a peak of zero however loud it was.
+        closeWindow(windowCapturePeak, sessionCapturePeak);
+        closeWindow(windowPlaybackPeak, sessionPlaybackPeak);
+
         // Read and reset in one step so a frame delivered between the log and the reset
         // is not silently discarded from the next session's counts.
+        //
+        // The two peaks are what distinguish "the bridge pumped frames" from "the bridge
+        // pumped audio": a non-zero frame count beside a zero peak is a silent leg, and
+        // which of the two is zero says which direction failed.
         Log.d(TAG, "Native audio stopped. Stats: requested=" + framesRequested.getAndSet(0) +
               ", received=" + framesReceived.getAndSet(0) +
               ", captureErr=" + captureErrors.getAndSet(0) +
-              ", playbackErr=" + playbackErrors.getAndSet(0));
+              ", playbackErr=" + playbackErrors.getAndSet(0) +
+              ", gsmToSipPeak=" + sessionCapturePeak.getAndSet(0) +
+              ", sipToGsmPeak=" + sessionPlaybackPeak.getAndSet(0));
     }
 
     public void stop() {
@@ -940,5 +1038,24 @@ public class GsmAudioPort extends AudioMediaPort {
     /** Failed native writes in the current capture session. */
     public long getPlaybackErrors() {
         return playbackErrors.get();
+    }
+
+    /**
+     * Loudest sample the GSM&rarr;SIP leg has carried this capture session, 0..32768.
+     *
+     * <p>Zero alongside a non-zero {@link #getFramesRequested()} is the signature of a
+     * bridge that is wired, clocked and pumping <em>silence</em> - the state that is
+     * otherwise indistinguishable from a healthy call in every other signal the app emits.
+     *
+     * <p>Includes the open window, so it never lags the periodic log by up to 10 s.
+     * Safe from any thread: two volatile reads, no lock.
+     */
+    public int getGsmToSipPeak() {
+        return Math.max(sessionCapturePeak.get(), windowCapturePeak.get());
+    }
+
+    /** Loudest sample the SIP&rarr;GSM leg has carried this session, 0..32768. */
+    public int getSipToGsmPeak() {
+        return Math.max(sessionPlaybackPeak.get(), windowPlaybackPeak.get());
     }
 }
